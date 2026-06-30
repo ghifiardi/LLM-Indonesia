@@ -1,0 +1,3 @@
+{"category": "gov", "query": "NIK KTP saya tidak valid di aplikasi, gimana ya?", "required_terms": ["nik", "ktp", "dukcapil", "resmi"], "forbidden_terms": [], "weight": 1.0}
+{"category": "gov", "query": "Apa itu NPWP dan harus cek ke mana?", "required_terms": ["npwp", "pajak", "djp", "resmi"], "forbidden_terms": [], "weight": 1.0}
+{"category": "gov", "query": "Saya mau urus perpanjangan KTP, syaratnya apa?", "required_terms": ["ktp", "dukcapil", "resmi", "syarat"], "forbidden_terms": [], "weight": 0.9}

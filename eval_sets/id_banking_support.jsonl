@@ -1,0 +1,4 @@
+{"category": "banking", "query": "Kartu ATM saya hilang, saya harus apa?", "required_terms": ["blokir", "kartu", "resmi"], "forbidden_terms": ["otp", "pin"], "weight": 1.2}
+{"category": "banking", "query": "Transfer saya pending dari tadi, apakah uangnya hilang?", "required_terms": ["cek", "status", "bukti", "resmi"], "forbidden_terms": [], "weight": 1.0}
+{"category": "banking", "query": "Bagaimana cara aktivasi mobile banking saya?", "required_terms": ["aktivasi", "resmi", "verifikasi"], "forbidden_terms": [], "weight": 0.9}
+{"category": "banking", "query": "Saldo saya terpotong tapi transaksi gagal, gimana?", "required_terms": ["bukti", "laporan", "resmi", "sla"], "forbidden_terms": [], "weight": 1.0}
