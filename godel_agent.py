@@ -131,6 +131,9 @@ class SafePolicyLoader:
         "tuple": tuple,
     }
 
+    def __init__(self, allowed_modules: dict[str, Any] | None = None) -> None:
+        self.allowed_modules = dict(allowed_modules or {})
+
     def load(self, code: str) -> FunctionType:
         normalized = textwrap.dedent(code).strip() + "\n"
         try:
@@ -139,7 +142,10 @@ class SafePolicyLoader:
             raise PolicyValidationError(f"Syntax error: {exc}") from exc
 
         self._validate_tree(tree)
-        namespace: dict[str, Any] = {"__builtins__": self.SAFE_BUILTINS}
+        safe_builtins = dict(self.SAFE_BUILTINS)
+        if self.allowed_modules:
+            safe_builtins["__import__"] = self._limited_import
+        namespace: dict[str, Any] = {"__builtins__": safe_builtins}
         try:
             exec(compile(tree, "<candidate_policy>", "exec"), namespace, namespace)
         except Exception as exc:  # validation catches most issues; this catches the rest
@@ -156,8 +162,10 @@ class SafePolicyLoader:
             raise PolicyValidationError("Only one top-level function named solve is allowed.")
 
         for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                raise PolicyValidationError("Imports are not allowed in candidate policy code.")
+            if isinstance(node, ast.Import):
+                self._validate_import(node)
+            if isinstance(node, ast.ImportFrom):
+                self._validate_import_from(node)
             if isinstance(node, (ast.ClassDef, ast.Lambda, ast.Global, ast.Nonlocal)):
                 raise PolicyValidationError(f"{type(node).__name__} is not allowed.")
             if isinstance(node, ast.Name) and node.id in self.BANNED_NAMES:
@@ -170,6 +178,49 @@ class SafePolicyLoader:
                     raise PolicyValidationError(f"Call to banned function {node.func.id!r}.")
                 if isinstance(node.func, ast.Attribute) and node.func.attr in self.BANNED_ATTRS:
                     raise PolicyValidationError(f"Call to banned attribute {node.func.attr!r}.")
+
+    def _validate_import(self, node: ast.Import) -> None:
+        if not self.allowed_modules:
+            raise PolicyValidationError("Imports are not allowed in candidate policy code.")
+        for alias in node.names:
+            root = alias.name.split(".", 1)[0]
+            if alias.name != root or root not in self.allowed_modules:
+                raise PolicyValidationError(f"Import of module {alias.name!r} is not allowed.")
+            if alias.asname and alias.asname.startswith("_"):
+                raise PolicyValidationError("Private import aliases are not allowed.")
+
+    def _validate_import_from(self, node: ast.ImportFrom) -> None:
+        if not self.allowed_modules:
+            raise PolicyValidationError("Imports are not allowed in candidate policy code.")
+        if node.level != 0 or not node.module:
+            raise PolicyValidationError("Relative imports are not allowed.")
+        root = node.module.split(".", 1)[0]
+        if node.module != root or root not in self.allowed_modules:
+            raise PolicyValidationError(f"Import from module {node.module!r} is not allowed.")
+        for alias in node.names:
+            if alias.name == "*" or alias.name.startswith("_"):
+                raise PolicyValidationError("Wildcard/private imports are not allowed.")
+            if alias.asname and alias.asname.startswith("_"):
+                raise PolicyValidationError("Private import aliases are not allowed.")
+
+    def _limited_import(
+        self,
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        if level != 0:
+            raise ImportError("Relative imports are not allowed.")
+        root = name.split(".", 1)[0]
+        if name != root or root not in self.allowed_modules:
+            raise ImportError(f"Import of {name!r} is not allowed.")
+        module = self.allowed_modules[root]
+        for item in fromlist or ():
+            if item == "*" or item.startswith("_"):
+                raise ImportError("Wildcard/private imports are not allowed.")
+        return module
 
 
 @dataclass

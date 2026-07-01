@@ -100,7 +100,13 @@ def make_indonesian_phone_normalizer_env() -> CodeTaskEnvironment:
     return CodeTaskEnvironment(
         cases=cases,
         kb={
-            "goal": "Normalize Indonesian phone numbers to +62 format; return empty string for invalid input.",
+            "goal": (
+                "Normalize Indonesian phone numbers to +62 format. "
+                "Remove all non-digit characters first. If fewer than 7 digits remain, return ''. "
+                "If digits start with '62', return '+' + digits. "
+                "If digits start with '0', return '+62' + digits[1:]. "
+                "Otherwise return ''."
+            ),
             "country_code": "+62",
         },
         task_name="indonesian_phone_normalizer",

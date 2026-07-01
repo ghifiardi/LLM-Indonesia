@@ -9,6 +9,8 @@ from .dataset_env import (
     split_cases_for_holdout,
 )
 from .code_agent_env import CodeCase, CodeTaskEnvironment, make_indonesian_phone_normalizer_env
+from .code_llm_mutator import CodeLLMMutationProvider, VisibleCodeExample
+from .code_task_io import CodeTaskSpecError, build_code_task, load_code_task
 from .llm_mutator import (
     LLMMutationProvider,
     MockTransport,
@@ -29,7 +31,12 @@ __all__ = [
     "split_cases_for_holdout",
     "CodeCase",
     "CodeTaskEnvironment",
+    "CodeLLMMutationProvider",
+    "CodeTaskSpecError",
+    "build_code_task",
+    "load_code_task",
     "make_indonesian_phone_normalizer_env",
+    "VisibleCodeExample",
     "LLMMutationProvider",
     "MockTransport",
     "OpenAICompatibleTransport",

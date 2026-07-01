@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
+import tempfile
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
 
 from .dataset_env import (
     DatasetSupportEnvironment,
@@ -11,7 +16,9 @@ from .dataset_env import (
     split_cases_for_holdout,
 )
 from .code_agent_env import make_indonesian_phone_normalizer_env
+from .code_llm_mutator import CodeLLMMutationProvider
 from .code_mutator import RuleBasedCodeMutator
+from .code_task_io import load_code_task
 from .demo_indonesia_support import INITIAL_POLICY
 from .godel_agent import Action, GodelAgent, PolicyValidationError, SafePolicyLoader
 from .indonesia_support_env import IndonesiaSupportEnvironment
@@ -21,8 +28,10 @@ from .llm_mutator import (
     extract_solve_code,
 )
 from .rule_based_mutator import RuleBasedIndonesianSupportMutator
+from .run_code_agent import main as run_code_agent_main
 
 EVAL_DIR = os.path.join(os.path.dirname(__file__), "eval_sets")
+TASK_DIR = os.path.join(os.path.dirname(__file__), "tasks")
 
 
 def test_rule_based_demo_reaches_perfect_score() -> None:
@@ -43,6 +52,16 @@ def test_sandbox_rejects_imports() -> None:
     except PolicyValidationError:
         return
     raise AssertionError("Expected PolicyValidationError for import")
+
+
+def test_sandbox_can_allow_whitelisted_re_import() -> None:
+    code = (
+        "import re\n"
+        "def solve(query, kb):\n"
+        "    return re.sub('[^0-9]', '', str(query))\n"
+    )
+    fn = SafePolicyLoader(allowed_modules={"re": re}).load(code)
+    assert fn("a1-b2", {}) == "12"
 
 
 def test_sandbox_rejects_dunder_attr() -> None:
@@ -168,9 +187,73 @@ def test_local_only_code_agent_reaches_perfect_score() -> None:
     assert result.combined_score == 1.0, result
 
 
+def test_code_llm_provider_generates_candidate_from_transport() -> None:
+    response = (
+        "Use digit extraction, validate length, and normalize Indonesia prefixes.\n```python\n"
+        "def solve(query, kb):\n"
+        "    digits = ''\n"
+        "    for ch in str(query):\n"
+        "        if ch >= '0' and ch <= '9':\n"
+        "            digits = digits + ch\n"
+        "    if len(digits) < 7:\n"
+        "        return ''\n"
+        "    if digits.startswith('62'):\n"
+        "        return '+' + digits\n"
+        "    if digits.startswith('0'):\n"
+        "        return '+62' + digits[1:]\n"
+        "    return ''\n"
+        "```\n"
+    )
+    initial = "def solve(query, kb):\n    return str(query)\n"
+    env = make_indonesian_phone_normalizer_env()
+    agent = GodelAgent(
+        policy_code=initial,
+        environment=env,
+        mutation_provider=CodeLLMMutationProvider.from_environment(
+            env=env,
+            transport=MockTransport(responses=[response]),
+            max_iterations=2,
+        ),
+        max_depth=2,
+    )
+    result = agent.run()
+    assert result.combined_score == 1.0, result
+
+
+def test_code_task_json_loader() -> None:
+    env, allowed_imports = load_code_task(
+        os.path.join(TASK_DIR, "indonesian_phone_normalizer.json")
+    )
+    assert env.task_name == "indonesian_phone_normalizer"
+    assert allowed_imports == ("re",)
+    assert len(env.cases) == 7
+    assert "Normalize Indonesian phone numbers" in env.kb["goal"]
+
+
+def test_operational_cli_dry_run_writes_solution() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = Path(tmpdir) / "solve.py"
+        with redirect_stdout(StringIO()):
+            exit_code = run_code_agent_main(
+                [
+                    os.path.join(TASK_DIR, "indonesian_phone_normalizer.json"),
+                    "--dry-run",
+                    "--min-score",
+                    "0.0",
+                    "--out",
+                    str(out_path),
+                    "--quiet",
+                ]
+            )
+        assert exit_code == 0
+        text = out_path.read_text(encoding="utf-8")
+        assert "def solve" in text
+
+
 TESTS = [
     test_rule_based_demo_reaches_perfect_score,
     test_sandbox_rejects_imports,
+    test_sandbox_can_allow_whitelisted_re_import,
     test_sandbox_rejects_dunder_attr,
     test_regression_rolls_back,
     test_dataset_loads_all_categories,
@@ -179,6 +262,9 @@ TESTS = [
     test_llm_mutator_offline_improves,
     test_llm_mutator_survives_transport_failure,
     test_local_only_code_agent_reaches_perfect_score,
+    test_code_llm_provider_generates_candidate_from_transport,
+    test_code_task_json_loader,
+    test_operational_cli_dry_run_writes_solution,
 ]
 
 

@@ -26,6 +26,7 @@ OpenAI-compatible endpoint (Ollama / vLLM / llama.cpp), but is never required.
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Running the demos](#running-the-demos)
+- [Operational code-generation CLI](#operational-code-generation-cli)
 - [Running the tests](#running-the-tests)
 - [Evaluation sets](#evaluation-sets)
 - [Public / holdout evaluation](#public--holdout-evaluation)
@@ -70,7 +71,7 @@ def solve(query: str, kb: dict) -> str:
 
 Candidate code is parsed to an AST and rejected before execution if it contains any of:
 
-- `import` / `from … import` statements
+- `import` / `from … import` statements, unless you explicitly configure a module whitelist
 - class, `lambda`, `global`, or `nonlocal` definitions
 - dunder attribute access (`__class__`, `__globals__`, `__subclasses__`, …)
 - banned builtins (`eval`, `exec`, `compile`, `open`, `getattr`, `setattr`, `globals`, `__import__`, …)
@@ -79,6 +80,19 @@ Candidate code is parsed to an AST and rejected before execution if it contains 
 What survives validation runs with a **tiny safe-builtins namespace** (`str`, `dict`, `len`, `any`,
 `sorted`, `range`, …) and nothing else — no file I/O, no network, no subprocess, no `eval`/`exec`.
 A candidate that errors, returns the wrong type, or lowers the score is automatically rolled back.
+
+By default, `SafePolicyLoader()` rejects every import. For real code-generation tasks that commonly
+need a tiny standard-library surface, you can opt in to a strict whitelist:
+
+```python
+import re
+from godel_agent_prototype import SafePolicyLoader
+
+loader = SafePolicyLoader(allowed_modules={"re": re})
+```
+
+The live code-generation demo uses that whitelist so a local code model may use `import re`, while
+all other modules remain rejected.
 
 > This is a sandbox for experimentation, not a hardened security boundary. For production use, run
 > candidate updates in a separate process/container, keep signed snapshots and a private holdout
@@ -102,7 +116,7 @@ A candidate that errors, returns the wrong type, or lowers the score is automati
 │ RuleBasedMutator     │                                      │ DatasetSupportEnvironment│
 │ RuleBasedCodeMutator │                                      │ HoldoutDataset…Environment│
 │ LLMMutationProvider ─┼──► Transport ──► OpenAI-compatible   │ CodeTaskEnvironment      │
-│                      │    (Mock | urllib)   local endpoint  │                          │
+│ CodeLLMMutationProv.─┤    (Mock | urllib)   local endpoint  │                          │
 └──────────────────────┘                                      └──────────────────────────┘
                                     │
                                     ▼
@@ -137,6 +151,14 @@ python3 -m godel_agent_prototype.demo_indonesia_support
 
 # Local-only code-agent demo (no LLM)
 python3 -m godel_agent_prototype.demo_code_agent
+
+# Real LLM code-generation agent (requires an OpenAI-compatible endpoint)
+python3 -m godel_agent_prototype.demo_code_llm_agent
+
+# Operational code-agent CLI: JSON task -> saved solve.py
+python3 -m godel_agent_prototype.run_code_agent \
+  godel_agent_prototype/tasks/indonesian_phone_normalizer.json \
+  --out build/solve.py
 
 # LLM-mutator demo, offline mock (no network, no API key)
 python3 -m godel_agent_prototype.demo_llm_mutator
@@ -189,7 +211,40 @@ This mode uses **no LLM at all**. `RuleBasedCodeMutator` proposes successive imp
 Indonesian phone-number normalizer (`POLICY_V1 → V2 → V3`), and the agent keeps each non-regressing
 candidate based on unit-test feedback until it reaches a perfect score. It is the proof that the
 framework can act as a code agent without any hosted/foreign model. For open-ended code generation,
-swap in `LLMMutationProvider` pointed at a local code model, or a search/patch generator.
+use `CodeLLMMutationProvider` pointed at a local code model, or a search/patch generator.
+
+### Real LLM code-generation agent
+
+```bash
+# One-time local model install, if needed
+ollama pull qwen2.5-coder:1.5b
+
+export GODEL_LLM_BASE_URL=http://localhost:11434/v1
+export GODEL_LLM_MODEL=qwen2.5-coder:1.5b
+# export GODEL_LLM_API_KEY=...   # optional for local servers
+python3 -m godel_agent_prototype.demo_code_llm_agent
+```
+
+This is the real code-generation path. It does **not** use `RuleBasedCodeMutator` and does **not**
+use `MockTransport`. It has been tested with Ollama + `qwen2.5-coder:1.5b`.
+`CodeLLMMutationProvider` sends the code task, public examples, current
+`solve()` implementation, and latest unit-test feedback to an OpenAI-compatible model. The model
+generates a new `solve()` function; `GodelAgent` validates it with `SafePolicyLoader`, evaluates it
+with `CodeTaskEnvironment`, and keeps the generated code only if it does not regress.
+
+For this demo, the loader allows only one optional import: `re`. Every other import is still
+rejected before candidate code can run.
+
+Useful knobs:
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `GODEL_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL |
+| `GODEL_LLM_MODEL` | `qwen2.5:3b-instruct` | Model name passed to the endpoint; tested code-demo value: `qwen2.5-coder:1.5b` |
+| `GODEL_LLM_API_KEY` | empty | Optional bearer token |
+| `GODEL_CODE_LLM_TEMPERATURE` | `0.0` | Code-generation temperature |
+| `GODEL_CODE_LLM_MAX_ITERATIONS` | `6` | Max model-generated improvement rounds |
+| `GODEL_CODE_AGENT_MAX_DEPTH` | `6` | Max recursive agent depth |
 
 ### LLM-mutator demo (offline mock)
 
@@ -223,6 +278,76 @@ The live provider calls `/chat/completions` via the standard library only. If th
 provider degrades gracefully — it emits a `think` action carrying the error instead of crashing the
 loop.
 
+## Operational code-generation CLI
+
+Use `run_code_agent.py` when you want an operational agent rather than a fixed demo. It accepts a
+JSON task spec, calls the configured OpenAI-compatible model, validates generated code, runs unit
+tests, writes the best `solve()` implementation to disk, and exits with a machine-readable status.
+
+```bash
+export GODEL_LLM_BASE_URL=http://localhost:11434/v1
+export GODEL_LLM_MODEL=qwen2.5-coder:1.5b
+
+python3 -m godel_agent_prototype.run_code_agent \
+  godel_agent_prototype/tasks/indonesian_phone_normalizer.json \
+  --out build/solve.py
+```
+
+The bundled task spec lives at:
+
+```text
+godel_agent_prototype/tasks/indonesian_phone_normalizer.json
+```
+
+A task spec has this shape:
+
+```json
+{
+  "task_name": "indonesian_phone_normalizer",
+  "goal": "Normalize Indonesian phone numbers to +62 format...",
+  "allowed_imports": ["re"],
+  "kb": {"country_code": "+62"},
+  "cases": [
+    {
+      "query": "0812-3456-7890",
+      "expected": "+6281234567890",
+      "description": "mobile starts with 0"
+    }
+  ]
+}
+```
+
+Operational CLI flags:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--out PATH` | unset | Write the best generated `solve()` source to `PATH` |
+| `--max-depth N` | `6` | Max recursive agent depth |
+| `--max-iterations N` | `6` | Max model-generated improvement rounds |
+| `--temperature X` | `0.0` | Model sampling temperature |
+| `--min-score X` | `1.0` | Required score for success exit code |
+| `--allowed-imports a,b` | task spec value | Override the task spec import whitelist |
+| `--dry-run` | off | Use deterministic offline transport instead of a model call |
+| `--quiet` | off | Print only the final `RESULT` summary |
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | best score reached `--min-score` |
+| `2` | agent ran but stayed below `--min-score` |
+| `3` | bad task spec or usage/setup error |
+
+Offline pipeline check:
+
+```bash
+python3 -m godel_agent_prototype.run_code_agent \
+  godel_agent_prototype/tasks/indonesian_phone_normalizer.json \
+  --dry-run \
+  --min-score 0 \
+  --out /tmp/godel_solve.py
+```
+
 ## Running the tests
 
 ```bash
@@ -239,7 +364,10 @@ The suite verifies that:
 - LLM code-block parsing works;
 - offline LLM mutations improve the dataset score;
 - transport failures do not crash the recursive loop;
-- local-only code-agent mode reaches a perfect unit-test score.
+- local-only code-agent mode reaches a perfect unit-test score;
+- code-generation LLM provider can turn model output into a validated candidate;
+- JSON code-task specs load correctly;
+- the operational CLI can run offline and write a solution file.
 
 ## Evaluation sets
 
@@ -309,7 +437,7 @@ Everything below is exported from the package root (`from godel_agent_prototype 
 | `Action` | frozen dataclass | One step: `name` ∈ `{think, self_inspect, interact, self_update, continue_improve}`, with `rationale` and optional `code`. |
 | `EvaluationResult` | frozen dataclass | Environment feedback: `combined_score`, `public`, `private`, `text_feedback`. |
 | `SelfState` | frozen dataclass | Inspectable snapshot passed to the provider: `iteration`, `best_score`, `current_score`, `policy_code`, `history_tail`, `last_feedback`. |
-| `SafePolicyLoader` | class | `load(code) -> FunctionType`; AST validation + safe-builtins exec. Raises `PolicyValidationError`. |
+| `SafePolicyLoader` | class | `SafePolicyLoader(allowed_modules=None)` then `load(code) -> FunctionType`; AST validation + safe-builtins exec. Imports are rejected by default, or restricted to the explicit `allowed_modules` whitelist. Raises `PolicyValidationError`. |
 | `Environment` | Protocol | `evaluate(policy) -> EvaluationResult`. |
 | `MutationProvider` | Protocol | `propose_actions(state: SelfState) -> list[Action]`. |
 
@@ -325,6 +453,9 @@ Everything below is exported from the package root (`from godel_agent_prototype 
 | `CodeTaskEnvironment` | Unit-test evaluator for a target `solve(query, kb)` function. |
 | `CodeCase` | One executable test (`query`, `expected`, `weight`, `description`). |
 | `make_indonesian_phone_normalizer_env()` | Ready-made example code task. |
+| `load_code_task(path)` | Load a JSON code-task spec into a `CodeTaskEnvironment` plus allowed imports. |
+| `build_code_task(spec)` | Build a code task from an in-memory spec dict. |
+| `CodeTaskSpecError` | Malformed task-spec exception. |
 
 ### Mutation providers
 
@@ -333,6 +464,8 @@ Everything below is exported from the package root (`from godel_agent_prototype 
 | `RuleBasedIndonesianSupportMutator` | `rule_based_mutator.py` | Deterministic offline support mutator. |
 | `RuleBasedCodeMutator` | `code_mutator.py` | Deterministic offline code mutator (phone normalizer). |
 | `LLMMutationProvider` | `llm_mutator.py` | LLM-backed provider; turns a completion into an action sequence. `temperature=0.4`, `max_iterations=6`. |
+| `CodeLLMMutationProvider` | `code_llm_mutator.py` | Real code-generation provider for `CodeTaskEnvironment`; prompts a live OpenAI-compatible model with task examples and unit-test feedback. |
+| `VisibleCodeExample` | `code_llm_mutator.py` | Public example shown to a code-generation model (`query`, `expected`, `description`). |
 | `OpenAICompatibleTransport` | `llm_mutator.py` | `urllib`-based `/chat/completions` client (reads `GODEL_LLM_*` env vars). |
 | `MockTransport` | `llm_mutator.py` | Deterministic transport for offline tests. |
 | `extract_solve_code(text)` | `llm_mutator.py` | Pull the first fenced code block defining `solve()`. |
@@ -354,8 +487,9 @@ There are three viable modes, in increasing order of capability:
 
 1. **No LLM at all.** Use deterministic/search-based mutators like `RuleBasedCodeMutator`. Great for
    narrow code tasks with clear tests; not as creative as a code model.
-2. **Local LLM only.** Use `LLMMutationProvider` with `OpenAICompatibleTransport` pointed at a local
-   server (Ollama, vLLM, llama.cpp). Prompts, code, and data stay on your machine.
+2. **Local LLM only.** Use `CodeLLMMutationProvider` for code tasks, or `LLMMutationProvider` for
+   support-policy tasks, with `OpenAICompatibleTransport` pointed at a local server (Ollama, vLLM,
+   llama.cpp). Prompts, code, and data stay on your machine.
 3. **Indonesian-owned / custom SLM.** Fine-tune or train a small local model for Indonesian/code
    tasks, serve it behind an OpenAI-compatible endpoint, and plug it into `LLMMutationProvider`.
 
@@ -398,13 +532,18 @@ godel_agent_prototype/
 ├── godel_agent.py              # core recursive agent, safe policy loader, rollback
 ├── dataset_env.py              # JSONL Indonesian eval + public/holdout split
 ├── code_agent_env.py           # unit-test environment for code-agent tasks
+├── code_task_io.py             # JSON code-task loader
 ├── indonesia_support_env.py    # original toy hard-coded Indonesian environment
 ├── rule_based_mutator.py       # deterministic offline support mutator
 ├── code_mutator.py             # deterministic offline code mutator
+├── code_llm_mutator.py         # real LLM code-generation provider
 ├── llm_mutator.py              # OpenAI-compatible LLM provider + mock transport
 ├── demo_indonesia_support.py   # rule-based support demo
 ├── demo_code_agent.py          # local-only code-agent demo
+├── demo_code_llm_agent.py      # live LLM code-generation demo
 ├── demo_llm_mutator.py         # LLM-backed demo (offline mock by default)
+├── run_code_agent.py           # operational JSON-task code-agent CLI
 ├── smoke_test.py               # no-dependency test runner
+├── tasks/*.json                # reusable code-generation task specs
 └── eval_sets/*.jsonl           # starter Indonesian eval sets
 ```
