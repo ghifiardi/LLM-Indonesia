@@ -19,6 +19,7 @@ from .dataset_env import (
 from .baselines import baseline_outputs_for_case, keyword_baseline_policy, reference_output_for_case
 from .benchmark_ollama_indonesian import StaticAnswerClient, benchmark_cases
 from .benchmark_ollama_models import benchmark_models, rank_leaderboard
+from . import tantular_launcher
 from .code_agent_env import make_indonesian_phone_normalizer_env
 from .code_llm_mutator import CodeLLMMutationProvider
 from .code_mutator import RuleBasedCodeMutator
@@ -279,6 +280,35 @@ def test_multi_model_leaderboard_ranks_and_survives_bad_model() -> None:
     assert [row["rank"] for row in board] == [1, 2]
 
 
+def test_tantular_launcher_menu_reflects_installed_tags() -> None:
+    original = tantular_launcher.installed_tags
+    try:
+        tantular_launcher.installed_tags = lambda: {"tantular:0.1-id", "tantular:0.1-id-safety"}
+        items = tantular_launcher.build_menu()
+    finally:
+        tantular_launcher.installed_tags = original
+
+    labels = [item.label for item in items]
+    assert "Chat with tantular:0.1-id-safety" in labels
+    assert labels[-1] == "Quit"
+    assert any(item.label == "Run bake-off" for item in items)
+    # Every menu item is actionable.
+    assert all(callable(item.action) for item in items)
+
+
+def test_tantular_launcher_menu_when_no_tags_installed() -> None:
+    original = tantular_launcher.installed_tags
+    try:
+        tantular_launcher.installed_tags = lambda: set()
+        items = tantular_launcher.build_menu()
+    finally:
+        tantular_launcher.installed_tags = original
+
+    labels = [item.label for item in items]
+    assert "Build variants first" in labels
+    assert not any(label.startswith("Chat") for label in labels)
+
+
 def test_recipe_archive_parent_selection_and_mutation() -> None:
     archive = RecipeArchive(seed="test")
     base = seed_recipe()
@@ -346,6 +376,8 @@ TESTS = [
     test_code_task_json_loader,
     test_direct_benchmark_and_recipe_optimizer_dry_run,
     test_multi_model_leaderboard_ranks_and_survives_bad_model,
+    test_tantular_launcher_menu_reflects_installed_tags,
+    test_tantular_launcher_menu_when_no_tags_installed,
     test_recipe_archive_parent_selection_and_mutation,
     test_dgm_recipe_optimizer_dry_run,
     test_operational_cli_dry_run_writes_solution,
