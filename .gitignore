@@ -4,7 +4,8 @@ __pycache__/
 # Office lock files
 ~$*
 
-# Tantular model weights / adapters (large, built locally)
+# Tantular model weights / adapters / generated data (built locally)
 tantular/adapters/
 tantular/weights/
+tantular/data/
 *.gguf

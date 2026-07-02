@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -20,6 +21,11 @@ from .baselines import baseline_outputs_for_case, keyword_baseline_policy, refer
 from .benchmark_ollama_indonesian import StaticAnswerClient, benchmark_cases
 from .benchmark_ollama_models import benchmark_models, rank_leaderboard
 from . import tantular_launcher
+from .tantular_train_lora import (
+    TANTULAR_SYSTEM,
+    build_sft_dataset,
+    prepare_training_data,
+)
 from .code_agent_env import make_indonesian_phone_normalizer_env
 from .code_llm_mutator import CodeLLMMutationProvider
 from .code_mutator import RuleBasedCodeMutator
@@ -309,6 +315,37 @@ def test_tantular_launcher_menu_when_no_tags_installed() -> None:
     assert not any(label.startswith("Chat") for label in labels)
 
 
+def test_lora_sft_dataset_shape_and_system_prompt() -> None:
+    cases = load_cases_from_dir(EVAL_DIR)[:3]
+    dataset = build_sft_dataset(cases)
+    assert len(dataset) == 3
+    record = dataset[0]
+    roles = [m["role"] for m in record["messages"]]
+    assert roles == ["system", "user", "assistant"]
+    assert record["messages"][0]["content"] == TANTULAR_SYSTEM
+    assert record["messages"][1]["content"] == cases[0].query
+    assert record["messages"][2]["content"]  # non-empty reference target
+
+
+def test_lora_prepare_uses_public_split_only() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = Path(tmpdir) / "sft.jsonl"
+        summary = prepare_training_data(EVAL_DIR, out_path, holdout_fraction=0.25)
+
+        all_cases = load_cases_from_dir(EVAL_DIR)
+        public_cases, holdout_cases = split_cases_for_holdout(all_cases, holdout_fraction=0.25)
+        assert summary["train_examples"] == len(public_cases)
+        assert summary["holdout_cases_excluded"] == len(holdout_cases)
+
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == len(public_cases)
+        # No holdout query may leak into the training data.
+        holdout_queries = {case.query for case in holdout_cases}
+        for line in lines:
+            user_turn = next(m for m in json.loads(line)["messages"] if m["role"] == "user")
+            assert user_turn["content"] not in holdout_queries
+
+
 def test_recipe_archive_parent_selection_and_mutation() -> None:
     archive = RecipeArchive(seed="test")
     base = seed_recipe()
@@ -378,6 +415,8 @@ TESTS = [
     test_multi_model_leaderboard_ranks_and_survives_bad_model,
     test_tantular_launcher_menu_reflects_installed_tags,
     test_tantular_launcher_menu_when_no_tags_installed,
+    test_lora_sft_dataset_shape_and_system_prompt,
+    test_lora_prepare_uses_public_split_only,
     test_recipe_archive_parent_selection_and_mutation,
     test_dgm_recipe_optimizer_dry_run,
     test_operational_cli_dry_run_writes_solution,
