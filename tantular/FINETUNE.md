@@ -21,6 +21,21 @@ eval_sets/*.jsonl ──prepare──► tantular/data/tantular_sft.jsonl
    tantular:0.1-id-lora ──► bake-off vs tantular:0.1-id
 ```
 
+## 0. (Recommended) Expand the data first
+
+17 public cases overfit at any size. Augment by paraphrasing each public query
+with a local model (holdout untouched):
+
+```bash
+python3 -m godel_agent_prototype.tantular_augment --variants 8 --model qwen2.5:7b \
+    --out godel_agent_prototype/tantular/data/tantular_sft_aug.jsonl
+# -> ~150 examples; then train with --train-file <that path>
+```
+
+A CJK filter drops non-Indonesian leakage (Qwen sometimes emits Chinese). This
+still only diversifies *phrasings* of 17 answers — for production, add real
+transcripts, not just paraphrases.
+
 ## 1. Prepare the SFT dataset (no ML deps)
 
 ```bash

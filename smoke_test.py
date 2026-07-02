@@ -26,6 +26,7 @@ from .tantular_train_lora import (
     build_sft_dataset,
     prepare_training_data,
 )
+from .tantular_augment import parse_variants
 from .code_agent_env import make_indonesian_phone_normalizer_env
 from .code_llm_mutator import CodeLLMMutationProvider
 from .code_mutator import RuleBasedCodeMutator
@@ -327,6 +328,22 @@ def test_lora_sft_dataset_shape_and_system_prompt() -> None:
     assert record["messages"][2]["content"]  # non-empty reference target
 
 
+def test_augment_parse_variants_cleans_and_dedups() -> None:
+    text = (
+        "1. Kartu ATM saya hilang, gimana?\n"
+        "2) ATM saya lenyap, harus apa?\n"
+        "- Kartu debit saya hilang nih\n"
+        "Kartu ATM saya hilang, gimana?\n"  # duplicate of #1
+        "ok\n"  # too short, dropped
+    )
+    variants = parse_variants(text, limit=10)
+    assert "Kartu ATM saya hilang, gimana?" in variants
+    assert "ATM saya lenyap, harus apa?" in variants
+    assert "Kartu debit saya hilang nih" in variants
+    assert len(variants) == 3  # dedup + min-length filter
+    assert all(not v[0].isdigit() for v in variants)
+
+
 def test_lora_prepare_uses_public_split_only() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = Path(tmpdir) / "sft.jsonl"
@@ -416,6 +433,7 @@ TESTS = [
     test_tantular_launcher_menu_reflects_installed_tags,
     test_tantular_launcher_menu_when_no_tags_installed,
     test_lora_sft_dataset_shape_and_system_prompt,
+    test_augment_parse_variants_cleans_and_dedups,
     test_lora_prepare_uses_public_split_only,
     test_recipe_archive_parent_selection_and_mutation,
     test_dgm_recipe_optimizer_dry_run,

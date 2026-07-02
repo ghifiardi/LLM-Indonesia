@@ -188,25 +188,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--prepare-only", action="store_true", help="Write the SFT dataset and exit (no ML deps).")
+    parser.add_argument(
+        "--train-file",
+        help="Train on this pre-made SFT JSONL (e.g. an augmented set) instead of regenerating from the eval set.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
 
-    summary = prepare_training_data(
-        args.eval_dir, args.out_data, args.holdout_fraction, args.seed
-    )
-    print(
-        f"prepared {summary['train_examples']} training examples "
-        f"(public={summary['public_cases']}, holdout excluded={summary['holdout_cases_excluded']}) "
-        f"-> {summary['out_path']}"
-    )
+    if args.train_file:
+        n = sum(1 for _ in open(args.train_file, encoding="utf-8"))
+        print(f"training on pre-made file {args.train_file} ({n} examples)")
+        data_path: str = args.train_file
+    else:
+        summary = prepare_training_data(
+            args.eval_dir, args.out_data, args.holdout_fraction, args.seed
+        )
+        print(
+            f"prepared {summary['train_examples']} training examples "
+            f"(public={summary['public_cases']}, holdout excluded={summary['holdout_cases_excluded']}) "
+            f"-> {summary['out_path']}"
+        )
+        data_path = summary["out_path"]
+
     if args.prepare_only:
         return 0
 
     train_adapter(
-        data_path=summary["out_path"],
+        data_path=data_path,
         adapter_dir=args.adapter_dir,
         base_model=args.base_model,
         epochs=args.epochs,
