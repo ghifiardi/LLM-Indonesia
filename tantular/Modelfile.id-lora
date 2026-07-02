@@ -12,8 +12,9 @@
 
 FROM tantular:0.1-base
 
-# GGUF adapter (llama.cpp) or a PEFT/safetensors adapter directory.
-ADAPTER ./tantular/adapters/tantular-id-lora
+# GGUF adapter produced by tantular/FINETUNE.md (convert_lora_to_gguf.py).
+# Path is relative to this Modelfile's directory (tantular/).
+ADAPTER ./adapters/tantular-id-lora.gguf
 
 PARAMETER temperature 0
 PARAMETER num_predict 180

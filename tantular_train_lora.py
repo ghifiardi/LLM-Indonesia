@@ -154,7 +154,7 @@ def train_adapter(
         learning_rate=learning_rate,
         logging_steps=5,
         save_strategy="no",
-        max_seq_length=max_seq_len,
+        max_length=max_seq_len,
         dataset_text_field="text",
         report_to=[],
     )
