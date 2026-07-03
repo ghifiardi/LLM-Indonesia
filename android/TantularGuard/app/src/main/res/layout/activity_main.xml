@@ -100,6 +100,36 @@
                     android:textAllCaps="false"
                     android:textColor="@color/ink" />
             </LinearLayout>
+
+            <CheckBox
+                android:id="@+id/slmToggle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/slm_toggle"
+                android:textColor="@color/ink"
+                android:textSize="15sp" />
+
+            <EditText
+                android:id="@+id/slmEndpoint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/input_background"
+                android:hint="@string/slm_endpoint_hint"
+                android:inputType="textUri"
+                android:padding="12dp"
+                android:textColor="@color/ink"
+                android:textColorHint="#94A3B8"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/slm_help"
+                android:textColor="@color/muted"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <LinearLayout
@@ -135,6 +165,15 @@
                 android:layout_marginTop="12dp"
                 android:textColor="@color/muted"
                 android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/slmStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="@color/muted"
+                android:textSize="13sp"
+                android:textStyle="italic" />
         </LinearLayout>
 
         <TextView

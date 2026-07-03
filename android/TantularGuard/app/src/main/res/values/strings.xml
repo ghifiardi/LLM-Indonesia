@@ -8,5 +8,15 @@
     <string name="verdict_banner_format">%1$s · risk %2$.3f\n%3$s</string>
     <string name="signals_none">Signals: none</string>
     <string name="signals_format">Signals: %1$s</string>
-    <string name="privacy_note">Stage 1: tidak ada network call; pesan tidak keluar dari perangkat.</string>
+    <string name="privacy_note">Default: tidak ada network call; pesan tidak keluar dari perangkat. Lapisan SLM (opsional) hanya aktif jika Anda menyalakannya di bawah.</string>
+
+    <string name="slm_toggle">Gunakan Tantular SLM (mode lanjutan)</string>
+    <string name="slm_help">Saat aktif, pesan borderline dikirim ke server Tantular (Ollama) yang Anda tentukan untuk klasifikasi kontekstual. Aturan tetap menjadi lapisan keamanan utama; SLM hanya bisa menaikkan level peringatan, tidak menurunkannya.</string>
+    <string name="slm_endpoint_hint">http://10.0.2.2:11434 (emulator → host)</string>
+    <string name="slm_default_endpoint">http://10.0.2.2:11434</string>
+    <string name="slm_model">tantular:0.2-id-7b</string>
+    <string name="slm_checking">Memeriksa dengan Tantular SLM…</string>
+    <string name="slm_used_format">SLM: %1$s → %2$s (%3$d ms)</string>
+    <string name="slm_error_format">SLM tidak tersedia (%1$s). Verdikt memakai aturan lokal saja.</string>
+    <string name="slm_off">SLM nonaktif · hanya aturan lokal (stub).</string>
 </resources>

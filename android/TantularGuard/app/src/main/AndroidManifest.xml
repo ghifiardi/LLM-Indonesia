@@ -2,13 +2,18 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Stage 1 intentionally requests no SMS/notification permissions.
-         It only checks text pasted/shared by the user. -->
+         It only checks text pasted/shared by the user.
+         INTERNET is used ONLY by the opt-in Tantular SLM backend, which calls a
+         user-configured Ollama server. When the SLM toggle is off, no network
+         call is made and the message never leaves the device. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"
         android:icon="@drawable/ic_tantular_guard"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme">
 
         <activity

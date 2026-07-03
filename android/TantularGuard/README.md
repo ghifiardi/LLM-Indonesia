@@ -13,11 +13,39 @@ Stage 1 is intentionally conservative:
 - no SMS permission;
 - no notification-listener permission;
 - no WhatsApp scraping;
-- no network calls;
-- no on-device SLM runtime yet;
-- the user explicitly pastes or shares text into the app.
+- the user explicitly pastes or shares text into the app;
+- **no network by default** — the message never leaves the device unless you
+  explicitly enable the optional Tantular SLM layer (see below).
 
 This makes the first APK demo safer and easier to review.
+
+## Tantular SLM layer (opt-in, implemented)
+
+The SLM reasoning layer is wired in behind the deterministic rules:
+
+```text
+message -> RiskScorer rules (offline, instant BLOCK/WARN/ALLOW)
+        -> if borderline AND "Gunakan Tantular SLM" is ON:
+             POST to your Ollama server /api/chat -> PENIPUAN / MENCURIGAKAN / AMAN
+        -> fuse: the SLM can only ESCALATE, never downgrade the rules' verdict
+```
+
+Files: `SlmClassifier.kt` (interface + `OllamaSlmClassifier` HTTP backend +
+offline `StubSlmClassifier`); fusion lives in `RiskScorer.evaluate(..., slmLabel)`.
+
+**Test it:** run `ollama serve` on a reachable machine, then in the app tick
+*Gunakan Tantular SLM* and set the endpoint:
+
+- Android emulator → host machine: `http://10.0.2.2:11434`
+- Real device → dev machine on same Wi-Fi: `http://<your-ip>:11434`
+
+The model tag is `tantular:0.2-id-7b` (see `strings.xml` → `slm_model`). Only
+borderline messages hit the server; hard fraud gates stay in the rules, so the
+app is safe even if the server is down.
+
+> On-device inference (a quantized GGUF via llama.cpp/MediaPipe, no server) is
+> the production target and is not in this build — the HTTP backend is the
+> testable dev path today.
 
 ## Project layout
 

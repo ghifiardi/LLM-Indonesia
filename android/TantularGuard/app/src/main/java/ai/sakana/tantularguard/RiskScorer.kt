@@ -23,6 +23,7 @@ object RiskScorer {
         val bannerTitle: String,
         val userMessage: String,
         val modelStageUsed: Boolean,
+        val slmLabel: SlmLabel? = null,
     )
 
     /** name -> (weight, trigger terms). Kept in sync with the Python reference. */
@@ -42,7 +43,7 @@ object RiskScorer {
     private const val BLOCK_THRESHOLD = 0.75
     private const val WARN_THRESHOLD = 0.35
 
-    private val HIGH_RISK = setOf("minta_otp", "minta_pin_cvv", "apk_mencurigakan", "remote_access")
+    internal val HIGH_RISK = setOf("minta_otp", "minta_pin_cvv", "apk_mencurigakan", "remote_access")
 
     /** Stage 1 fast scorer: returns (riskScore, matchedSignals). */
     fun score(text: String): Pair<Double, List<String>> {
@@ -60,17 +61,19 @@ object RiskScorer {
     }
 
     /**
-     * Stage 2 stub — stand-in for a quantized on-device Tantular verdict.
-     * On a real device this becomes a local SLM call; here it is a deterministic
-     * label so Stage 1 remains fully offline and testable.
+     * Fuse rules with an SLM verdict.
+     *
+     * @param slmLabel a label from a real [SlmClassifier] (e.g. [OllamaSlmClassifier]).
+     *   When null, the offline [StubSlmClassifier] is consulted iff [useModelStage].
+     *
+     * The SLM is only consulted for borderline messages (score >= WARN) and can
+     * only ESCALATE — it never lowers a verdict the rules already reached.
      */
-    private fun modelStubLabel(matched: List<String>): String = when {
-        matched.any { it in HIGH_RISK } -> "penipuan"
-        matched.isNotEmpty() -> "mencurigakan"
-        else -> "aman"
-    }
-
-    fun evaluate(rawText: String, useModelStage: Boolean = true): GuardVerdict {
+    fun evaluate(
+        rawText: String,
+        useModelStage: Boolean = true,
+        slmLabel: SlmLabel? = null,
+    ): GuardVerdict {
         val text = rawText.trim()
         val (score, matched) = score(text)
 
@@ -81,11 +84,17 @@ object RiskScorer {
         }
 
         var modelUsed = false
-        if (useModelStage && score >= WARN_THRESHOLD) {
-            modelUsed = true
-            when (modelStubLabel(matched)) {
-                "penipuan" -> verdict = Verdict.BLOCK
-                "mencurigakan" -> if (verdict == Verdict.ALLOW) verdict = Verdict.WARN
+        var appliedLabel: SlmLabel? = null
+        if (score >= WARN_THRESHOLD) {
+            val label = slmLabel ?: if (useModelStage) StubSlmClassifier().classify(text).label else null
+            if (label != null) {
+                modelUsed = true
+                appliedLabel = label
+                when (label) {
+                    SlmLabel.PENIPUAN -> verdict = Verdict.BLOCK
+                    SlmLabel.MENCURIGAKAN -> if (verdict == Verdict.ALLOW) verdict = Verdict.WARN
+                    SlmLabel.AMAN, SlmLabel.UNKNOWN -> Unit // never downgrade
+                }
             }
         }
 
@@ -97,6 +106,7 @@ object RiskScorer {
             bannerTitle = title,
             userMessage = message,
             modelStageUsed = modelUsed,
+            slmLabel = appliedLabel,
         )
     }
 
