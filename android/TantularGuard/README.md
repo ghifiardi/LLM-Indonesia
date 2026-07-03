@@ -1,0 +1,161 @@
+# Tantular Guard Android — Stage 1 APK Scaffold
+
+This is the Android scaffold for **Pattern C, Stage 1**:
+
+```text
+paste/share suspicious SMS or WhatsApp text
+  -> local BLOCK / WARN / ALLOW verdict
+  -> user sees a safety warning
+```
+
+Stage 1 is intentionally conservative:
+
+- no SMS permission;
+- no notification-listener permission;
+- no WhatsApp scraping;
+- no network calls;
+- no on-device SLM runtime yet;
+- the user explicitly pastes or shares text into the app.
+
+This makes the first APK demo safer and easier to review.
+
+## Project layout
+
+```text
+android/TantularGuard/
+  settings.gradle.kts
+  build.gradle.kts
+  app/
+    build.gradle.kts
+    src/main/
+      AndroidManifest.xml
+      java/ai/sakana/tantularguard/
+        MainActivity.kt
+        RiskScorer.kt
+      res/layout/activity_main.xml
+      res/values/*.xml
+      res/drawable/*.xml
+```
+
+## How Stage 1 works
+
+1. User opens Tantular Guard.
+2. User pastes a suspicious SMS/WhatsApp text, or shares text into the app via
+   Android's share sheet.
+3. `RiskScorer.kt` runs fully locally.
+4. App shows:
+   - `BLOCK`
+   - `WARN`
+   - `ALLOW`
+5. App also shows matched risk signals, for example:
+   - `minta_otp`
+   - `minta_pin_cvv`
+   - `link_mencurigakan`
+   - `apk_mencurigakan`
+   - `remote_access`
+
+## Build APK
+
+From this directory:
+
+```bash
+cd godel_agent_prototype/android/TantularGuard
+./gradlew assembleDebug
+```
+
+APK output:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+Install to a connected Android device/emulator:
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+If `gradlew` is not present yet, open the project in Android Studio or run Gradle
+from a machine with Android Gradle Plugin support. Android Studio can generate
+the wrapper for this project.
+
+## Test messages
+
+BLOCK:
+
+```text
+Pak, saya CS bank. Untuk batalkan transaksi, tolong sebutkan OTP dan PIN Anda sekarang juga.
+```
+
+BLOCK:
+
+```text
+Selamat! Anda menang undian. Klik link ini dan install APK untuk klaim hadiah.
+```
+
+BLOCK:
+
+```text
+Petugas minta saya pasang AnyDesk untuk remote access agar bisa bantu refund.
+```
+
+ALLOW:
+
+```text
+Jadwal meeting tim besok jam 10 di ruang rapat, jangan lupa bawa laptop.
+```
+
+## How the SLM fits against phishing/scamming messages
+
+Stage 1 is **not yet the SLM**. It is the local safety shell around the future
+SLM:
+
+```text
+message text
+  -> deterministic risk scorer
+  -> if risky/borderline: local Tantular SLM
+  -> deterministic safety floor
+  -> UI warning
+```
+
+Why not rely only on the SLM?
+
+- Scam protection needs predictable behavior.
+- OTP/PIN/CVV/APK/link/remote-access cases must be hard-gated.
+- A small model can add context and natural language explanation, but the app
+  should still have deterministic rules for critical threats.
+
+Future SLM stage:
+
+```text
+RiskScorer says WARN/BLOCK candidate
+  -> run quantized Tantular 1.5B/3B locally
+  -> model classifies: penipuan / mencurigakan / aman
+  -> app combines model verdict with hard safety rules
+```
+
+Recommended first SLM integration target:
+
+- Tantular 1.5B or 3B quantized;
+- local inference runtime such as llama.cpp/MLC/MediaPipe LLM depending on
+  Android constraints;
+- model only runs on suspicious/borderline messages to save battery.
+
+## Future stages
+
+### Stage 2 — SMS opt-in
+
+Add Android SMS permission and evaluate incoming SMS locally. This requires
+careful permission UX and policy review.
+
+### Stage 3 — Notification opt-in
+
+Add `NotificationListenerService` so the user can opt in to checking
+notifications from SMS/WhatsApp/etc. This should be explicit, transparent, and
+privacy-preserving.
+
+### Stage 4 — On-device Tantular SLM
+
+Add local quantized Tantular inference for borderline cases. Keep the rule-based
+safety floor.
+

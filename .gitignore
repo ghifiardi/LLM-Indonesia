@@ -9,3 +9,10 @@ tantular/adapters/
 tantular/weights/
 tantular/data/
 *.gguf
+
+# Android build outputs / machine-specific config
+android/**/build/
+android/**/.gradle/
+android/**/local.properties
+android/**/.idea/
+android/**/*.apk

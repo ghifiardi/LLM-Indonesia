@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Tantular Guard</string>
+    <string name="subtitle">Cek pesan SMS/WhatsApp mencurigakan secara lokal di perangkat.</string>
+    <string name="input_hint">Tempel atau share pesan mencurigakan di sini…</string>
+    <string name="check_message">Periksa Pesan</string>
+    <string name="clear">Bersihkan</string>
+    <string name="verdict_banner_format">%1$s · risk %2$.3f\n%3$s</string>
+    <string name="signals_none">Signals: none</string>
+    <string name="signals_format">Signals: %1$s</string>
+    <string name="privacy_note">Stage 1: tidak ada network call; pesan tidak keluar dari perangkat.</string>
+</resources>
