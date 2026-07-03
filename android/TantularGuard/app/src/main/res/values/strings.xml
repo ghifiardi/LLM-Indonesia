@@ -19,4 +19,10 @@
     <string name="slm_used_format">SLM: %1$s → %2$s (%3$d ms)</string>
     <string name="slm_error_format">SLM tidak tersedia (%1$s). Verdikt memakai aturan lokal saja.</string>
     <string name="slm_off">SLM nonaktif · hanya aturan lokal (stub).</string>
+
+    <string name="slm_backend_ondevice">Di perangkat (on-device, tanpa server)</string>
+    <string name="slm_backend_server">Server Tantular (Ollama)</string>
+    <string name="slm_ondevice_help">Mode on-device menjalankan Tantular sepenuhnya di HP — tanpa internet. Salin model GGUF ke perangkat:\nadb push tantular.gguf /sdcard/Android/data/ai.sakana.tantularguard/files/models/tantular.gguf</string>
+    <string name="slm_ondevice_ready">Model on-device: TERSEDIA (%1$s)</string>
+    <string name="slm_ondevice_missing">Model on-device: belum ada. Lihat petunjuk adb push di atas.</string>
 </resources>

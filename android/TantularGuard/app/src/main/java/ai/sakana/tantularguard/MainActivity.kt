@@ -12,7 +12,9 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioButton
 import android.widget.TextView
+import java.io.File
 
 /**
  * Tantular Guard.
@@ -37,8 +39,14 @@ class MainActivity : Activity() {
     private lateinit var resultCard: LinearLayout
     private lateinit var slmToggle: CheckBox
     private lateinit var slmEndpoint: EditText
+    private lateinit var radioOnDevice: RadioButton
+    private lateinit var radioServer: RadioButton
+    private lateinit var slmOnDeviceStatus: TextView
 
     private var slmRun = 0
+
+    private fun onDeviceModelFile() = File(getExternalFilesDir(null), "models/tantular.gguf")
+    private fun onDeviceClassifier() = OnDeviceSlmClassifier(onDeviceModelFile())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,9 +60,15 @@ class MainActivity : Activity() {
         resultCard = findViewById(R.id.resultCard)
         slmToggle = findViewById(R.id.slmToggle)
         slmEndpoint = findViewById(R.id.slmEndpoint)
+        radioOnDevice = findViewById(R.id.radioOnDevice)
+        radioServer = findViewById(R.id.radioServer)
+        slmOnDeviceStatus = findViewById(R.id.slmOnDeviceStatus)
         verdictMessage.movementMethod = LinkMovementMethod.getInstance()
 
         restorePrefs()
+        refreshOnDeviceStatus()
+        findViewById<android.widget.RadioGroup>(R.id.slmBackendGroup)
+            .setOnCheckedChangeListener { _, _ -> refreshOnDeviceStatus() }
 
         findViewById<Button>(R.id.checkButton).setOnClickListener { evaluateCurrent() }
         findViewById<Button>(R.id.clearButton).setOnClickListener {
@@ -103,10 +117,13 @@ class MainActivity : Activity() {
         val runId = ++slmRun
         if (slmToggle.isChecked && base.modelStageUsed) {
             slmStatus.text = getString(R.string.slm_checking)
-            val endpoint = currentEndpoint()
-            val model = getString(R.string.slm_model)
+            val classifier: SlmClassifier = if (radioOnDevice.isChecked) {
+                onDeviceClassifier()
+            } else {
+                OllamaSlmClassifier(currentEndpoint(), getString(R.string.slm_model))
+            }
             Thread {
-                val result = OllamaSlmClassifier(endpoint, model).classify(text)
+                val result = classifier.classify(text)
                 runOnUiThread {
                     if (isFinishing || runId != slmRun) return@runOnUiThread
                     if (result.ok) {
@@ -167,18 +184,38 @@ class MainActivity : Activity() {
         return typed.ifEmpty { getString(R.string.slm_default_endpoint) }
     }
 
+    /** Reflect on-device model presence; only relevant when on-device is selected. */
+    private fun refreshOnDeviceStatus() {
+        if (!radioOnDevice.isChecked) {
+            slmOnDeviceStatus.text = ""
+            return
+        }
+        val file = onDeviceModelFile()
+        slmOnDeviceStatus.text = if (file.exists() && file.length() > 0L) {
+            getString(R.string.slm_ondevice_ready, file.name)
+        } else {
+            getString(R.string.slm_ondevice_missing)
+        }
+    }
+
     private fun prefs() = getSharedPreferences("tantular_guard", Context.MODE_PRIVATE)
 
     private fun restorePrefs() {
         val p = prefs()
         slmToggle.isChecked = p.getBoolean("slm_on", false)
         slmEndpoint.setText(p.getString("slm_endpoint", getString(R.string.slm_default_endpoint)))
+        if (p.getString("slm_backend", "server") == "ondevice") {
+            radioOnDevice.isChecked = true
+        } else {
+            radioServer.isChecked = true
+        }
     }
 
     private fun savePrefs() {
         prefs().edit()
             .putBoolean("slm_on", slmToggle.isChecked)
             .putString("slm_endpoint", currentEndpoint())
+            .putString("slm_backend", if (radioOnDevice.isChecked) "ondevice" else "server")
             .apply()
     }
 }

@@ -1,5 +1,7 @@
 package ai.sakana.tantularguard
 
+import kotlin.math.round
+
 /**
  * Tantular Guard — Stage 1 on-device risk scorer.
  *
@@ -101,7 +103,9 @@ object RiskScorer {
         val (title, message) = userFacing(verdict)
         return GuardVerdict(
             verdict = verdict,
-            riskScore = String.format("%.3f", score).toDouble(),
+            // Avoid String.format(...).toDouble(): some Android locales format
+            // decimals with a comma, which would crash parsing back to Double.
+            riskScore = round(score * 1000.0) / 1000.0,
             matchedSignals = matched,
             bannerTitle = title,
             userMessage = message,

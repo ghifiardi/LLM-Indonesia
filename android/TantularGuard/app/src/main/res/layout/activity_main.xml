@@ -110,6 +110,48 @@
                 android:textColor="@color/ink"
                 android:textSize="15sp" />
 
+            <RadioGroup
+                android:id="@+id/slmBackendGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="vertical">
+
+                <RadioButton
+                    android:id="@+id/radioOnDevice"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/slm_backend_ondevice"
+                    android:textColor="@color/ink"
+                    android:textSize="14sp" />
+
+                <RadioButton
+                    android:id="@+id/radioServer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:text="@string/slm_backend_server"
+                    android:textColor="@color/ink"
+                    android:textSize="14sp" />
+            </RadioGroup>
+
+            <TextView
+                android:id="@+id/slmOnDeviceStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="@color/muted"
+                android:textSize="12sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:fontFamily="monospace"
+                android:text="@string/slm_ondevice_help"
+                android:textColor="@color/muted"
+                android:textSize="11sp" />
+
             <EditText
                 android:id="@+id/slmEndpoint"
                 android:layout_width="match_parent"

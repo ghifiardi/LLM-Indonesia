@@ -2,6 +2,7 @@ package ai.sakana.tantularguard
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -65,6 +66,57 @@ class StubSlmClassifier : SlmClassifier {
             else -> SlmLabel.AMAN
         }
         return SlmResult(label, label.name, 0L, name, ok = true)
+    }
+}
+
+/**
+ * Seam for a future on-device llama.cpp runtime (JNI into a bundled .so).
+ *
+ * Not compiled into this build. [AVAILABLE] flips to true once the native
+ * library + JNI bindings are added (see README "On-device Tantular"). Keeping
+ * this seam here means the rest of the app is already wired for on-device
+ * inference — only the native layer is missing.
+ */
+object NativeLlama {
+    /** True once libtantular-llama.so + bindings are bundled. */
+    const val AVAILABLE = false
+
+    /**
+     * Run the constrained one-word classification locally and return the raw
+     * model text (e.g. "PENIPUAN"). Returns null until the native layer exists.
+     */
+    fun classifyToken(modelPath: String, systemPrompt: String, message: String): String? {
+        // TODO(on-device): JNI -> llama.cpp: load GGUF at modelPath, run a short
+        // deterministic decode (temp 0, ~8 tokens) with systemPrompt + message.
+        return null
+    }
+}
+
+/**
+ * On-device Tantular backend. Runs the quantized GGUF fully locally — no server,
+ * no network, no IP. Degrades gracefully (never crashes) when the model file or
+ * native runtime is not present yet, so the app stays shippable during rollout.
+ *
+ * Expected model path (adb-pushable, app-private external storage):
+ *   /sdcard/Android/data/ai.sakana.tantularguard/files/models/tantular.gguf
+ */
+class OnDeviceSlmClassifier(private val modelFile: File) : SlmClassifier {
+    override val name = "On-device (llama.cpp)"
+
+    fun modelPresent(): Boolean = modelFile.exists() && modelFile.length() > 0L
+    fun modelPath(): String = modelFile.absolutePath
+
+    override fun classify(message: String): SlmResult {
+        val start = System.currentTimeMillis()
+        if (!modelPresent()) {
+            return SlmResult(SlmLabel.UNKNOWN, "", 0L, name, false, "model on-device belum ada")
+        }
+        if (!NativeLlama.AVAILABLE) {
+            return SlmResult(SlmLabel.UNKNOWN, "", 0L, name, false, "runtime on-device belum terpasang")
+        }
+        val raw = NativeLlama.classifyToken(modelFile.absolutePath, SlmParsing.SYSTEM_PROMPT, message)
+            ?: return SlmResult(SlmLabel.UNKNOWN, "", System.currentTimeMillis() - start, name, false, "inferensi gagal")
+        return SlmResult(SlmParsing.parse(raw), raw.trim(), System.currentTimeMillis() - start, name, ok = true)
     }
 }
 

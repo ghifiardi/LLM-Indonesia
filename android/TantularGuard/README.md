@@ -1,6 +1,6 @@
-# Tantular Guard Android — Stage 1 APK Scaffold
+# Tantular Guard Android — Stage 1 APK
 
-This is the Android scaffold for **Pattern C, Stage 1**:
+This is the Android project for **Pattern C, Stage 1**:
 
 ```text
 paste/share suspicious SMS or WhatsApp text
@@ -8,7 +8,7 @@ paste/share suspicious SMS or WhatsApp text
   -> user sees a safety warning
 ```
 
-Stage 1 is intentionally conservative:
+Stage 1 is intentionally conservative by default:
 
 - no SMS permission;
 - no notification-listener permission;
@@ -19,7 +19,31 @@ Stage 1 is intentionally conservative:
 
 This makes the first APK demo safer and easier to review.
 
-## Tantular SLM layer (opt-in, implemented)
+## Current APK output
+
+A debug APK has been built by Android Studio/Gradle and is available at:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+A convenience copy is also available from the repository reports directory:
+
+```text
+../../reports/tantular-guard-stage1-debug.apk
+```
+
+If you modify source after this point, rebuild from Android Studio or run:
+
+```bash
+./gradlew assembleDebug
+```
+
+Note for this Codex shell: `./gradlew assembleDebug` cannot run here until a
+Java Runtime is available on PATH. Android Studio normally supplies this when
+you build from the IDE.
+
+## Tantular SLM layer (opt-in dev path, implemented)
 
 The SLM reasoning layer is wired in behind the deterministic rules:
 
@@ -43,9 +67,29 @@ The model tag is `tantular:0.2-id-7b` (see `strings.xml` → `slm_model`). Only
 borderline messages hit the server; hard fraud gates stay in the rules, so the
 app is safe even if the server is down.
 
-> On-device inference (a quantized GGUF via llama.cpp/MediaPipe, no server) is
-> the production target and is not in this build — the HTTP backend is the
-> testable dev path today.
+### On-device backend (slot present, native runtime pending)
+
+The app now has a **backend selector**: *Di perangkat (on-device)* vs *Server
+(Ollama)*. The on-device path is fully wired — `OnDeviceSlmClassifier` loads a
+quantized GGUF from app storage and calls `NativeLlama` — but the native
+llama.cpp layer (`NativeLlama.AVAILABLE = false`) is not compiled in yet, so
+on-device selection reports *"runtime on-device belum terpasang"* and safely
+falls back to the rules. This keeps the app shippable while the native `.so`
+is finished.
+
+Drop-in model path (adb-pushable, app-private external storage):
+
+```bash
+adb push tantular.gguf \
+  /sdcard/Android/data/ai.sakana.tantularguard/files/models/tantular.gguf
+```
+
+Remaining work for true on-device: compile llama.cpp for `arm64-v8a` (NDK),
+add JNI bindings, and implement `NativeLlama.classifyToken(...)`. Everything
+above that seam is done.
+
+> The HTTP/Ollama backend is the testable dev path today; on-device is the
+> production target and only needs the native layer dropped into the seam.
 
 ## Project layout
 
@@ -60,6 +104,7 @@ android/TantularGuard/
       java/ai/sakana/tantularguard/
         MainActivity.kt
         RiskScorer.kt
+        SlmClassifier.kt
       res/layout/activity_main.xml
       res/values/*.xml
       res/drawable/*.xml
@@ -103,9 +148,12 @@ Install to a connected Android device/emulator:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-If `gradlew` is not present yet, open the project in Android Studio or run Gradle
-from a machine with Android Gradle Plugin support. Android Studio can generate
-the wrapper for this project.
+If the shell says Java is missing, build from Android Studio instead:
+
+1. File → Open → select `android/TantularGuard`
+2. Wait for Gradle sync
+3. Build → Build Bundle(s) / APK(s) → Build APK(s)
+4. Use the generated `app-debug.apk`
 
 ## Test messages
 
@@ -135,8 +183,7 @@ Jadwal meeting tim besok jam 10 di ruang rapat, jangan lupa bawa laptop.
 
 ## How the SLM fits against phishing/scamming messages
 
-Stage 1 is **not yet the SLM**. It is the local safety shell around the future
-SLM:
+The default Stage 1 path is the local safety shell:
 
 ```text
 message text
@@ -153,14 +200,17 @@ Why not rely only on the SLM?
 - A small model can add context and natural language explanation, but the app
   should still have deterministic rules for critical threats.
 
-Future SLM stage:
+The current dev SLM path is opt-in:
 
 ```text
 RiskScorer says WARN/BLOCK candidate
-  -> run quantized Tantular 1.5B/3B locally
-  -> model classifies: penipuan / mencurigakan / aman
+  -> if "Gunakan Tantular SLM" is enabled, call your configured Ollama endpoint
+  -> Tantular classifies: PENIPUAN / MENCURIGAKAN / AMAN
   -> app combines model verdict with hard safety rules
 ```
+
+The SLM is advisory only: it can escalate, but it cannot downgrade the rule
+floor.
 
 Recommended first SLM integration target:
 
@@ -186,4 +236,3 @@ privacy-preserving.
 
 Add local quantized Tantular inference for borderline cases. Keep the rule-based
 safety floor.
-
