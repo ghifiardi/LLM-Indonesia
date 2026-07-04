@@ -70,26 +70,94 @@ class StubSlmClassifier : SlmClassifier {
 }
 
 /**
- * Seam for a future on-device llama.cpp runtime (JNI into a bundled .so).
+ * On-device llama.cpp runtime bridge (JNI into libtantular-llama.so).
  *
- * Not compiled into this build. [AVAILABLE] flips to true once the native
- * library + JNI bindings are added (see README "On-device Tantular"). Keeping
- * this seam here means the rest of the app is already wired for on-device
- * inference — only the native layer is missing.
+ * The native library is built only when the app is assembled with the
+ * `-PtantularNative=true` Gradle flag AND the llama.cpp sources have been
+ * fetched into `app/src/main/cpp/llama.cpp` (see `scripts/fetch_llama_cpp.sh`).
+ * When the library is not bundled, [AVAILABLE] stays false and the guard falls
+ * back to deterministic local rules — the app never crashes because of a
+ * missing native layer.
+ *
+ * Threading: [classifyToken] is synchronized and holds a single loaded model
+ * handle. It is designed to be called from a background thread (never the UI
+ * thread), matching [OnDeviceSlmClassifier].
  */
 object NativeLlama {
-    /** True once libtantular-llama.so + bindings are bundled. */
-    const val AVAILABLE = false
+
+    @Volatile
+    private var libLoaded: Boolean = false
+
+    init {
+        libLoaded = try {
+            System.loadLibrary("tantular-llama")
+            true
+        } catch (t: Throwable) {
+            // Library not bundled in this build variant; stay in fallback mode.
+            false
+        }
+    }
+
+    /** True once libtantular-llama.so is present and loaded in this build. */
+    val AVAILABLE: Boolean
+        get() = libLoaded
+
+    // Cached, lazily loaded model handle (native pointer). 0 == not loaded.
+    @Volatile
+    private var modelHandle: Long = 0L
+
+    @Volatile
+    private var loadedModelPath: String? = null
+
+    @Volatile
+    private var loadedAdapterPath: String? = null
 
     /**
      * Run the constrained one-word classification locally and return the raw
-     * model text (e.g. "PENIPUAN"). Returns null until the native layer exists.
+     * model text (e.g. "PENIPUAN"). Returns null when the native layer is not
+     * available, the model cannot be loaded, or inference fails — callers treat
+     * null as "on-device SLM unavailable" and rely on the rule floor.
      */
-    fun classifyToken(modelPath: String, systemPrompt: String, message: String): String? {
-        // TODO(on-device): JNI -> llama.cpp: load GGUF at modelPath, run a short
-        // deterministic decode (temp 0, ~8 tokens) with systemPrompt + message.
-        return null
+    @Synchronized
+    fun classifyToken(modelPath: String, adapterPath: String?, systemPrompt: String, message: String): String? {
+        if (!libLoaded) return null
+
+        if (modelHandle == 0L || loadedModelPath != modelPath || loadedAdapterPath != adapterPath) {
+            if (modelHandle != 0L) {
+                runCatching { nativeFreeModel(modelHandle) }
+                modelHandle = 0L
+                loadedModelPath = null
+                loadedAdapterPath = null
+            }
+            modelHandle = runCatching { nativeLoadModel(modelPath, adapterPath.orEmpty(), DEFAULT_THREADS) }.getOrDefault(0L)
+            loadedModelPath = if (modelHandle != 0L) modelPath else null
+            loadedAdapterPath = if (modelHandle != 0L) adapterPath else null
+        }
+        if (modelHandle == 0L) return null
+
+        return runCatching {
+            nativeClassify(modelHandle, systemPrompt, message, MAX_NEW_TOKENS)
+        }.getOrNull()
     }
+
+    /** Optional: release the loaded model (e.g. on low memory). */
+    @Synchronized
+    fun release() {
+        if (modelHandle != 0L) {
+            runCatching { nativeFreeModel(modelHandle) }
+            modelHandle = 0L
+            loadedModelPath = null
+            loadedAdapterPath = null
+        }
+    }
+
+    // --- JNI surface (implemented in app/src/main/cpp/tantular_jni.cpp) ---
+    private external fun nativeLoadModel(modelPath: String, adapterPath: String, threads: Int): Long
+    private external fun nativeClassify(handle: Long, systemPrompt: String, message: String, maxTokens: Int): String?
+    private external fun nativeFreeModel(handle: Long)
+
+    private const val DEFAULT_THREADS = 4
+    private const val MAX_NEW_TOKENS = 8
 }
 
 /**
@@ -100,11 +168,13 @@ object NativeLlama {
  * Expected model path (adb-pushable, app-private external storage):
  *   /sdcard/Android/data/ai.sakana.tantularguard/files/models/tantular.gguf
  */
-class OnDeviceSlmClassifier(private val modelFile: File) : SlmClassifier {
+class OnDeviceSlmClassifier(private val modelFile: File, private val adapterFile: File? = null) : SlmClassifier {
     override val name = "On-device (llama.cpp)"
 
     fun modelPresent(): Boolean = modelFile.exists() && modelFile.length() > 0L
+    fun adapterPresent(): Boolean = adapterFile?.let { it.exists() && it.length() > 0L } == true
     fun modelPath(): String = modelFile.absolutePath
+    fun adapterPath(): String? = adapterFile?.absolutePath
 
     override fun classify(message: String): SlmResult {
         val start = System.currentTimeMillis()
@@ -114,7 +184,7 @@ class OnDeviceSlmClassifier(private val modelFile: File) : SlmClassifier {
         if (!NativeLlama.AVAILABLE) {
             return SlmResult(SlmLabel.UNKNOWN, "", 0L, name, false, "runtime on-device belum terpasang")
         }
-        val raw = NativeLlama.classifyToken(modelFile.absolutePath, SlmParsing.SYSTEM_PROMPT, message)
+        val raw = NativeLlama.classifyToken(modelFile.absolutePath, adapterFile?.takeIf { it.exists() && it.length() > 0L }?.absolutePath, SlmParsing.SYSTEM_PROMPT, message)
             ?: return SlmResult(SlmLabel.UNKNOWN, "", System.currentTimeMillis() - start, name, false, "inferensi gagal")
         return SlmResult(SlmParsing.parse(raw), raw.trim(), System.currentTimeMillis() - start, name, ok = true)
     }

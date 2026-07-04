@@ -1,28 +1,137 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Tantular Guard</string>
-    <string name="subtitle">Cek pesan SMS/WhatsApp mencurigakan secara lokal di perangkat.</string>
-    <string name="input_hint">Tempel atau share pesan mencurigakan di sini…</string>
+    <string name="subtitle">Periksa pesan mencurigakan langsung di HP Anda.</string>
+    <string name="home_tagline">Tempel pesan mencurigakan, Tantular cek langsung di HP.</string>
+    <string name="section_protection">Perlindungan otomatis</string>
+    <string name="section_account">Amankan akun</string>
+    <string name="section_ai">AI di HP (opsional)</string>
+    <string name="guard_log_title_short">Riwayat pemeriksaan</string>
+    <string name="advanced_show">Pengaturan lanjutan ▾</string>
+    <string name="advanced_hide">Pengaturan lanjutan ▴</string>
+    <string name="input_hint">Tempel atau bagikan pesan di sini…</string>
     <string name="check_message">Periksa Pesan</string>
     <string name="clear">Bersihkan</string>
-    <string name="verdict_banner_format">%1$s · risk %2$.3f\n%3$s</string>
-    <string name="signals_none">Signals: none</string>
-    <string name="signals_format">Signals: %1$s</string>
-    <string name="privacy_note">Default: tidak ada network call; pesan tidak keluar dari perangkat. Lapisan SLM (opsional) hanya aktif jika Anda menyalakannya di bawah.</string>
+    <string name="verdict_banner_format">%1$s · tingkat risiko %2$.2f\n%3$s</string>
+    <string name="signals_none">Tanda bahaya: tidak ada</string>
+    <string name="signals_format">Tanda bahaya: %1$s</string>
+    <string name="privacy_note">Pemeriksaan berjalan di HP Anda. Pesan tidak dikirim ke mana pun.</string>
 
-    <string name="slm_toggle">Gunakan Tantular SLM (mode lanjutan)</string>
-    <string name="slm_help">Saat aktif, pesan borderline dikirim ke server Tantular (Ollama) yang Anda tentukan untuk klasifikasi kontekstual. Aturan tetap menjadi lapisan keamanan utama; SLM hanya bisa menaikkan level peringatan, tidak menurunkannya.</string>
-    <string name="slm_endpoint_hint">http://10.0.2.2:11434 (emulator → host)</string>
+    <string name="verdict_block">BAHAYA</string>
+    <string name="verdict_warn">HATI-HATI</string>
+    <string name="verdict_allow">AMAN</string>
+
+    <string name="paste_title">1. Tempel atau bagikan pesan</string>
+    <string name="paste_help">Tantular tidak membaca chat otomatis. Anda pilih sendiri pesan yang ingin diperiksa.</string>
+
+    <string name="slm_toggle">Gunakan AI Tantular di HP untuk pesan yang meragukan</string>
+    <string name="slm_help">Pemeriksaan cepat berjalan dulu. AI hanya dipakai untuk pesan yang meragukan, langsung di HP, tanpa internet.</string>
+    <string name="slm_endpoint_hint">http://10.0.2.2:11434</string>
     <string name="slm_default_endpoint">http://10.0.2.2:11434</string>
-    <string name="slm_model">tantular:0.2-id-7b</string>
-    <string name="slm_checking">Memeriksa dengan Tantular SLM…</string>
-    <string name="slm_used_format">SLM: %1$s → %2$s (%3$d ms)</string>
-    <string name="slm_error_format">SLM tidak tersedia (%1$s). Verdikt memakai aturan lokal saja.</string>
-    <string name="slm_off">SLM nonaktif · hanya aturan lokal (stub).</string>
+    <string name="slm_model">tantular:0.2-id-3b-lora</string>
+    <string name="slm_checking">Memeriksa dengan AI Tantular…</string>
+    <string name="slm_checking_with_backend">Memeriksa dengan %1$s…</string>
+    <string name="slm_used_format">AI: %2$s (%3$d ms)</string>
+    <string name="slm_error_format">AI belum tersedia. Memakai pemeriksaan lokal saja.</string>
+    <string name="slm_off">AI nonaktif · hanya pemeriksaan lokal.</string>
+    <string name="slm_not_needed">Tidak perlu AI · hasil sudah jelas.</string>
+    <string name="slm_backend_ondevice">AI di HP (tanpa internet)</string>
+    <string name="slm_backend_dev_server">Khusus pengembang: server</string>
+    <string name="slm_ondevice_missing_short">AI di HP belum siap.</string>
+    <string name="slm_ondevice_ready">AI di HP siap digunakan.</string>
+    <string name="slm_ondevice_runtime_missing">Model sudah ada, tetapi AI belum aktif di aplikasi ini.</string>
+    <string name="slm_ondevice_missing">Model AI belum dipasang di HP.</string>
 
-    <string name="slm_backend_ondevice">Di perangkat (on-device, tanpa server)</string>
-    <string name="slm_backend_server">Server Tantular (Ollama)</string>
-    <string name="slm_ondevice_help">Mode on-device menjalankan Tantular sepenuhnya di HP — tanpa internet. Salin model GGUF ke perangkat:\nadb push tantular.gguf /sdcard/Android/data/ai.sakana.tantularguard/files/models/tantular.gguf</string>
-    <string name="slm_ondevice_ready">Model on-device: TERSEDIA (%1$s)</string>
-    <string name="slm_ondevice_missing">Model on-device: belum ada. Lihat petunjuk adb push di atas.</string>
+    <string name="stage2_title">2. Periksa SMS masuk</string>
+    <string name="stage2_help">Jika diaktifkan, SMS masuk diperiksa langsung di HP. Anda hanya diberi peringatan untuk pesan berisiko. WhatsApp tidak dibaca otomatis.</string>
+    <string name="sms_guard_toggle">Aktifkan pemeriksaan SMS masuk</string>
+    <string name="sms_guard_off">Pemeriksaan SMS nonaktif. Tempel/bagikan tetap bisa digunakan.</string>
+    <string name="sms_guard_ready">Aktif. SMS masuk diperiksa langsung di HP.</string>
+    <string name="sms_guard_need_sms_permission">Butuh izin membaca SMS agar bisa memeriksa SMS masuk.</string>
+    <string name="sms_guard_need_notification_permission">Butuh izin notifikasi agar peringatan bisa muncul.</string>
+    <string name="sms_notification_channel">Peringatan SMS mencurigakan</string>
+    <string name="sms_notification_title_block">Tantular: Terindikasi Penipuan</string>
+    <string name="sms_notification_title_warn">Tantular: Pesan Mencurigakan</string>
+    <string name="sms_notification_text_format">Tingkat risiko %2$.2f · ketuk untuk lihat detail</string>
+
+    <string name="stage2b_title">2B. Karantina SMS (uji coba)</string>
+    <string name="stage2b_help">Fitur uji coba. Agar SMS berbahaya bisa dipisahkan, Tantular harus dijadikan aplikasi SMS utama. Saat ini hanya pesan BAHAYA yang dikarantina; pesan lain tetap masuk kotak masuk agar tidak hilang.</string>
+    <string name="default_sms_button">Jadikan aplikasi SMS utama</string>
+    <string name="default_sms_ready">Aktif sebagai aplikasi SMS utama. SMS berbahaya bisa dipisahkan.</string>
+    <string name="default_sms_not_ready">Belum jadi aplikasi SMS utama. Saat ini hanya bisa memberi peringatan.</string>
+    <string name="quarantine_empty">Karantina kosong.</string>
+    <string name="quarantine_count_format">Karantina: %1$d pesan. Terbaru: %2$s · risiko %3$.2f</string>
+    <string name="latest_quarantine_button">Buka terakhir</string>
+    <string name="clear_quarantine_button">Kosongkan</string>
+
+    <string name="ato_title">3. Lindungi Akun (WhatsApp &amp; medsos)</string>
+    <string name="ato_help">Lindungi WhatsApp, media sosial, email, dan akun penting dari pengambilalihan. Mengenali permintaan kode/OTP, dukungan palsu, tautan login, aplikasi berbahaya, dan akses jarak jauh.</string>
+    <string name="notif_guard_toggle">Periksa notifikasi WhatsApp &amp; medsos</string>
+    <string name="notif_guard_off">Nonaktif. Tempel/bagikan tetap bisa digunakan.</string>
+    <string name="notif_guard_ready">Aktif. Teks notifikasi diperiksa langsung di HP.</string>
+    <string name="notif_guard_need_access">Beri izin akses notifikasi untuk Tantular di pengaturan HP.</string>
+    <string name="notif_guard_privacy">Tantular hanya membaca teks notifikasi yang muncul, bukan seluruh isi chat. Pemeriksaan berjalan di HP.</string>
+    <string name="notif_access_button">Beri izin notifikasi</string>
+    <string name="recovery_guide_button">Cara amankan akun</string>
+    <string name="device_risk_button">Cek keamanan HP</string>
+    <string name="recovery_dialog_title">Cara amankan akun</string>
+    <string name="device_risk_dialog_title">Cek keamanan HP</string>
+    <string name="device_risk_intro">Periksa izin yang sering disalahgunakan untuk mengambil alih akun. Buka tiap pengaturan lalu cabut aplikasi yang tidak Anda kenal.</string>
+    <string name="device_risk_accessibility">Izin aksesibilitas</string>
+    <string name="device_risk_notification">Izin akses notifikasi</string>
+    <string name="device_risk_admin">Aplikasi admin perangkat</string>
+    <string name="device_risk_unknown_sources">Pasang aplikasi tak dikenal</string>
+    <string name="device_risk_overlay">Tampil di atas aplikasi lain</string>
+    <string name="close">Tutup</string>
+
+    <string name="notif_guard_service_label">Tantular</string>
+    <string name="notif_guard_channel">Peringatan keamanan akun</string>
+    <string name="notif_guard_title_takeover">Tantular: Risiko Akun Diambil Alih (%1$s)</string>
+    <string name="notif_guard_title_block">Tantular: Terindikasi Penipuan (%1$s)</string>
+    <string name="notif_guard_title_warn">Tantular: Pesan Mencurigakan (%1$s)</string>
+
+    <string name="wa_howto_title">4. Cara cek pesan WhatsApp</string>
+    <string name="wa_howto_help">Tantular tidak membaca chat WhatsApp otomatis. Untuk memeriksa, bagikan atau salin pesannya ke Tantular.</string>
+    <string name="wa_howto_steps">1. Buka WhatsApp.\n2. Tekan lama pesan yang mencurigakan.\n3. Pilih Bagikan atau Salin.\n4. Jika Bagikan: pilih Tantular.\n5. Jika Salin: buka Tantular, tempel, lalu Periksa Pesan.</string>
+    <string name="open_whatsapp_button">Buka WhatsApp</string>
+    <string name="open_wa_business_button">Buka WA Business</string>
+    <string name="app_not_installed">Aplikasi tidak terpasang di HP ini.</string>
+
+    <string name="guard_log_title">5. Riwayat Pemeriksaan</string>
+    <string name="guard_log_empty">Belum ada pesan yang diperiksa.</string>
+    <string name="guard_log_count_format">%1$d pesan diperiksa. Pesan aman tetap masuk; pesan berisiko diberi peringatan.</string>
+    <string name="view_guard_log_button">Lihat riwayat</string>
+    <string name="clear_guard_log_button">Hapus riwayat</string>
+    <string name="guard_log_dialog_title">Riwayat Pemeriksaan</string>
+    <string name="guard_log_cleared">Riwayat dihapus.</string>
+    <string name="guard_log_refresh">Muat ulang</string>
+    <string name="guard_log_count_short">%1$d pesan diperiksa</string>
+    <string name="guard_log_signals_prefix">Tanda bahaya: %1$s</string>
+    <string name="guard_log_tap_hint">Ketuk untuk periksa ulang</string>
+    <string name="route_inbox">masuk kotak masuk</string>
+    <string name="route_inbox_warn">masuk + peringatan</string>
+    <string name="route_warning">diberi peringatan</string>
+    <string name="route_quarantine">dikarantina</string>
+
+    <string name="diag_title">Status &amp; Uji</string>
+    <string name="diag_subtitle">Cek kesiapan izin, AI di HP, mode SMS, dan pemeriksaan notifikasi. Coba pesan uji langsung.</string>
+    <string name="diag_status_section">Status kesiapan</string>
+    <string name="diag_test_section">Pesan uji — ketuk kartu untuk mencoba</string>
+    <string name="diag_sms_perm">Izin membaca SMS</string>
+    <string name="diag_notif_perm">Izin notifikasi</string>
+    <string name="diag_notif_access">Izin akses notifikasi</string>
+    <string name="diag_default_sms">Tantular sebagai SMS utama</string>
+    <string name="diag_model_present">Model AI terpasang</string>
+    <string name="diag_adapter_present">Penyempurna AI terpasang</string>
+    <string name="diag_native_runtime">AI di HP aktif</string>
+    <string name="diag_sms_guard_on">Pemeriksaan SMS aktif</string>
+    <string name="diag_notif_guard_on">Pemeriksaan notifikasi aktif</string>
+    <string name="diag_slm_on">AI di HP diaktifkan</string>
+    <string name="diag_slm_backend">Sumber AI</string>
+    <string name="diag_build_type">Versi</string>
+    <string name="diag_ok">SIAP</string>
+    <string name="diag_off">BELUM</string>
+    <string name="diag_takeover_flag">Risiko akun diambil alih: YA</string>
+    <string name="open_diag_button">Cek status &amp; uji</string>
+
 </resources>

@@ -1,23 +1,33 @@
-# Tantular Guard Android — Stage 1 APK
+# Tantular Guard Android — Pattern C
 
-This is the Android project for **Pattern C, Stage 1**:
+This is the Android project for **Pattern C**.
+
+Implemented stages:
 
 ```text
-paste/share suspicious SMS or WhatsApp text
+Stage 1: paste/share suspicious SMS or WhatsApp text
   -> local BLOCK / WARN / ALLOW verdict
   -> user sees a safety warning
+
+Stage 2: opt-in incoming SMS guard
+  -> incoming SMS is checked locally
+  -> BLOCK/WARN messages trigger a Tantular Guard notification
+  -> tap notification to inspect the message in the app
+
+Stage 2B: default-SMS quarantine prototype
+  -> user makes Tantular Guard the default SMS app
+  -> BLOCK/WARN SMS are stored in local quarantine, not written to inbox
+  -> ALLOW SMS are written to the SMS inbox
 ```
 
-Stage 1 is intentionally conservative by default:
+Default privacy posture:
 
-- no SMS permission;
-- no notification-listener permission;
 - no WhatsApp scraping;
-- the user explicitly pastes or shares text into the app;
-- **no network by default** — the message never leaves the device unless you
-  explicitly enable the optional Tantular SLM layer (see below).
-
-This makes the first APK demo safer and easier to review.
+- no notification-listener permission;
+- no network by default;
+- SMS guard is opt-in;
+- background SMS checks do **not** call Ollama/SLM;
+- optional Tantular SLM/Ollama backend only runs when the user enables it in the app.
 
 ## Current APK output
 
@@ -33,63 +43,219 @@ A convenience copy is also available from the repository reports directory:
 ../../reports/tantular-guard-stage1-debug.apk
 ```
 
-If you modify source after this point, rebuild from Android Studio or run:
+After source changes, rebuild from Android Studio or run:
 
 ```bash
 ./gradlew assembleDebug
 ```
 
-Note for this Codex shell: `./gradlew assembleDebug` cannot run here until a
-Java Runtime is available on PATH. Android Studio normally supplies this when
-you build from the IDE.
+Note for this Codex shell: `./gradlew assembleDebug` cannot run here until a Java Runtime is available on PATH. Android Studio normally supplies this when you build from the IDE.
 
-## Tantular SLM layer (opt-in dev path, implemented)
+## Stage 1 — paste/share flow
 
-The SLM reasoning layer is wired in behind the deterministic rules:
+1. User opens Tantular Guard.
+2. User pastes a suspicious SMS/WhatsApp text, or shares text into the app via Android's share sheet.
+3. `RiskScorer.kt` runs fully locally.
+4. App shows:
+   - `BLOCK`
+   - `WARN`
+   - `ALLOW`
+5. App also shows matched risk signals, for example:
+   - `minta_otp`
+   - `minta_pin_cvv`
+   - `link_mencurigakan`
+   - `apk_mencurigakan`
+   - `remote_access`
+
+## Stage 2 — SMS guard opt-in
+
+When enabled:
+
+```text
+incoming SMS
+  -> SmsReceiver
+  -> RiskScorer local rules
+  -> if BLOCK/WARN: show Tantular Guard notification
+  -> tap notification: open app with SMS prefilled
+```
+
+Files:
+
+```text
+app/src/main/java/ai/sakana/tantularguard/SmsReceiver.kt
+app/src/main/AndroidManifest.xml
+app/src/main/res/layout/activity_main.xml
+```
+
+Permissions:
+
+```xml
+<uses-permission android:name="android.permission.RECEIVE_SMS" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+```
+
+The app requests these at runtime only when the user turns on:
+
+```text
+Aktifkan pemeriksaan SMS masuk
+```
+
+Privacy behavior:
+
+- SMS is checked locally with deterministic rules.
+- Background SMS receiver does **not** call Ollama/SLM.
+- SLM can still be run manually after the user taps the notification/open app.
+- WhatsApp is not read automatically.
+
+### Test Stage 2 in Android emulator
+
+Install and run the app, then enable SMS guard in the UI. From your host shell:
+
+```bash
+adb emu sms send +628123456789 "Pak, saya CS bank. Untuk batalkan transaksi, tolong sebutkan OTP dan PIN Anda sekarang juga."
+```
+
+Expected: Tantular Guard posts a warning notification. Tap it to open the app with the SMS text prefilled.
+
+### Test Stage 2 on a physical phone
+
+1. Install the APK.
+2. Enable SMS guard in the app.
+3. Grant SMS and notification permissions.
+4. Send a test SMS to the phone from another number.
+
+Use harmless test messages that resemble scams; do not use real OTPs.
+
+## Stage 2B — default-SMS quarantine prototype
+
+Stage 2 warning mode cannot stop SMS delivery: Android still sends the SMS to
+the default Messages app. To actually keep a scam SMS out of the primary inbox,
+Tantular Guard must become the default SMS app.
+
+The prototype now exposes:
+
+```text
+2B. Quarantine mode — default SMS app
+```
+
+Flow:
+
+```text
+Tap "Jadikan Tantular Guard aplikasi SMS default"
+  -> Android default-SMS role dialog
+  -> incoming SMS delivered to Tantular Guard
+  -> RiskScorer evaluates locally
+  -> BLOCK/WARN: store in local quarantine + notification
+  -> ALLOW: insert into system SMS inbox
+```
+
+Files:
+
+```text
+app/src/main/java/ai/sakana/tantularguard/SmsQuarantine.kt
+app/src/main/java/ai/sakana/tantularguard/SmsReceiver.kt
+app/src/main/java/ai/sakana/tantularguard/MmsReceiver.kt
+app/src/main/java/ai/sakana/tantularguard/RespondViaMessageService.kt
+```
+
+Default-SMS candidacy entries:
+
+```xml
+SMS_DELIVER receiver
+WAP_PUSH_DELIVER receiver (MMS no-op)
+ACTION_SENDTO activity
+RESPOND_VIA_MESSAGE service
+```
+
+Limitations:
+
+- This is a quarantine prototype, not a full SMS replacement.
+- MMS is no-op.
+- SMS sending/threads/conversation UI are not implemented.
+- Use for controlled testing; do not use as your daily default SMS app yet.
+
+### Test Stage 2B
+
+1. Install the rebuilt APK.
+2. Open Tantular Guard.
+3. Enable `Aktifkan pemeriksaan SMS masuk`.
+4. Tap `Jadikan Tantular Guard aplikasi SMS default`.
+5. Accept Android's default-SMS role dialog.
+6. Send a scam-like SMS.
+
+Expected:
+
+- BLOCK/WARN message: appears in Tantular Guard quarantine, not the normal inbox.
+- ALLOW message: written to SMS inbox.
+
+Open the latest quarantined message with:
+
+```text
+Buka terakhir
+```
+
+## Tantular SLM layer — production privacy architecture
+
+The app is now wired around the production privacy goal:
 
 ```text
 message -> RiskScorer rules (offline, instant BLOCK/WARN/ALLOW)
-        -> if borderline AND "Gunakan Tantular SLM" is ON:
-             POST to your Ollama server /api/chat -> PENIPUAN / MENCURIGAKAN / AMAN
+        -> if and only if the message is borderline AND "Gunakan Tantular SLM" is ON:
+             default backend: on-device Tantular GGUF runtime
+             dev-only backend: explicit Ollama HTTP server
         -> fuse: the SLM can only ESCALATE, never downgrade the rules' verdict
 ```
 
-Files: `SlmClassifier.kt` (interface + `OllamaSlmClassifier` HTTP backend +
-offline `StubSlmClassifier`); fusion lives in `RiskScorer.evaluate(..., slmLabel)`.
+Key invariants:
 
-**Test it:** run `ollama serve` on a reachable machine, then in the app tick
-*Gunakan Tantular SLM* and set the endpoint:
+- Local deterministic rules always run first.
+- OTP, PIN/CVV, password, APK-install, and remote-access requests are deterministic hard-safety gates and can BLOCK without any model.
+- SLM inference is skipped for clear ALLOW and clear BLOCK cases.
+- The selected default SLM backend is **on-device**.
+- The Ollama HTTP backend is still available only as an explicit **Dev only** option.
+- Background SMS handling does not call remote SLM; it stays local and deterministic.
+- The SLM can escalate a borderline case, but it cannot downgrade hard fraud rules.
+
+Files:
+
+```text
+app/src/main/java/ai/sakana/tantularguard/RiskScorer.kt      # pure rules + borderline gate
+app/src/main/java/ai/sakana/tantularguard/SlmClassifier.kt   # on-device seam + dev Ollama backend
+app/src/main/java/ai/sakana/tantularguard/MainActivity.kt    # backend selector + fusion flow
+```
+
+Current implementation status:
+
+- `OnDeviceSlmClassifier` is the production-default path.
+- `NativeLlama` loads `libtantular-llama.so` when the APK is built with the optional native runtime.
+- If the native library or model file is missing, the app falls back safely to local rules and shows a status message.
+- Full build/setup instructions live in `ON_DEVICE_SLM.md`.
+- The model path expected by the prototype is:
+
+```text
+/sdcard/Android/data/ai.sakana.tantularguard/files/models/tantular.gguf
+/sdcard/Android/data/ai.sakana.tantularguard/files/models/tantular-lora.gguf  # optional LoRA adapter
+```
+
+Native build quick start:
+
+```bash
+cd godel_agent_prototype/android/TantularGuard
+./scripts/fetch_llama_cpp.sh
+./gradlew assembleDebug -PtantularNative=true
+./scripts/install_tantular_model.sh /path/to/base.gguf /path/to/tantular-lora.gguf
+```
+
+Optional dev server testing:
+
+1. Select `Dev only: server Ollama / HTTP` in the SLM backend selector.
+2. Run `ollama serve` on a reachable machine.
+3. Use one of these endpoints:
 
 - Android emulator → host machine: `http://10.0.2.2:11434`
 - Real device → dev machine on same Wi-Fi: `http://<your-ip>:11434`
 
-The model tag is `tantular:0.2-id-7b` (see `strings.xml` → `slm_model`). Only
-borderline messages hit the server; hard fraud gates stay in the rules, so the
-app is safe even if the server is down.
-
-### On-device backend (slot present, native runtime pending)
-
-The app now has a **backend selector**: *Di perangkat (on-device)* vs *Server
-(Ollama)*. The on-device path is fully wired — `OnDeviceSlmClassifier` loads a
-quantized GGUF from app storage and calls `NativeLlama` — but the native
-llama.cpp layer (`NativeLlama.AVAILABLE = false`) is not compiled in yet, so
-on-device selection reports *"runtime on-device belum terpasang"* and safely
-falls back to the rules. This keeps the app shippable while the native `.so`
-is finished.
-
-Drop-in model path (adb-pushable, app-private external storage):
-
-```bash
-adb push tantular.gguf \
-  /sdcard/Android/data/ai.sakana.tantularguard/files/models/tantular.gguf
-```
-
-Remaining work for true on-device: compile llama.cpp for `arm64-v8a` (NDK),
-add JNI bindings, and implement `NativeLlama.classifyToken(...)`. Everything
-above that seam is done.
-
-> The HTTP/Ollama backend is the testable dev path today; on-device is the
-> production target and only needs the native layer dropped into the seam.
+The dev model tag is `tantular:0.2-id-3b-lora` (see `strings.xml` → `slm_model`). This dev mode is not the production privacy posture because borderline messages are sent to the configured server.
 
 ## Project layout
 
@@ -105,27 +271,11 @@ android/TantularGuard/
         MainActivity.kt
         RiskScorer.kt
         SlmClassifier.kt
+        SmsReceiver.kt
       res/layout/activity_main.xml
       res/values/*.xml
       res/drawable/*.xml
 ```
-
-## How Stage 1 works
-
-1. User opens Tantular Guard.
-2. User pastes a suspicious SMS/WhatsApp text, or shares text into the app via
-   Android's share sheet.
-3. `RiskScorer.kt` runs fully locally.
-4. App shows:
-   - `BLOCK`
-   - `WARN`
-   - `ALLOW`
-5. App also shows matched risk signals, for example:
-   - `minta_otp`
-   - `minta_pin_cvv`
-   - `link_mencurigakan`
-   - `apk_mencurigakan`
-   - `remote_access`
 
 ## Build APK
 
@@ -181,58 +331,12 @@ ALLOW:
 Jadwal meeting tim besok jam 10 di ruang rapat, jangan lupa bawa laptop.
 ```
 
-## How the SLM fits against phishing/scamming messages
-
-The default Stage 1 path is the local safety shell:
-
-```text
-message text
-  -> deterministic risk scorer
-  -> if risky/borderline: local Tantular SLM
-  -> deterministic safety floor
-  -> UI warning
-```
+## Why rules + SLM
 
 Why not rely only on the SLM?
 
 - Scam protection needs predictable behavior.
 - OTP/PIN/CVV/APK/link/remote-access cases must be hard-gated.
-- A small model can add context and natural language explanation, but the app
-  should still have deterministic rules for critical threats.
+- A small model can add context and natural language explanation, but the app should still have deterministic rules for critical threats.
 
-The current dev SLM path is opt-in:
-
-```text
-RiskScorer says WARN/BLOCK candidate
-  -> if "Gunakan Tantular SLM" is enabled, call your configured Ollama endpoint
-  -> Tantular classifies: PENIPUAN / MENCURIGAKAN / AMAN
-  -> app combines model verdict with hard safety rules
-```
-
-The SLM is advisory only: it can escalate, but it cannot downgrade the rule
-floor.
-
-Recommended first SLM integration target:
-
-- Tantular 1.5B or 3B quantized;
-- local inference runtime such as llama.cpp/MLC/MediaPipe LLM depending on
-  Android constraints;
-- model only runs on suspicious/borderline messages to save battery.
-
-## Future stages
-
-### Stage 2 — SMS opt-in
-
-Add Android SMS permission and evaluate incoming SMS locally. This requires
-careful permission UX and policy review.
-
-### Stage 3 — Notification opt-in
-
-Add `NotificationListenerService` so the user can opt in to checking
-notifications from SMS/WhatsApp/etc. This should be explicit, transparent, and
-privacy-preserving.
-
-### Stage 4 — On-device Tantular SLM
-
-Add local quantized Tantular inference for borderline cases. Keep the rule-based
-safety floor.
+The SLM is advisory only: it can escalate, but it cannot downgrade the rule floor.
