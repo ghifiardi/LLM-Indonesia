@@ -60,6 +60,16 @@ class OnboardingActivity : Activity() {
                 getString(R.string.onboarding_3_title),
                 getString(R.string.onboarding_3_body),
             ),
+            Page(
+                "🔔", // bell — automatic protections
+                getString(R.string.onboarding_4_title),
+                getString(R.string.onboarding_4_body),
+            ),
+            Page(
+                "🧰", // toolbox — everything else in the app
+                getString(R.string.onboarding_5_title),
+                getString(R.string.onboarding_5_body),
+            ),
         )
     }
 
@@ -176,6 +186,9 @@ class OnboardingActivity : Activity() {
         emojiView.text = page.emoji
         titleView.text = page.title
         bodyView.text = page.body
+        // Welcome page reads well centered; the how-to/feature lists read
+        // better left-aligned.
+        bodyView.gravity = if (step == 0) Gravity.CENTER else Gravity.START
         dotsView.text = pages.indices.joinToString("  ") { if (it == step) "●" else "○" }
         backButton.visibility = if (step == 0) View.INVISIBLE else View.VISIBLE
         // The example CTA is the star of the last page only.
