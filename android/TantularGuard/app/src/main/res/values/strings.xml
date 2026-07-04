@@ -30,6 +30,20 @@
     <string name="onboarding_done">Mulai</string>
     <string name="onboarding_try_example">🚀 Coba dengan contoh penipuan</string>
     <string name="how_to_use_button">❓ Cara pakai</string>
+
+    <!-- "What does this feature actually do?" info dialogs -->
+    <string name="info_protection_title">Apa itu Perlindungan otomatis?</string>
+    <string name="info_protection_body">Yang terjadi bila diaktifkan:\n\n📩 Pemeriksaan SMS masuk — setiap SMS baru dipindai langsung di HP. Jika terdeteksi berbahaya, muncul notifikasi peringatan. SMS tetap masuk ke kotak masuk seperti biasa.\n\n💬 Periksa notifikasi WhatsApp &amp; medsos — hanya teks yang tampil di notifikasi yang dipindai (bukan seluruh isi chat), untuk mengenali upaya pembajakan akun.\n\nYang TIDAK dilakukan:\n• Tidak membaca chat WhatsApp Anda.\n• Tidak mengirim pesan ke internet — semua diproses di HP.\n• Tidak menghapus pesan apa pun.</string>
+    <string name="info_account_title">Apa itu Amankan akun?</string>
+    <string name="info_account_body">Alat bantu bila akun Anda (WhatsApp, medsos, email) dibajak atau hampir dibajak:\n\n🔐 Cara amankan akun — panduan langkah demi langkah: ganti password, aktifkan verifikasi 2 langkah, keluarkan perangkat asing.\n\n📱 Cek keamanan HP — membuka layar pengaturan Android untuk memeriksa izin yang sering disalahgunakan penipu (aksesibilitas, admin perangkat, aplikasi tak dikenal).\n\nFitur ini hanya memandu — tidak mengubah pengaturan apa pun secara otomatis.</string>
+    <string name="info_history_title">Apa itu Riwayat pemeriksaan?</string>
+    <string name="info_history_body">Daftar semua pesan yang pernah diperiksa Tantular — baik yang Anda cek manual maupun dari perlindungan otomatis.\n\nSetiap catatan berisi: hasil (🛑/⚠️/✅), tanda bahaya yang ditemukan, dan ke mana pesan diarahkan (masuk / diperingatkan / dikarantina).\n\nRiwayat tersimpan hanya di HP Anda dan bisa dihapus kapan saja. Ketuk salah satu catatan untuk memeriksa ulang pesannya.</string>
+    <string name="info_ai_title">Apa itu AI Tantular di HP?</string>
+    <string name="info_ai_body">Pemeriksaan biasa memakai aturan cepat (daftar tanda bahaya). Bila AI diaktifkan:\n\n🤖 Pesan yang MERAGUKAN (tidak jelas aman/bahaya) dianalisis oleh model AI Tantular langsung di HP — tanpa internet, pesan tidak keluar dari perangkat.\n\n⚖️ AI hanya bisa MENAIKKAN tingkat peringatan (mis. dari hati-hati menjadi bahaya). AI tidak pernah menurunkan peringatan — aturan keamanan tetap jadi patokan utama.\n\nPerlu file model AI dipasang dulu (lihat Cek status &amp; uji).</string>
+    <string name="info_quarantine_title">Apa itu Karantina SMS?</string>
+    <string name="info_quarantine_body">Fitur uji coba untuk memisahkan SMS penipuan dari kotak masuk.\n\nSyarat: Tantular harus dijadikan aplikasi SMS utama HP.\n\nYang terjadi setelah aktif:\n• SMS BAHAYA → disimpan di karantina, tidak masuk kotak masuk, Anda diberi tahu.\n• SMS lain (aman/mencurigakan) → tetap masuk kotak masuk seperti biasa, agar tidak ada pesan yang hilang.\n\nIsi karantina bisa dibuka atau dikosongkan kapan saja. Anda bisa kembali ke aplikasi SMS lama lewat Pengaturan &gt; Aplikasi default.</string>
+    <string name="info_wa_title">Cara cek pesan WhatsApp</string>
+    <string name="info_wa_body">Tantular tidak membaca chat WhatsApp secara otomatis — itu dijaga demi privasi.\n\nUntuk memeriksa pesan WhatsApp:\n1. Tekan lama pesan yang mencurigakan.\n2. Ketuk Bagikan (atau Salin).\n3. Pilih Tantular Guard (atau tempel di halaman utama).\n\nOpsional: aktifkan "Periksa notifikasi WhatsApp &amp; medsos" agar teks notifikasi yang muncul ikut dipindai otomatis.</string>
     <string name="clipboard_empty">Tidak ada teks tersalin. Salin pesan dulu, lalu ketuk lagi.</string>
     <string name="examples_title">Belum ada pesan? Coba contoh ini:</string>
     <string name="example_otp_label">Contoh: minta OTP</string>

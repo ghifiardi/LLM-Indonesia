@@ -167,6 +167,13 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.howToUseButton).setOnClickListener {
             startActivity(Intent(this, OnboardingActivity::class.java))
         }
+        // "What does this feature actually do?" popups on every section header.
+        wireInfoPopup(R.id.infoProtection, R.string.info_protection_title, R.string.info_protection_body)
+        wireInfoPopup(R.id.infoAccount, R.string.info_account_title, R.string.info_account_body)
+        wireInfoPopup(R.id.infoHistory, R.string.info_history_title, R.string.info_history_body)
+        wireInfoPopup(R.id.infoAi, R.string.info_ai_title, R.string.info_ai_body)
+        wireInfoPopup(R.id.infoWa, R.string.info_wa_title, R.string.info_wa_body)
+        wireInfoPopup(R.id.infoQuarantine, R.string.info_quarantine_title, R.string.info_quarantine_body)
 
         handleSharedText(intent)
         handleCheckTextIntent(intent)
@@ -179,6 +186,17 @@ class MainActivity : Activity() {
         // so onboarding never blocks a real task.
         if (!prefs().getBoolean(OnboardingActivity.KEY_ONBOARDING_DONE, false) && !openedWithTask(intent)) {
             startActivity(Intent(this, OnboardingActivity::class.java))
+        }
+    }
+
+    /** Attach a plain-language "what does this do?" dialog to an ℹ️ header icon. */
+    private fun wireInfoPopup(viewId: Int, titleRes: Int, bodyRes: Int) {
+        findViewById<TextView>(viewId).setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle(titleRes)
+                .setMessage(bodyRes)
+                .setPositiveButton(R.string.close, null)
+                .show()
         }
     }
 
