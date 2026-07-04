@@ -154,7 +154,7 @@ class GuardLogActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         })
         topRow.addView(TextView(this).apply {
-            text = "risk ${e.riskScore}"
+            text = "risiko ${riskLevelWord(e.verdict)}"
             setTextColor(Color.parseColor("#64748B"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         })
@@ -179,7 +179,10 @@ class GuardLogActivity : Activity() {
         // Signals
         if (e.signals.isNotEmpty()) {
             card.addView(TextView(this).apply {
-                text = getString(R.string.guard_log_signals_prefix, e.signals.joinToString(", "))
+                text = getString(
+                    R.string.guard_log_signals_prefix,
+                    RiskScorer.humanSignals(e.signals).joinToString(" · "),
+                )
                 setTextColor(badgeInk)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setPadding(0, dp(8), 0, 0)
@@ -217,6 +220,12 @@ class GuardLogActivity : Activity() {
         "BLOCK" -> getString(R.string.verdict_block)
         "WARN" -> getString(R.string.verdict_warn)
         else -> getString(R.string.verdict_allow)
+    }
+
+    private fun riskLevelWord(verdict: String): String = when (verdict) {
+        "BLOCK" -> "tinggi"
+        "WARN" -> "sedang"
+        else -> "rendah"
     }
 
     private fun routeLabel(route: String): String = when (route) {

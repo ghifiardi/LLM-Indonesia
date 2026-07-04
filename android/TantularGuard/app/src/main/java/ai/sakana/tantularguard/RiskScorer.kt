@@ -102,6 +102,45 @@ object RiskScorer {
         "minta_bagikan_kode", "nonaktifkan_2fa", "perangkat_tertaut", "bagikan_layar",
     )
 
+    /**
+     * Plain-Indonesian labels for signal codes, shown to non-technical users.
+     * Unknown codes fall back to the raw code so nothing ever renders blank.
+     */
+    private val signalLabels: Map<String, String> = mapOf(
+        "minta_otp" to "Meminta kode OTP",
+        "minta_pin_cvv" to "Meminta PIN/CVV kartu",
+        "minta_password" to "Meminta password",
+        "link_mencurigakan" to "Ada tautan mencurigakan",
+        "apk_mencurigakan" to "Minta pasang aplikasi/APK",
+        "remote_access" to "Minta akses jarak jauh",
+        "iming_hadiah" to "Iming-iming hadiah/undian",
+        "refund_palsu" to "Modus refund dana",
+        "urgensi" to "Nada mendesak/menakut-nakuti",
+        "mengaku_petugas" to "Mengaku petugas/CS bank",
+        "kode_verifikasi_akun" to "Menyebut kode verifikasi akun",
+        "minta_bagikan_kode" to "Minta membagikan kode",
+        "dukungan_palsu" to "Berpura-pura layanan resmi",
+        "ancaman_blokir_akun" to "Mengancam akun diblokir",
+        "link_login_palsu" to "Tautan login/reset palsu",
+        "perangkat_tertaut" to "Ajakan tautkan perangkat/QR",
+        "nonaktifkan_2fa" to "Minta matikan verifikasi 2 langkah",
+        "sim_swap" to "Indikasi pembajakan nomor SIM",
+        "bagikan_layar" to "Minta berbagi layar",
+    )
+
+    /** Human label for one signal code (falls back to the raw code). */
+    fun humanSignal(code: String): String = signalLabels[code] ?: code
+
+    /** Human labels for a list of signal codes, ready for display. */
+    fun humanSignals(codes: List<String>): List<String> = codes.map { humanSignal(it) }
+
+    /** Non-technical risk wording derived from the verdict. */
+    fun riskLevelLabel(verdict: Verdict): String = when (verdict) {
+        Verdict.BLOCK -> "Tinggi"
+        Verdict.WARN -> "Sedang"
+        Verdict.ALLOW -> "Rendah"
+    }
+
     /** Stage 1 fast scorer: returns (riskScore, matchedSignals). */
     fun score(text: String): Pair<Double, List<String>> {
         val lowered = text.lowercase()

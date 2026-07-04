@@ -12,7 +12,16 @@
     <string name="input_hint">Tempel atau bagikan pesan di sini…</string>
     <string name="check_message">Periksa Pesan</string>
     <string name="clear">Bersihkan</string>
-    <string name="verdict_banner_format">%1$s · tingkat risiko %2$.2f\n%3$s</string>
+    <string name="paste_and_check">📋 Tempel &amp; Periksa</string>
+    <string name="clipboard_empty">Tidak ada teks tersalin. Salin pesan dulu, lalu ketuk lagi.</string>
+    <string name="examples_title">Belum ada pesan? Coba contoh ini:</string>
+    <string name="example_otp_label">Contoh: minta OTP</string>
+    <string name="example_prize_label">Contoh: hadiah palsu</string>
+    <string name="example_normal_label">Contoh: pesan biasa</string>
+    <string name="example_otp_text">Pak, saya CS bank. Untuk batalkan transaksi mencurigakan, tolong sebutkan kode OTP dan PIN Anda sekarang juga.</string>
+    <string name="example_prize_text">Selamat! Anda memenangkan undian Rp50.000.000. Klik link bit.ly/hadiah-anda dan isi data untuk klaim hadiah sekarang.</string>
+    <string name="example_normal_text">Halo, rapat besok jadi jam 10 di kantor ya. Tolong bawa laporan bulanannya.</string>
+    <string name="verdict_banner_format">%1$s · risiko %2$s\n%3$s</string>
     <string name="signals_none">Tanda bahaya: tidak ada</string>
     <string name="signals_format">Tanda bahaya: %1$s</string>
     <string name="privacy_note">Pemeriksaan berjalan di HP Anda. Pesan tidak dikirim ke mana pun.</string>
@@ -52,7 +61,7 @@
     <string name="sms_notification_channel">Peringatan SMS mencurigakan</string>
     <string name="sms_notification_title_block">Tantular: Terindikasi Penipuan</string>
     <string name="sms_notification_title_warn">Tantular: Pesan Mencurigakan</string>
-    <string name="sms_notification_text_format">Tingkat risiko %2$.2f · ketuk untuk lihat detail</string>
+    <string name="sms_notification_text_format">Ketuk untuk lihat detail dan saran aman</string>
 
     <string name="stage2b_title">2B. Karantina SMS (uji coba)</string>
     <string name="stage2b_help">Fitur uji coba. Agar SMS berbahaya bisa dipisahkan, Tantular harus dijadikan aplikasi SMS utama. Saat ini hanya pesan BAHAYA yang dikarantina; pesan lain tetap masuk kotak masuk agar tidak hilang.</string>
@@ -60,7 +69,7 @@
     <string name="default_sms_ready">Aktif sebagai aplikasi SMS utama. SMS berbahaya bisa dipisahkan.</string>
     <string name="default_sms_not_ready">Belum jadi aplikasi SMS utama. Saat ini hanya bisa memberi peringatan.</string>
     <string name="quarantine_empty">Karantina kosong.</string>
-    <string name="quarantine_count_format">Karantina: %1$d pesan. Terbaru: %2$s · risiko %3$.2f</string>
+    <string name="quarantine_count_format">Karantina: %1$d pesan. Terbaru: %2$s</string>
     <string name="latest_quarantine_button">Buka terakhir</string>
     <string name="clear_quarantine_button">Kosongkan</string>
 

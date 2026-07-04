@@ -121,6 +121,18 @@ class MainActivity : Activity() {
             input.setText("")
             resultCard.visibility = View.GONE
         }
+        // One-tap flow for non-technical users: paste clipboard + check at once.
+        findViewById<Button>(R.id.pasteCheckButton).setOnClickListener { pasteAndCheck() }
+        // Tappable demo messages so testers can try the app without typing.
+        findViewById<Button>(R.id.exampleOtpButton).setOnClickListener {
+            fillAndCheck(getString(R.string.example_otp_text))
+        }
+        findViewById<Button>(R.id.examplePrizeButton).setOnClickListener {
+            fillAndCheck(getString(R.string.example_prize_text))
+        }
+        findViewById<Button>(R.id.exampleNormalButton).setOnClickListener {
+            fillAndCheck(getString(R.string.example_normal_text))
+        }
         advancedToggle.setOnClickListener { toggleAdvanced() }
         findViewById<Button>(R.id.defaultSmsButton).setOnClickListener { requestDefaultSmsRole() }
         findViewById<Button>(R.id.latestQuarantineButton).setOnClickListener { openLatestQuarantine() }
@@ -218,6 +230,22 @@ class MainActivity : Activity() {
         evaluateCurrent()
     }
 
+    /** Paste whatever is on the clipboard and check it in one tap. */
+    private fun pasteAndCheck() {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (text.isEmpty()) {
+            Toast.makeText(this, R.string.clipboard_empty, Toast.LENGTH_SHORT).show()
+            return
+        }
+        fillAndCheck(text)
+    }
+
+    private fun fillAndCheck(text: String) {
+        input.setText(text)
+        evaluateCurrent()
+    }
+
     private fun evaluateCurrent() {
         val text = input.text?.toString().orEmpty().trim()
         if (text.isEmpty()) {
@@ -290,7 +318,7 @@ class MainActivity : Activity() {
         verdictBanner.text = getString(
             R.string.verdict_banner_format,
             verdictBadge(result.verdict),
-            result.riskScore,
+            RiskScorer.riskLevelLabel(result.verdict),
             result.bannerTitle,
         )
         verdictMessage.text = if (result.accountTakeover && result.takeoverAdvice != null) {
@@ -301,7 +329,10 @@ class MainActivity : Activity() {
         signalsView.text = if (result.matchedSignals.isEmpty()) {
             getString(R.string.signals_none)
         } else {
-            getString(R.string.signals_format, result.matchedSignals.joinToString(", "))
+            getString(
+                R.string.signals_format,
+                RiskScorer.humanSignals(result.matchedSignals).joinToString("\n") { "• $it" },
+            )
         }
     }
 
