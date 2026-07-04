@@ -78,6 +78,11 @@
             android:exported="false"
             android:label="@string/diag_title" />
 
+        <activity
+            android:name=".NotificationDigestActivity"
+            android:exported="false"
+            android:label="@string/digest_screen_title" />
+
         <receiver
             android:name=".SmsReceiver"
             android:enabled="true"

@@ -3,6 +3,8 @@ package ai.sakana.tantularguard
 import android.app.Activity
 import android.app.AlertDialog
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -52,6 +54,15 @@ class MainActivity : Activity() {
     private lateinit var advancedToggle: Button
     private lateinit var rootScroll: android.widget.ScrollView
     private lateinit var resultStrip: View
+    private lateinit var privacyShieldCard: LinearLayout
+    private lateinit var privacyShieldSummary: TextView
+    private lateinit var redactedPreview: TextView
+    private lateinit var messageSenseCard: LinearLayout
+    private lateinit var messageSenseSummary: TextView
+    private lateinit var messageSenseItems: TextView
+    private lateinit var messageSenseActions: TextView
+    private var latestRedaction: PiiRedactor.Result? = null
+    private var latestTriage: MessageTriage.Result? = null
     private lateinit var slmToggle: CompoundButton
     private lateinit var slmEndpoint: EditText
     private lateinit var radioOnDevice: RadioButton
@@ -64,6 +75,8 @@ class MainActivity : Activity() {
     private lateinit var defaultSmsStatus: TextView
     private lateinit var quarantineStatus: TextView
     private lateinit var guardLogStatus: TextView
+    private lateinit var digestToggle: CompoundButton
+    private lateinit var digestStatus: TextView
     private lateinit var gameLevel: TextView
     private lateinit var gameProgress: ProgressBar
     private lateinit var gameStats: TextView
@@ -92,6 +105,13 @@ class MainActivity : Activity() {
         advancedToggle = findViewById(R.id.advancedToggle)
         rootScroll = findViewById(R.id.rootScroll)
         resultStrip = findViewById(R.id.resultStrip)
+        privacyShieldCard = findViewById(R.id.privacyShieldCard)
+        privacyShieldSummary = findViewById(R.id.privacyShieldSummary)
+        redactedPreview = findViewById(R.id.redactedPreview)
+        messageSenseCard = findViewById(R.id.messageSenseCard)
+        messageSenseSummary = findViewById(R.id.messageSenseSummary)
+        messageSenseItems = findViewById(R.id.messageSenseItems)
+        messageSenseActions = findViewById(R.id.messageSenseActions)
         slmToggle = findViewById(R.id.slmToggle)
         slmEndpoint = findViewById(R.id.slmEndpoint)
         radioOnDevice = findViewById(R.id.radioOnDevice)
@@ -104,6 +124,8 @@ class MainActivity : Activity() {
         defaultSmsStatus = findViewById(R.id.defaultSmsStatus)
         quarantineStatus = findViewById(R.id.quarantineStatus)
         guardLogStatus = findViewById(R.id.guardLogStatus)
+        digestToggle = findViewById(R.id.digestToggle)
+        digestStatus = findViewById(R.id.digestStatus)
         gameLevel = findViewById(R.id.gameLevel)
         gameProgress = findViewById(R.id.gameProgress)
         gameStats = findViewById(R.id.gameStats)
@@ -150,6 +172,8 @@ class MainActivity : Activity() {
             fillAndCheck(getString(R.string.example_normal_text))
         }
         advancedToggle.setOnClickListener { toggleAdvanced() }
+        findViewById<Button>(R.id.copyRedactedButton).setOnClickListener { copyRedacted() }
+        findViewById<Button>(R.id.copyTriageButton).setOnClickListener { copyTriage() }
         findViewById<Button>(R.id.defaultSmsButton).setOnClickListener { requestDefaultSmsRole() }
         findViewById<Button>(R.id.latestQuarantineButton).setOnClickListener { openLatestQuarantine() }
         findViewById<Button>(R.id.clearQuarantineButton).setOnClickListener {
@@ -186,6 +210,22 @@ class MainActivity : Activity() {
             refreshNotifGuardStatus()
             refreshGameCard()
         }
+        digestToggle.setOnCheckedChangeListener { _, checked ->
+            prefs().edit().putBoolean(KEY_DIGEST_ON, checked).apply()
+            if (checked && !notificationAccessEnabled()) {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.perm_notif_access_title)
+                    .setMessage(R.string.perm_digest_body)
+                    .setPositiveButton(R.string.perm_open_settings) { _, _ -> openNotificationAccessSettings() }
+                    .setNegativeButton(R.string.perm_cancel) { _, _ -> digestToggle.isChecked = false }
+                    .setOnCancelListener { digestToggle.isChecked = false }
+                    .show()
+            }
+            refreshDigestStatus()
+        }
+        findViewById<Button>(R.id.viewDigestButton).setOnClickListener {
+            startActivity(Intent(this, NotificationDigestActivity::class.java))
+        }
         findViewById<Button>(R.id.notificationAccessButton).setOnClickListener { openNotificationAccessSettings() }
         findViewById<Button>(R.id.recoveryGuideButton).setOnClickListener { showRecoveryGuide() }
         findViewById<Button>(R.id.deviceRiskButton).setOnClickListener { showDeviceRiskChecklist() }
@@ -210,6 +250,7 @@ class MainActivity : Activity() {
         wireInfoPopup(R.id.infoAi, R.string.info_ai_title, R.string.info_ai_body)
         wireInfoPopup(R.id.infoWa, R.string.info_wa_title, R.string.info_wa_body)
         wireInfoPopup(R.id.infoQuarantine, R.string.info_quarantine_title, R.string.info_quarantine_body)
+        wireInfoPopup(R.id.infoDigest, R.string.info_digest_title, R.string.info_digest_body)
 
         handleSharedText(intent)
         handleCheckTextIntent(intent)
@@ -299,6 +340,7 @@ class MainActivity : Activity() {
         refreshNotifGuardStatus()
         refreshDefaultSmsStatus()
         refreshGuardLogStatus()
+        refreshDigestStatus()
         refreshGameCard()
     }
 
@@ -374,6 +416,10 @@ class MainActivity : Activity() {
         val text = input.text?.toString().orEmpty().trim()
         if (text.isEmpty()) {
             resultCard.visibility = View.GONE
+            privacyShieldCard.visibility = View.GONE
+            messageSenseCard.visibility = View.GONE
+            latestRedaction = null
+            latestTriage = null
             return
         }
         savePrefs()
@@ -381,6 +427,8 @@ class MainActivity : Activity() {
         // Phase 1 — instant, offline, deterministic rules.
         val base = RiskScorer.evaluate(text, useModelStage = false)
         render(base)
+        renderPrivacyShield(text)
+        renderMessageSense(text, base)
         scrollToResult()
 
         // Gamification counters: every check counts; catching a scam counts double fun.
@@ -416,6 +464,7 @@ class MainActivity : Activity() {
                 if (result.ok) {
                     val fused = RiskScorer.evaluate(text, useModelStage = false, slmLabel = result.label)
                     render(fused)
+                    renderMessageSense(text, fused)
                     slmStatus.text = getString(
                         R.string.slm_used_format,
                         result.backend,
@@ -469,6 +518,43 @@ class MainActivity : Activity() {
                 RiskScorer.humanSignals(result.matchedSignals).joinToString("\n") { "• $it" },
             )
         }
+    }
+
+    private fun renderPrivacyShield(text: String) {
+        val result = PiiRedactor.redact(text)
+        latestRedaction = result
+        privacyShieldCard.visibility = View.VISIBLE
+        privacyShieldSummary.text = result.summary()
+        redactedPreview.text = result.redactedText
+    }
+
+    private fun renderMessageSense(text: String, verdict: RiskScorer.GuardVerdict) {
+        val result = MessageTriage.analyze(text, verdict)
+        latestTriage = result
+        messageSenseCard.visibility = View.VISIBLE
+        messageSenseSummary.text = result.summary
+        messageSenseItems.text = getString(R.string.message_sense_items_prefix) + "\n" +
+            if (result.items.isEmpty()) getString(R.string.message_sense_no_items)
+            else result.items.joinToString("\n") { "• ${it.label}: ${it.value}" }
+        messageSenseActions.text = getString(R.string.message_sense_actions_prefix) + "\n" +
+            result.actions.joinToString("\n") { "• $it" }
+    }
+
+    private fun copyRedacted() {
+        val text = latestRedaction?.redactedText ?: return
+        copyToClipboard("Tantular", text)
+    }
+
+    private fun copyTriage() {
+        val result = latestTriage ?: return
+        val text = result.summary + "\n" + result.actions.joinToString("\n") { "• $it" }
+        copyToClipboard("Tantular", text)
+    }
+
+    private fun copyToClipboard(label: String, text: String) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        Toast.makeText(this, R.string.copied, Toast.LENGTH_SHORT).show()
     }
 
     private fun toggleAdvanced() {
@@ -537,6 +623,7 @@ class MainActivity : Activity() {
         }
         smsToggle.isChecked = p.getBoolean(KEY_SMS_GUARD_ON, false)
         notifGuardToggle.isChecked = p.getBoolean(KEY_NOTIF_GUARD_ON, false)
+        digestToggle.isChecked = p.getBoolean(KEY_DIGEST_ON, false)
     }
 
     private fun savePrefs() {
@@ -546,6 +633,7 @@ class MainActivity : Activity() {
             .putString(KEY_SLM_BACKEND, if (BuildConfig.ALLOW_DEV_SERVER && radioDevServer.isChecked) SLM_BACKEND_DEV_SERVER else SLM_BACKEND_ON_DEVICE)
             .putBoolean(KEY_SMS_GUARD_ON, smsToggle.isChecked)
             .putBoolean(KEY_NOTIF_GUARD_ON, notifGuardToggle.isChecked)
+            .putBoolean(KEY_DIGEST_ON, digestToggle.isChecked)
             .apply()
     }
 
@@ -606,6 +694,19 @@ class MainActivity : Activity() {
 
     private fun showGuardLog() {
         startActivity(Intent(this, GuardLogActivity::class.java))
+    }
+
+    private fun refreshDigestStatus() {
+        val on = digestToggle.isChecked
+        val access = notificationAccessEnabled()
+        digestStatus.text = when {
+            !on -> getString(R.string.digest_off)
+            !access -> getString(R.string.digest_need_access)
+            else -> {
+                val n = NotificationDigestStore.countToday(this)
+                if (n == 0) getString(R.string.digest_ready) else getString(R.string.digest_count_today, n)
+            }
+        }
     }
 
     private fun notificationAccessEnabled(): Boolean {
@@ -733,6 +834,8 @@ class MainActivity : Activity() {
     companion object {
         const val KEY_SMS_GUARD_ON = "sms_guard_on"
         const val KEY_NOTIF_GUARD_ON = "notif_guard_on"
+        const val KEY_DIGEST_ON = "digest_on"
+        const val KEY_DIGEST_IMPORTANT_ONLY = "digest_important_only"
         const val KEY_SLM_ON = "slm_on"
         const val KEY_SLM_BACKEND = "slm_backend"
         const val SLM_BACKEND_ON_DEVICE = "on_device"

@@ -31,11 +31,12 @@ class NotificationGuardService : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         sbn ?: return
-        if (!guardEnabled()) return
+        val notifGuardOn = guardEnabled()
+        val digestOn = digestEnabled()
+        if (!notifGuardOn && !digestOn) return
 
         val pkg = sbn.packageName ?: return
         if (pkg == packageName) return
-        if (pkg !in MONITORED_PACKAGES) return
 
         val notification = sbn.notification ?: return
         // Skip group summaries and ongoing/transport notifications (e.g. calls).
@@ -53,6 +54,16 @@ class NotificationGuardService : NotificationListenerService() {
         if (lowered.contains("new messages") || lowered.contains("pesan baru") ||
             lowered.contains("checking for messages") || lowered.contains("mengecek pesan")
         ) return
+
+        // Personal Notification Digest (Cluster D): organize useful notifications
+        // into a daily summary, independent of the scam verdict. Content-first,
+        // non-system apps only; nothing leaves the device.
+        if (digestOn && !isSystemPackage(pkg)) {
+            captureDigest(pkg, title, body)
+        }
+
+        // Scam / account-takeover guard: messaging + social apps only.
+        if (!notifGuardOn || pkg !in MONITORED_PACKAGES) return
 
         val verdict = RiskScorer.evaluate(body, useModelStage = false)
         val borderline = RiskScorer.shouldUseModelStage(body)
@@ -91,6 +102,43 @@ class NotificationGuardService : NotificationListenerService() {
     private fun guardEnabled(): Boolean =
         getSharedPreferences("tantular_guard", Context.MODE_PRIVATE)
             .getBoolean(MainActivity.KEY_NOTIF_GUARD_ON, false)
+
+    private fun digestEnabled(): Boolean =
+        getSharedPreferences("tantular_guard", Context.MODE_PRIVATE)
+            .getBoolean(MainActivity.KEY_DIGEST_ON, false)
+
+    /**
+     * Classify + store one notification for the daily digest. Drops generic
+     * "umum" chatter from non-messenger apps so only useful notifications (or
+     * personal chats from monitored messengers) are kept.
+     */
+    private fun captureDigest(pkg: String, title: String, body: String) {
+        val cat = NotificationClassifier.classify(body, title)
+        if (cat.key == "umum" && pkg !in MONITORED_PACKAGES) return
+        NotificationDigestStore.add(
+            applicationContext, pkg, appDisplayLabel(pkg), cat.key, cat.priority, title, body,
+        )
+    }
+
+    /** Skip system/launcher/keyboard packages that never carry a useful digest item. */
+    private fun isSystemPackage(pkg: String): Boolean =
+        pkg == "android" ||
+            pkg.startsWith("com.android.") ||
+            pkg == "com.google.android.gms" ||
+            pkg == "com.google.android.googlequicksearchbox" ||
+            pkg.contains("systemui") ||
+            pkg.contains("packageinstaller") ||
+            pkg.contains("inputmethod") ||
+            pkg.contains("launcher")
+
+    /** Real installed-app name via PackageManager, falling back to the known map. */
+    private fun appDisplayLabel(pkg: String): String {
+        runCatching {
+            val pm = packageManager
+            return pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+        }
+        return appLabel(pkg)
+    }
 
     /**
      * Only run the SLM in the background when the user enabled it AND selected

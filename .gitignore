@@ -13,6 +13,13 @@ tantular/data/
 # Android build outputs / machine-specific config
 android/**/build/
 android/**/.gradle/
+android/**/.gradle-user-home/
 android/**/local.properties
 android/**/.idea/
 android/**/*.apk
+
+# Vendored on-device runtime (fetched by scripts/fetch_llama_cpp.sh) + native output
+android/**/app/src/main/cpp/llama.cpp/
+android/**/.cxx/
+android/**/app/src/main/jniLibs/
+.DS_Store
