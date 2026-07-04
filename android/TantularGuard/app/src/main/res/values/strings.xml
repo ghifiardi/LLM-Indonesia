@@ -13,6 +13,19 @@
     <string name="check_message">Periksa Pesan</string>
     <string name="clear">Bersihkan</string>
     <string name="paste_and_check">📋 Tempel &amp; Periksa</string>
+
+    <string name="onboarding_1_title">Selamat datang di Tantular Guard</string>
+    <string name="onboarding_1_body">Aplikasi ini membantu Anda mengecek pesan SMS/WhatsApp yang mencurigakan — penipuan OTP, hadiah palsu, link berbahaya.\n\nSemua pemeriksaan terjadi di HP Anda. Pesan tidak dikirim ke mana pun.</string>
+    <string name="onboarding_2_title">Cara memeriksa pesan</string>
+    <string name="onboarding_2_body">1. Salin (copy) pesan yang mencurigakan.\n2. Buka Tantular Guard.\n3. Ketuk tombol 📋 Tempel &amp; Periksa.\n\nAtau dari WhatsApp: tekan lama pesannya → Bagikan → pilih Tantular Guard.</string>
+    <string name="onboarding_3_title">Pahami hasilnya</string>
+    <string name="onboarding_3_body">🛑 BAHAYA — kemungkinan besar penipuan. Jangan ikuti perintahnya.\n\n⚠️ HATI-HATI — ada tanda mencurigakan. Cek dulu lewat kanal resmi.\n\n✅ AMAN — tidak ada tanda bahaya terdeteksi.</string>
+    <string name="onboarding_next">Lanjut</string>
+    <string name="onboarding_back">Kembali</string>
+    <string name="onboarding_skip">Lewati</string>
+    <string name="onboarding_done">Mulai</string>
+    <string name="onboarding_try_example">🚀 Coba dengan contoh penipuan</string>
+    <string name="how_to_use_button">❓ Cara pakai</string>
     <string name="clipboard_empty">Tidak ada teks tersalin. Salin pesan dulu, lalu ketuk lagi.</string>
     <string name="examples_title">Belum ada pesan? Coba contoh ini:</string>
     <string name="example_otp_label">Contoh: minta OTP</string>

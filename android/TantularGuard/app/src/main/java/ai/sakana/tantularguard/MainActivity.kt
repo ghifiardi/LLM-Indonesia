@@ -164,11 +164,39 @@ class MainActivity : Activity() {
             refreshGuardLogStatus()
             Toast.makeText(this, R.string.guard_log_cleared, Toast.LENGTH_SHORT).show()
         }
+        findViewById<Button>(R.id.howToUseButton).setOnClickListener {
+            startActivity(Intent(this, OnboardingActivity::class.java))
+        }
 
         handleSharedText(intent)
         handleCheckTextIntent(intent)
         handleSmsNotificationIntent(intent)
         handleQuarantineIntent(intent)
+        handleRunExampleIntent(intent)
+
+        // First launch: show step-by-step guidance instead of an empty screen.
+        // Skip when the app was opened to do something (share/notification/etc.)
+        // so onboarding never blocks a real task.
+        if (!prefs().getBoolean(OnboardingActivity.KEY_ONBOARDING_DONE, false) && !openedWithTask(intent)) {
+            startActivity(Intent(this, OnboardingActivity::class.java))
+        }
+    }
+
+    /** True when the app was opened via share sheet, notification, or deep link. */
+    private fun openedWithTask(intent: Intent?): Boolean =
+        intent?.action == Intent.ACTION_SEND ||
+            intent?.action == Intent.ACTION_SENDTO ||
+            intent?.hasExtra(EXTRA_CHECK_TEXT) == true ||
+            intent?.hasExtra(EXTRA_RUN_EXAMPLE) == true ||
+            intent?.hasExtra(SmsReceiver.EXTRA_SMS_TEXT) == true ||
+            intent?.hasExtra(SmsQuarantine.EXTRA_QUARANTINE_ID) == true
+
+    /** Onboarding's "Coba dengan contoh" lands here: run the OTP example at once. */
+    private fun handleRunExampleIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_RUN_EXAMPLE, false) == true) {
+            intent.removeExtra(EXTRA_RUN_EXAMPLE)
+            fillAndCheck(getString(R.string.example_otp_text))
+        }
     }
 
     override fun onResume() {
@@ -191,6 +219,7 @@ class MainActivity : Activity() {
         handleCheckTextIntent(intent)
         handleSmsNotificationIntent(intent)
         handleQuarantineIntent(intent)
+        handleRunExampleIntent(intent)
     }
 
     /** Accept text shared from SMS/WhatsApp/other apps via the system share sheet. */
@@ -595,6 +624,7 @@ class MainActivity : Activity() {
         const val SLM_BACKEND_ON_DEVICE = "on_device"
         const val SLM_BACKEND_DEV_SERVER = "dev_server"
         const val EXTRA_CHECK_TEXT = "ai.sakana.tantularguard.extra.CHECK_TEXT"
+        const val EXTRA_RUN_EXAMPLE = "ai.sakana.tantularguard.extra.RUN_EXAMPLE"
         private const val KEY_ADVANCED_OPEN = "advanced_open"
         private const val REQ_SMS_STAGE2 = 2202
         private const val REQ_DEFAULT_SMS = 2302

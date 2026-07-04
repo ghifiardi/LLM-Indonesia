@@ -36,6 +36,20 @@
                 android:text="@string/home_tagline"
                 android:textColor="#CBD5E1"
                 android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/howToUseButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/button_secondary"
+                android:minHeight="40dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="@string/how_to_use_button"
+                android:textAllCaps="false"
+                android:textColor="@color/ink"
+                android:textSize="13sp" />
         </LinearLayout>
 
         <!-- Primary: check a message -->
