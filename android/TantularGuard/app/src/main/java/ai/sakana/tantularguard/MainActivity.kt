@@ -19,6 +19,7 @@ import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
@@ -63,6 +64,13 @@ class MainActivity : Activity() {
     private lateinit var defaultSmsStatus: TextView
     private lateinit var quarantineStatus: TextView
     private lateinit var guardLogStatus: TextView
+    private lateinit var gameLevel: TextView
+    private lateinit var gameProgress: ProgressBar
+    private lateinit var gameStats: TextView
+    private lateinit var missionFirst: TextView
+    private lateinit var missionFive: TextView
+    private lateinit var missionSms: TextView
+    private lateinit var missionNotif: TextView
 
     private var slmRun = 0
 
@@ -96,6 +104,13 @@ class MainActivity : Activity() {
         defaultSmsStatus = findViewById(R.id.defaultSmsStatus)
         quarantineStatus = findViewById(R.id.quarantineStatus)
         guardLogStatus = findViewById(R.id.guardLogStatus)
+        gameLevel = findViewById(R.id.gameLevel)
+        gameProgress = findViewById(R.id.gameProgress)
+        gameStats = findViewById(R.id.gameStats)
+        missionFirst = findViewById(R.id.missionFirst)
+        missionFive = findViewById(R.id.missionFive)
+        missionSms = findViewById(R.id.missionSms)
+        missionNotif = findViewById(R.id.missionNotif)
         verdictMessage.movementMethod = LinkMovementMethod.getInstance()
 
         if (!BuildConfig.ALLOW_DEV_SERVER) {
@@ -108,6 +123,7 @@ class MainActivity : Activity() {
         refreshNotifGuardStatus()
         refreshDefaultSmsStatus()
         refreshGuardLogStatus()
+        refreshGameCard()
 
         findViewById<android.widget.RadioGroup>(R.id.slmBackendGroup)
             .setOnCheckedChangeListener { _, _ ->
@@ -142,13 +158,33 @@ class MainActivity : Activity() {
         }
         smsToggle.setOnCheckedChangeListener { _, checked ->
             prefs().edit().putBoolean(KEY_SMS_GUARD_ON, checked).apply()
-            if (checked) requestSmsStage2Permissions()
+            if (checked && smsPermissionsMissing()) {
+                // Explain BEFORE Android's scary system prompt, so users know
+                // what they're agreeing to (and denials stop being reflexive).
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.perm_sms_title)
+                    .setMessage(R.string.perm_sms_body)
+                    .setPositiveButton(R.string.perm_continue) { _, _ -> requestSmsStage2Permissions() }
+                    .setNegativeButton(R.string.perm_cancel) { _, _ -> smsToggle.isChecked = false }
+                    .setOnCancelListener { smsToggle.isChecked = false }
+                    .show()
+            }
             refreshSmsStatus()
+            refreshGameCard()
         }
         notifGuardToggle.setOnCheckedChangeListener { _, checked ->
             prefs().edit().putBoolean(KEY_NOTIF_GUARD_ON, checked).apply()
-            if (checked && !notificationAccessEnabled()) openNotificationAccessSettings()
+            if (checked && !notificationAccessEnabled()) {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.perm_notif_access_title)
+                    .setMessage(R.string.perm_notif_access_body)
+                    .setPositiveButton(R.string.perm_open_settings) { _, _ -> openNotificationAccessSettings() }
+                    .setNegativeButton(R.string.perm_cancel) { _, _ -> notifGuardToggle.isChecked = false }
+                    .setOnCancelListener { notifGuardToggle.isChecked = false }
+                    .show()
+            }
             refreshNotifGuardStatus()
+            refreshGameCard()
         }
         findViewById<Button>(R.id.notificationAccessButton).setOnClickListener { openNotificationAccessSettings() }
         findViewById<Button>(R.id.recoveryGuideButton).setOnClickListener { showRecoveryGuide() }
@@ -189,6 +225,46 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Update the Misi Keamanan card: missions, score bar, level, stats. */
+    private fun refreshGameCard() {
+        val p = prefs()
+        val checks = p.getInt(GameState.KEY_CHECK_COUNT, 0)
+        val blocks = p.getInt(GameState.KEY_BLOCK_COUNT, 0)
+        val missions = GameState.Missions(
+            firstCheck = checks >= 1,
+            smsGuardOn = p.getBoolean(KEY_SMS_GUARD_ON, false) && !smsPermissionsMissing(),
+            notifGuardOn = p.getBoolean(KEY_NOTIF_GUARD_ON, false) && notificationAccessEnabled(),
+            fiveChecks = checks >= GameState.FIVE_CHECKS_TARGET,
+        )
+        val score = GameState.score(missions)
+
+        gameLevel.text = getString(R.string.game_level_format, GameState.levelName(score), score)
+        if (Build.VERSION.SDK_INT >= 24) gameProgress.setProgress(score, true) else gameProgress.progress = score
+        gameStats.text = getString(R.string.game_stats_format, checks, blocks)
+
+        fun mark(done: Boolean, label: String) = (if (done) "✅ " else "⬜ ") + label
+        missionFirst.text = mark(missions.firstCheck, getString(R.string.mission_first))
+        missionFive.text = mark(
+            missions.fiveChecks,
+            getString(R.string.mission_five, checks.coerceAtMost(GameState.FIVE_CHECKS_TARGET)),
+        )
+        missionSms.text = mark(missions.smsGuardOn, getString(R.string.mission_sms))
+        missionNotif.text = mark(missions.notifGuardOn, getString(R.string.mission_notif))
+
+        // Celebrate score increases exactly once per new high.
+        val celebrated = p.getInt(GameState.KEY_CELEBRATED_SCORE, 0)
+        if (score > celebrated) {
+            Toast.makeText(
+                this,
+                getString(R.string.game_score_up, GameState.levelName(score)),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+        if (score != celebrated) {
+            p.edit().putInt(GameState.KEY_CELEBRATED_SCORE, score).apply()
+        }
+    }
+
     /** Attach a plain-language "what does this do?" dialog to an ℹ️ header icon. */
     private fun wireInfoPopup(viewId: Int, titleRes: Int, bodyRes: Int) {
         findViewById<TextView>(viewId).setOnClickListener {
@@ -223,6 +299,7 @@ class MainActivity : Activity() {
         refreshNotifGuardStatus()
         refreshDefaultSmsStatus()
         refreshGuardLogStatus()
+        refreshGameCard()
     }
 
     override fun onPause() {
@@ -305,6 +382,17 @@ class MainActivity : Activity() {
         val base = RiskScorer.evaluate(text, useModelStage = false)
         render(base)
         scrollToResult()
+
+        // Gamification counters: every check counts; catching a scam counts double fun.
+        prefs().edit()
+            .putInt(GameState.KEY_CHECK_COUNT, prefs().getInt(GameState.KEY_CHECK_COUNT, 0) + 1)
+            .apply()
+        if (base.verdict == RiskScorer.Verdict.BLOCK) {
+            prefs().edit()
+                .putInt(GameState.KEY_BLOCK_COUNT, prefs().getInt(GameState.KEY_BLOCK_COUNT, 0) + 1)
+                .apply()
+        }
+        refreshGameCard()
 
         // Phase 2 — optional SLM, only for borderline messages. Production
         // default is on-device. Dev-server/Ollama is explicit and opt-in.
@@ -459,6 +547,14 @@ class MainActivity : Activity() {
             .putBoolean(KEY_SMS_GUARD_ON, smsToggle.isChecked)
             .putBoolean(KEY_NOTIF_GUARD_ON, notifGuardToggle.isChecked)
             .apply()
+    }
+
+    private fun smsPermissionsMissing(): Boolean {
+        val smsMissing = Build.VERSION.SDK_INT >= 23 &&
+            checkSelfPermission(Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED
+        val notifMissing = Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        return smsMissing || notifMissing
     }
 
     private fun requestSmsStage2Permissions() {

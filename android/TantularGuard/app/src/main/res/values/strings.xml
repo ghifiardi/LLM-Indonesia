@@ -31,6 +31,25 @@
     <string name="onboarding_try_example">🚀 Coba dengan contoh penipuan</string>
     <string name="how_to_use_button">❓ Cara pakai</string>
 
+    <!-- Pre-permission explainers (shown BEFORE Android's system prompt) -->
+    <string name="perm_sms_title">Sebelum lanjut: izin SMS</string>
+    <string name="perm_sms_body">HP akan menampilkan permintaan izin dari Android:\n\n📩 Izin SMS — agar Tantular bisa memindai SMS yang masuk. Pemindaian terjadi di HP; tidak ada SMS yang dikirim keluar atau dibaca orang lain.\n\n🔔 Izin notifikasi — agar peringatan penipuan bisa muncul.\n\nAnda bisa mematikan fitur ini kapan saja.</string>
+    <string name="perm_notif_access_title">Sebelum lanjut: akses notifikasi</string>
+    <string name="perm_notif_access_body">HP akan membuka pengaturan "Akses notifikasi". Aktifkan Tantular Guard di sana.\n\nApa artinya: Tantular hanya membaca teks notifikasi yang muncul dari aplikasi yang dipantau (WhatsApp, medsos) untuk mencari tanda penipuan — bukan seluruh isi chat, dan tidak ada yang dikirim ke internet.\n\nAnda bisa mencabutnya kapan saja di pengaturan yang sama.</string>
+    <string name="perm_continue">Lanjut</string>
+    <string name="perm_cancel">Batal</string>
+    <string name="perm_open_settings">Buka pengaturan</string>
+
+    <!-- Misi Keamanan (gamification) -->
+    <string name="game_title">🏆 Misi Keamanan</string>
+    <string name="game_level_format">%1$s · %2$d/100 poin</string>
+    <string name="game_stats_format">🔎 %1$d pesan dicek · 🚨 %2$d penipuan terdeteksi</string>
+    <string name="mission_first">Periksa pesan pertamamu</string>
+    <string name="mission_sms">Aktifkan pemeriksaan SMS</string>
+    <string name="mission_notif">Aktifkan periksa notifikasi WA/medsos</string>
+    <string name="mission_five">Periksa %1$d/5 pesan</string>
+    <string name="game_score_up">🎉 Skor naik! %1$s</string>
+
     <!-- "What does this feature actually do?" info dialogs -->
     <string name="info_protection_title">Apa itu Perlindungan otomatis?</string>
     <string name="info_protection_body">Yang terjadi bila diaktifkan:\n\n📩 Pemeriksaan SMS masuk — setiap SMS baru dipindai langsung di HP. Jika terdeteksi berbahaya, muncul notifikasi peringatan. SMS tetap masuk ke kotak masuk seperti biasa.\n\n💬 Periksa notifikasi WhatsApp &amp; medsos — hanya teks yang tampil di notifikasi yang dipindai (bukan seluruh isi chat), untuk mengenali upaya pembajakan akun.\n\nYang TIDAK dilakukan:\n• Tidak membaca chat WhatsApp Anda.\n• Tidak mengirim pesan ke internet — semua diproses di HP.\n• Tidak menghapus pesan apa pun.</string>
