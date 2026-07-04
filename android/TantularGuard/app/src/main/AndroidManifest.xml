@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Android 11+ package visibility: without these declarations,
+         getLaunchIntentForPackage() returns null even when the app IS
+         installed (e.g. on Galaxy S21 / Android 13+), breaking the
+         "Buka WhatsApp / WA Business" buttons. -->
+    <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+    </queries>
+
     <!-- INTERNET is used ONLY by the explicit dev-server SLM backend (Ollama/HTTP).
          Production-default SLM is on-device; when dev-server mode is off, no
          SLM network call is made and the message never leaves the device. -->

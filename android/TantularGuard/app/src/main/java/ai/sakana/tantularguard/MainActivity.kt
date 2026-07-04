@@ -513,7 +513,8 @@ class MainActivity : Activity() {
     private fun openExternalApp(packageName: String) {
         val launch = packageManager.getLaunchIntentForPackage(packageName)
         if (launch != null) {
-            startActivity(launch)
+            runCatching { startActivity(launch) }
+                .onFailure { Toast.makeText(this, R.string.app_not_installed, Toast.LENGTH_SHORT).show() }
         } else {
             Toast.makeText(this, R.string.app_not_installed, Toast.LENGTH_SHORT).show()
         }
@@ -541,21 +542,43 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 29) {
             val roleManager = getSystemService(RoleManager::class.java)
             if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_SMS)) {
-                startActivityForResult(roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS), REQ_DEFAULT_SMS)
-                return
+                val launched = runCatching {
+                    startActivityForResult(roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS), REQ_DEFAULT_SMS)
+                }.isSuccess
+                if (launched) return
             }
         }
         @Suppress("DEPRECATION")
         val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
             putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
         }
-        startActivityForResult(intent, REQ_DEFAULT_SMS)
+        val ok = runCatching { startActivityForResult(intent, REQ_DEFAULT_SMS) }.isSuccess
+        if (!ok) openDefaultAppsSettings()
+    }
+
+    /**
+     * Samsung/OneUI sometimes dismisses the role dialog without showing it.
+     * Send the user to the system Default-apps screen so they can pick
+     * Tantular manually: Pengaturan > Aplikasi default > Aplikasi SMS.
+     */
+    private fun openDefaultAppsSettings() {
+        Toast.makeText(this, R.string.default_sms_manual_hint, Toast.LENGTH_LONG).show()
+        runCatching {
+            startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
+        }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+        }
     }
 
     @Deprecated("Deprecated by Activity, still needed for default-SMS role fallback result.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQ_DEFAULT_SMS) refreshDefaultSmsStatus()
+        if (requestCode == REQ_DEFAULT_SMS) {
+            refreshDefaultSmsStatus()
+            // Role dialog denied/auto-dismissed (common on OneUI): guide the
+            // user to the manual path instead of failing silently.
+            if (!isDefaultSmsApp()) openDefaultAppsSettings()
+        }
     }
 
     private fun openLatestQuarantine() {

@@ -68,6 +68,7 @@
     <string name="default_sms_button">Jadikan aplikasi SMS utama</string>
     <string name="default_sms_ready">Aktif sebagai aplikasi SMS utama. SMS berbahaya bisa dipisahkan.</string>
     <string name="default_sms_not_ready">Belum jadi aplikasi SMS utama. Saat ini hanya bisa memberi peringatan.</string>
+    <string name="default_sms_manual_hint">Buka: Aplikasi default → Aplikasi SMS → pilih Tantular Guard.</string>
     <string name="quarantine_empty">Karantina kosong.</string>
     <string name="quarantine_count_format">Karantina: %1$d pesan. Terbaru: %2$s</string>
     <string name="latest_quarantine_button">Buka terakhir</string>
