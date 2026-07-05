@@ -353,6 +353,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        rebindNotificationListener()
         refreshSmsStatus()
         refreshNotifGuardStatus()
         refreshDefaultSmsStatus()
@@ -789,10 +790,27 @@ class MainActivity : Activity() {
     private fun refreshNotifGuardStatus() {
         val enabled = notifGuardToggle.isChecked
         val access = notificationAccessEnabled()
+        val connected = prefs().getBoolean(KEY_NOTIF_LISTENER_CONNECTED, false)
+        val privacy = "\n" + getString(R.string.notif_guard_privacy)
         notifGuardStatus.text = when {
             !enabled -> getString(R.string.notif_guard_off)
-            access -> getString(R.string.notif_guard_ready) + "\n" + getString(R.string.notif_guard_privacy)
-            else -> getString(R.string.notif_guard_need_access) + "\n" + getString(R.string.notif_guard_privacy)
+            !access -> getString(R.string.notif_guard_need_access) + privacy
+            connected -> getString(R.string.notif_guard_ready) + privacy
+            else -> getString(R.string.notif_guard_connecting) + privacy
+        }
+    }
+
+    /**
+     * Force-rebind the notification listener. Android often leaves it
+     * disconnected after an app update even though access is still granted, so
+     * the guard silently stops working. Calling this on app open self-heals it.
+     */
+    private fun rebindNotificationListener() {
+        if (!notificationAccessEnabled()) return
+        runCatching {
+            android.service.notification.NotificationListenerService.requestRebind(
+                android.content.ComponentName(this, NotificationGuardService::class.java),
+            )
         }
     }
 
@@ -906,6 +924,7 @@ class MainActivity : Activity() {
     companion object {
         const val KEY_SMS_GUARD_ON = "sms_guard_on"
         const val KEY_NOTIF_GUARD_ON = "notif_guard_on"
+        const val KEY_NOTIF_LISTENER_CONNECTED = "notif_listener_connected"
         const val KEY_DIGEST_ON = "digest_on"
         const val KEY_DIGEST_IMPORTANT_ONLY = "digest_important_only"
         const val KEY_SLM_ON = "slm_on"

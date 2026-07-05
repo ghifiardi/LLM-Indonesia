@@ -159,7 +159,8 @@
     <string name="ato_help">Lindungi WhatsApp, media sosial, email, dan akun penting dari pengambilalihan. Mengenali permintaan kode/OTP, dukungan palsu, tautan login, aplikasi berbahaya, dan akses jarak jauh.</string>
     <string name="notif_guard_toggle">Periksa notifikasi WhatsApp &amp; medsos</string>
     <string name="notif_guard_off">Nonaktif. Tempel/bagikan tetap bisa digunakan.</string>
-    <string name="notif_guard_ready">Aktif. Teks notifikasi diperiksa langsung di HP.</string>
+    <string name="notif_guard_ready">Aktif &amp; terhubung. Notifikasi masuk (WhatsApp/medsos) diperiksa langsung di HP.</string>
+    <string name="notif_guard_connecting">Izin diberi, menyambungkan… buka lalu tutup aplikasi ini sekali bila status belum \"terhubung\".</string>
     <string name="notif_guard_need_access">Beri izin akses notifikasi untuk Tantular di pengaturan HP.</string>
     <string name="notif_guard_privacy">Tantular hanya membaca teks notifikasi yang muncul, bukan seluruh isi chat. Pemeriksaan berjalan di HP.</string>
     <string name="notif_access_button">Beri izin notifikasi</string>

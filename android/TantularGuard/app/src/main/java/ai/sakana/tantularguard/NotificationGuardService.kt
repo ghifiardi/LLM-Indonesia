@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.util.Log
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -28,6 +29,27 @@ import java.util.concurrent.Executors
  *     network, keeping the privacy posture intact.
  */
 class NotificationGuardService : NotificationListenerService() {
+
+    // Track whether the listener is actually bound. After an app update Android
+    // frequently leaves the listener disconnected even though access is still
+    // "granted", so the guard silently stops seeing notifications. Recording
+    // these lets the UI show the true state and self-heal via requestRebind().
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        setConnected(true)
+        Log.i("NotifGuard", "listener connected")
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        setConnected(false)
+        Log.i("NotifGuard", "listener disconnected")
+    }
+
+    private fun setConnected(connected: Boolean) {
+        getSharedPreferences("tantular_guard", Context.MODE_PRIVATE).edit()
+            .putBoolean(MainActivity.KEY_NOTIF_LISTENER_CONNECTED, connected).apply()
+    }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         sbn ?: return
