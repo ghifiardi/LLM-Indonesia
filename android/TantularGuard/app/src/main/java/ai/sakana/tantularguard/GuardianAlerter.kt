@@ -107,7 +107,7 @@ object GuardianAlerter {
                 )
                 val delivered = PendingIntent.getBroadcast(
                     app, 1000 + idx,
-                    Intent(ACTION_DELIVERED).setPackage(app.packageName),
+                    Intent(ACTION_DELIVERED).setPackage(app.packageName).putExtra(EXTRA_NUM, n),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 )
                 if (parts.size > 1) {
@@ -134,7 +134,14 @@ object GuardianAlerter {
                 val ctx = c ?: return
                 if (i?.action == ACTION_DELIVERED) {
                     if (resultCode == Activity.RESULT_OK) {
-                        Log.i(TAG, "SMS delivery REPORT: DELIVERED — carrier confirmed the guardian received it")
+                        val num = i.getStringExtra(EXTRA_NUM).orEmpty()
+                        Log.i(TAG, "SMS delivery REPORT: DELIVERED to $num — carrier confirmed the guardian received it")
+                        notifyStatus(
+                            ctx,
+                            ctx.getString(R.string.family_alert_delivered_title),
+                            ctx.getString(R.string.family_alert_delivered_body, num),
+                            ID_DELIVERED,
+                        )
                     } else {
                         Log.i(TAG, "SMS delivery REPORT: NOT DELIVERED (code=$resultCode) — pulsa/blocked/filtered")
                         notifyStatus(
@@ -202,6 +209,8 @@ object GuardianAlerter {
 
     private const val CHANNEL_ID = "tantular_guardian_status"
     private const val ID_STATUS = 53000
+    private const val ID_DELIVERED = 53001
+    private const val EXTRA_NUM = "num"
     private const val ACTION_SENT = "ai.sakana.tantularguard.GUARDIAN_SMS_SENT"
     private const val ACTION_DELIVERED = "ai.sakana.tantularguard.GUARDIAN_SMS_DELIVERED"
 }
