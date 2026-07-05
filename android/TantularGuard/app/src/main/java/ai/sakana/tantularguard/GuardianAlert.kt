@@ -50,7 +50,14 @@ object GuardianAlert {
         // Indonesian carriers (Telkomsel) drop P2P SMS containing those anti-fraud
         // trigger words, so a scam-worded alert gets a false DELIVERED but never
         // reaches the handset. The guardian phones to learn the details.
-        return "Halo, tolong segera telepon $who dan tanyakan keadaannya sebentar — " +
+        //
+        // Kept strictly ASCII (GSM-7): a single non-ASCII char like an em-dash
+        // forces UCS-2 encoding, which cuts the per-segment limit 160->67 and
+        // splits the alert into multiple parts. Multipart UCS-2 alerts are the
+        // ones that get partially rejected (GENERIC_FAILURE on a segment) and
+        // mis-reassembled by Huawei/iOS spam filters. One ASCII segment = most
+        // reliable delivery.
+        return "Halo, tolong segera telepon $who dan tanyakan keadaannya sebentar - " +
             "ada pesan di HP-nya yang sebaiknya diperiksa bersama. $ALERT_SIGNATURE"
     }
 

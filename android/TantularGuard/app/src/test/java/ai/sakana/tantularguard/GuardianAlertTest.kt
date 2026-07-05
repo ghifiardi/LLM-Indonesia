@@ -55,6 +55,15 @@ class GuardianAlertTest {
         assertFalse(body.contains("install aplikasi"))
     }
 
+    @Test fun alertIsSingleAsciiSmsSegment() {
+        // A single non-ASCII char (em-dash, curly quote) forces UCS-2 encoding,
+        // which splits the SMS into 67-char segments -> partial GENERIC_FAILURE
+        // and mis-reassembly on Huawei/iOS. Keep it GSM-7 and one segment.
+        val body = GuardianAlert.buildAlert("Ibu", "berisiko tinggi penipuan", listOf("diminta OTP"))
+        assertTrue("alert must be pure ASCII", body.all { it.code in 32..126 })
+        assertTrue("alert must fit one GSM-7 SMS segment (<=160)", body.length <= 160)
+    }
+
     @Test fun rateLimit() {
         assertTrue(GuardianAlert.shouldSend(10_000_000L, 0L))
         assertFalse(GuardianAlert.shouldSend(1_000L, 0L))

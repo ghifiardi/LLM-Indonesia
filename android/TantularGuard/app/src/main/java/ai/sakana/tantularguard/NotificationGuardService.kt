@@ -90,6 +90,7 @@ class NotificationGuardService : NotificationListenerService() {
         val verdict = RiskScorer.evaluate(body, useModelStage = false)
         val borderline = RiskScorer.shouldUseModelStage(body)
         val label = appLabel(pkg)
+        Log.i("NotifGuard", "scored pkg=$pkg verdict=${verdict.verdict} borderline=$borderline")
         if (verdict.verdict == RiskScorer.Verdict.ALLOW && !borderline) {
             GuardLog.add(this, label, title, body, verdict, GuardLog.ROUTE_INBOX)
             return
@@ -97,7 +98,10 @@ class NotificationGuardService : NotificationListenerService() {
 
         val key = (pkg + "|" + body).hashCode()
         synchronized(recent) {
-            if (recent.contains(key)) return
+            if (recent.contains(key)) {
+                Log.i("NotifGuard", "DEDUP: identical message already handled this session -> skipping (no alert)")
+                return
+            }
             recent.add(key)
             if (recent.size > MAX_RECENT) recent.removeAt(0)
         }
