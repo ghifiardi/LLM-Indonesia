@@ -43,4 +43,26 @@ class GuardianAlertTest {
         assertEquals("berisiko pengambilalihan akun", GuardianAlert.levelText("WARN", true))
         assertEquals("berisiko tinggi penipuan", GuardianAlert.levelText("BLOCK", false))
     }
+
+    @Test fun sameIncidentSharesKeyRegardlessOfSignalOrder() {
+        // Same scam via SMS and WhatsApp -> same key -> deduped to one alert.
+        val a = GuardianAlert.incidentKey("berisiko pengambilalihan akun", listOf("kode_verifikasi_akun", "minta_bagikan_kode"))
+        val b = GuardianAlert.incidentKey("berisiko pengambilalihan akun", listOf("minta_bagikan_kode", "kode_verifikasi_akun"))
+        assertEquals(a, b)
+    }
+
+    @Test fun differentThreatHasDifferentKey() {
+        val takeover = GuardianAlert.incidentKey("berisiko pengambilalihan akun", listOf("minta_bagikan_kode"))
+        val phishing = GuardianAlert.incidentKey("berisiko tinggi penipuan", listOf("tautan_phishing"))
+        assertTrue(takeover != phishing)
+    }
+
+    @Test fun perIncidentRateLimit() {
+        val now = 10_000_000L
+        val key = GuardianAlert.incidentKey("berisiko tinggi penipuan", listOf("tautan_phishing"))
+        // Same incident 1 minute ago -> suppressed; a different incident -> allowed.
+        assertFalse(GuardianAlert.shouldSend(now, now - 60_000L))
+        assertTrue(GuardianAlert.shouldSend(now, 0L))
+        assertTrue(key.isNotBlank())
+    }
 }

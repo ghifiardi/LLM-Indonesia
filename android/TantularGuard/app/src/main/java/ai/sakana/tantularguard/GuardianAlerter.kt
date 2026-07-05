@@ -37,10 +37,15 @@ object GuardianAlerter {
         if (numbers.isEmpty()) { Log.i(TAG, "skip: no guardian numbers"); return }
         if (!canSend(context)) { Log.i(TAG, "skip: SEND_SMS not granted"); return }
         val now = System.currentTimeMillis()
-        val last = GuardianStore.lastAlertMs(context)
-        if (!GuardianAlert.shouldSend(now, last)) {
-            val agoS = (now - last) / 1000
-            Log.i(TAG, "skip: RATE-LIMITED (${agoS}s since last alert, window=${GuardianAlert.DEFAULT_MIN_INTERVAL_MS / 1000}s)")
+        // Per-incident rate limit: the SAME scam via SMS+WhatsApp shares a key
+        // (deduped to one alert), but a genuinely different threat has a
+        // different key and still alerts within the 5-minute window.
+        val level = GuardianAlert.levelText(verdict.verdict.name, verdict.accountTakeover)
+        val key = GuardianAlert.incidentKey(level, verdict.matchedSignals)
+        val lastForKey = GuardianStore.lastAlertForKey(context, key)
+        if (!GuardianAlert.shouldSend(now, lastForKey)) {
+            val agoS = (now - lastForKey) / 1000
+            Log.i(TAG, "skip: RATE-LIMITED same incident (${agoS}s ago, window=${GuardianAlert.DEFAULT_MIN_INTERVAL_MS / 1000}s) key=$key")
             notifyStatus(
                 context,
                 context.getString(R.string.family_alert_skipped_title),
@@ -49,13 +54,12 @@ object GuardianAlerter {
             )
             return
         }
-        Log.i(TAG, "sending alert to ${numbers.size} guardian(s)...")
+        Log.i(TAG, "sending alert to ${numbers.size} guardian(s)... key=$key")
 
-        val level = GuardianAlert.levelText(verdict.verdict.name, verdict.accountTakeover)
         val signals = RiskScorer.humanSignals(verdict.matchedSignals)
         val body = GuardianAlert.buildAlert(GuardianStore.protectedName(context), level, signals)
         val sent = sendToAll(context, numbers, body)
-        if (sent) GuardianStore.setLastAlertMs(context, now)
+        if (sent) GuardianStore.recordAlert(context, key, now)
     }
 
     /** Manual test: sends a sample alert now, ignoring verdict + rate limit. */
@@ -68,7 +72,9 @@ object GuardianAlerter {
             listOf("diminta OTP"),
         )
         val sent = sendToAll(context, numbers, body)
-        if (sent) GuardianStore.setLastAlertMs(context, System.currentTimeMillis())
+        // Record under a dedicated key so a manual test never suppresses a real
+        // incident alert (and vice versa).
+        if (sent) GuardianStore.recordAlert(context, "manual_test", System.currentTimeMillis())
         return sent
     }
 

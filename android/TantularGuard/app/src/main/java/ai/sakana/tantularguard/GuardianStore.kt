@@ -2,6 +2,7 @@ package ai.sakana.tantularguard
 
 import android.content.Context
 import org.json.JSONArray
+import org.json.JSONObject
 
 /** Local-only storage for Family Guardian settings. */
 object GuardianStore {
@@ -9,7 +10,9 @@ object GuardianStore {
     private const val KEY_ON = "guardian_on"
     private const val KEY_NAME = "protected_name"
     private const val KEY_NUMBERS = "guardian_numbers"
-    private const val KEY_LAST_ALERT = "last_alert_ms"
+    private const val KEY_LAST_ALERT = "last_alert_ms"        // legacy global (kept for the log line)
+    private const val KEY_ALERT_HISTORY = "alert_history"     // {incidentKey: lastMs}
+    private const val HISTORY_TTL_MS = 24 * 60 * 60 * 1000L   // prune entries older than a day
 
     private fun p(c: Context) = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -43,6 +46,31 @@ object GuardianStore {
         p(c).edit().putString(KEY_NUMBERS, JSONArray(list).toString()).apply()
     }
 
+    /** Global last-alert time (any incident) — used only for the diagnostic log. */
     fun lastAlertMs(c: Context) = p(c).getLong(KEY_LAST_ALERT, 0L)
-    fun setLastAlertMs(c: Context, ms: Long) = p(c).edit().putLong(KEY_LAST_ALERT, ms).apply()
+
+    /** Last time we alerted for THIS specific incident key (0 if never). */
+    fun lastAlertForKey(c: Context, key: String): Long =
+        history(c).optLong(key, 0L)
+
+    /** Record a successful alert for an incident key + prune stale entries. */
+    fun recordAlert(c: Context, key: String, ms: Long) {
+        val h = history(c)
+        h.put(key, ms)
+        val cutoff = ms - HISTORY_TTL_MS
+        val pruned = JSONObject()
+        for (k in h.keys()) {
+            val v = h.optLong(k, 0L)
+            if (v >= cutoff) pruned.put(k, v)
+        }
+        p(c).edit()
+            .putString(KEY_ALERT_HISTORY, pruned.toString())
+            .putLong(KEY_LAST_ALERT, ms)
+            .apply()
+    }
+
+    private fun history(c: Context): JSONObject {
+        val raw = p(c).getString(KEY_ALERT_HISTORY, "{}") ?: "{}"
+        return runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
+    }
 }

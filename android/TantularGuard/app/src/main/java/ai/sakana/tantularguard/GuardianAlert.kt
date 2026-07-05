@@ -51,4 +51,15 @@ object GuardianAlert {
 
     fun shouldSend(nowMs: Long, lastMs: Long, minIntervalMs: Long = DEFAULT_MIN_INTERVAL_MS): Boolean =
         nowMs - lastMs >= minIntervalMs
+
+    /**
+     * Stable key identifying a distinct scam incident, from its risk level +
+     * signals. The SAME scam arriving via SMS and WhatsApp yields the same key
+     * (so it's deduped to one alert), while a genuinely different threat yields
+     * a different key (so it still alerts within the window). Order-independent.
+     */
+    fun incidentKey(level: String, signals: List<String>): String {
+        val sig = signals.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.distinct().sorted()
+        return level.trim().lowercase() + "|" + sig.joinToString(",")
+    }
 }
