@@ -18,8 +18,8 @@ android {
         applicationId = "ai.sakana.tantularguard"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2-slm"
+        versionCode = 3
+        versionName = "0.3-guardian"
 
         if (tantularNative) {
             ndk {
