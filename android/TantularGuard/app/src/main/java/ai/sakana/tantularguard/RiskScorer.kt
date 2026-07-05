@@ -42,6 +42,16 @@ object RiskScorer {
         "refund_palsu" to (0.25 to listOf("refund", "pengembalian dana", "dana kembali")),
         "urgensi" to (0.20 to listOf("segera", "sekarang juga", "diblokir", "terblokir", "kadaluarsa", "expired")),
         "mengaku_petugas" to (0.20 to listOf("petugas", "customer service", "cs bank", "admin bank", "pihak bank")),
+        // Customs / courier "paket tertahan" scam (very common in Indonesia):
+        // fake customs hold or shipping fee, then asks to confirm data or pay.
+        "bea_cukai_palsu" to (0.35 to listOf(
+            "bea cukai", "biaya bea", "pajak paket", "tertahan di bea", "paket tertahan",
+            "denda paket", "biaya pengiriman tambahan", "bayar bea",
+        )),
+        "konfirmasi_data" to (0.25 to listOf(
+            "konfirmasi data", "verifikasi data", "lengkapi data", "isi data penerima",
+            "update data", "data penerima", "perbarui data",
+        )),
     )
 
     /**
@@ -126,6 +136,8 @@ object RiskScorer {
         "nonaktifkan_2fa" to "Minta matikan verifikasi 2 langkah",
         "sim_swap" to "Indikasi pembajakan nomor SIM",
         "bagikan_layar" to "Minta berbagi layar",
+        "bea_cukai_palsu" to "Modus bea cukai / paket tertahan",
+        "konfirmasi_data" to "Minta konfirmasi data pribadi",
     )
 
     /** Human label for one signal code (falls back to the raw code). */

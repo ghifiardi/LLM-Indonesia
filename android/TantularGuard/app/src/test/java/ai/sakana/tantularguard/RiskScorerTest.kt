@@ -98,6 +98,16 @@ class RiskScorerTest {
     }
 
     @Test
+    fun customsCourierScam_isAtLeastWarned() {
+        // The "paket tertahan di bea cukai, konfirmasi data" delivery scam is
+        // rampant in Indonesia; it must not score AMAN/ALLOW.
+        val v = verdict(
+            "Paket Anda tertahan di bea cukai, konfirmasi data penerima di sini untuk proses pengiriman",
+        )
+        assertTrue(v == RiskScorer.Verdict.WARN || v == RiskScorer.Verdict.BLOCK)
+    }
+
+    @Test
     fun riskScoreIsBounded() {
         val (score, _) = RiskScorer.score(
             "otp pin cvv password link apk remote hadiah refund segera petugas",
