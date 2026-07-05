@@ -91,7 +91,40 @@ class GuardianInboxActivity : Activity() {
         listContainer.removeAllViews()
         countView.text = getString(R.string.guardian_inbox_count, entries.size)
         emptyView.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
-        for (e in entries) listContainer.addView(card(e))
+        if (entries.isEmpty()) {
+            // Show a sample so the guardian experience is clear before any real
+            // alert arrives (and so testers can see it without a live SMS).
+            listContainer.addView(sampleCard())
+        } else {
+            for (e in entries) listContainer.addView(card(e))
+        }
+    }
+
+    private fun sampleCard(): View {
+        val sample = GuardianInbox.Entry(
+            id = "sample",
+            timestampMs = System.currentTimeMillis(),
+            sender = getString(R.string.guardian_inbox_sample_sender),
+            body = GuardianAlert.buildAlert(
+                getString(R.string.guardian_inbox_sample_name), "", emptyList(),
+            ),
+        )
+        val v = card(sample)
+        (v as? LinearLayout)?.let { row ->
+            row.background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(14).toFloat()
+                setColor(Color.parseColor("#F8FAFC"))
+                setStroke(dp(1), Color.parseColor("#CBD5E1"))
+            }
+            row.addView(TextView(this).apply {
+                text = getString(R.string.guardian_inbox_sample_label)
+                setTextColor(Color.parseColor("#94A3B8"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setPadding(0, dp(6), 0, 0)
+            }, 0)
+        }
+        return v
     }
 
     private fun card(e: GuardianInbox.Entry): View {

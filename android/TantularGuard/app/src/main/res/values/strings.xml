@@ -57,6 +57,9 @@
     <string name="guardian_inbox_cleared">Kotak dikosongkan.</string>
     <string name="guardian_inbox_channel">Peringatan Keluarga (diterima)</string>
     <string name="guardian_inbox_notif_title">🛡️ Peringatan Keluarga</string>
+    <string name="guardian_inbox_sample_label">— Contoh tampilan (bukan peringatan sungguhan)</string>
+    <string name="guardian_inbox_sample_sender">Tantular (contoh)</string>
+    <string name="guardian_inbox_sample_name">Ibu Rita</string>
     <string name="copied">Disalin.</string>
     <string name="input_hint">Tempel atau bagikan pesan di sini…</string>
     <string name="check_message">Periksa Pesan</string>
