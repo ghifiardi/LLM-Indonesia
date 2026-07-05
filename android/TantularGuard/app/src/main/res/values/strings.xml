@@ -17,7 +17,7 @@
     <string name="message_sense_no_items">Tidak ada nominal, tanggal, atau kode khusus.</string>
     <string name="copy_triage_button">Salin ringkasan</string>
     <string name="family_title">🛡️ Pelindung Keluarga</string>
-    <string name="family_help">Jika Tantular memblokir penipuan di HP ini, pelindung yang Anda pilih dapat SMS peringatan singkat. Isi pesan tidak dibagikan — hanya nama dan tingkat risiko. Berjalan lewat SMS (mungkin memakai pulsa).</string>
+    <string name="family_help">Jika Tantular menandai pesan berisiko (mencurigakan atau berbahaya) di HP ini, pelindung yang Anda pilih dapat SMS peringatan singkat. Isi pesan tidak dibagikan — hanya nama dan tingkat risiko. Berjalan lewat SMS (mungkin memakai pulsa).</string>
     <string name="family_toggle">Aktifkan Pelindung Keluarga</string>
     <string name="protected_name_hint">Nama yang dilindungi (mis. Ibu) — opsional</string>
     <string name="guardian_number_hint">Nomor HP pelindung (mis. 0812xxxx)</string>

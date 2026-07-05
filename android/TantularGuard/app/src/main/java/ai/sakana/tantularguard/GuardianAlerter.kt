@@ -30,8 +30,11 @@ object GuardianAlerter {
     /** Fire an alert for a real detection, honoring enable + rate limit + verdict. */
     fun maybeAlert(context: Context, verdict: RiskScorer.GuardVerdict) {
         if (!GuardianStore.isEnabled(context)) { Log.i(TAG, "skip: guardian disabled"); return }
-        if (verdict.verdict != RiskScorer.Verdict.BLOCK && !verdict.accountTakeover) {
-            Log.i(TAG, "skip: verdict=${verdict.verdict} takeover=${verdict.accountTakeover} (needs BLOCK/takeover)"); return
+        // Alert the guardian for anything flagged as risky: WARN (suspicious),
+        // BLOCK (dangerous), or account-takeover. Only genuinely safe (ALLOW)
+        // messages are skipped. Per-incident dedup keeps this from getting noisy.
+        if (verdict.verdict == RiskScorer.Verdict.ALLOW && !verdict.accountTakeover) {
+            Log.i(TAG, "skip: verdict=ALLOW (safe, nothing to alert)"); return
         }
         val numbers = GuardianStore.numbers(context)
         if (numbers.isEmpty()) { Log.i(TAG, "skip: no guardian numbers"); return }
