@@ -83,6 +83,11 @@
             android:exported="false"
             android:label="@string/digest_screen_title" />
 
+        <activity
+            android:name=".GuardianInboxActivity"
+            android:exported="false"
+            android:label="@string/guardian_inbox_title" />
+
         <receiver
             android:name=".SmsReceiver"
             android:enabled="true"

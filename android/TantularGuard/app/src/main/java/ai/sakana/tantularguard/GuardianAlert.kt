@@ -48,8 +48,19 @@ object GuardianAlert {
         val who = protectedName?.trim().takeUnless { it.isNullOrBlank() } ?: "orang yang Anda jaga"
         val signalPart = if (signalsHuman.isEmpty()) "" else " (" + signalsHuman.take(2).joinToString(", ") + ")"
         return "Halo, $who sepertinya menerima pesan $level$signalPart di HP. " +
-            "Tolong segera telepon dan ingatkan agar berhati-hati ya. - dari aplikasi Tantular"
+            "Tolong segera telepon dan ingatkan agar berhati-hati ya. - $ALERT_SIGNATURE"
     }
+
+    /**
+     * Stable sign-off that also serves as a machine-detectable signature so a
+     * guardian's phone (Mode Pelindung) can recognize an incoming Tantular alert
+     * SMS even if the Messages app files it into a spam folder. Human-readable
+     * and not spam-triggering, unlike a "[Brand]" prefix.
+     */
+    const val ALERT_SIGNATURE = "dari aplikasi Tantular"
+
+    fun looksLikeGuardianAlert(body: String?): Boolean =
+        body != null && body.contains(ALERT_SIGNATURE, ignoreCase = true)
 
     fun levelText(verdictName: String, accountTakeover: Boolean): String = when {
         accountTakeover -> "berisiko pengambilalihan akun"

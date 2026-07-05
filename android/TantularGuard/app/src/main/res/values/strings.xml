@@ -41,6 +41,22 @@
     <string name="family_alert_sendfail_title">Gagal mengirim peringatan</string>
     <string name="family_alert_sendfail_body">SMS peringatan tidak bisa dikirim. Cek sinyal, kartu SIM, dan pulsa, lalu coba Kirim tes lagi.</string>
     <string name="family_remove_title">Hapus nomor pelindung?</string>
+
+    <!-- Mode Pelindung: receive alerts on the guardian's own phone -->
+    <string name="guardian_mode_title">📥 Mode Pelindung</string>
+    <string name="guardian_mode_help">Aktifkan ini di HP Anda (sebagai pelindung/anak) untuk menerima peringatan dari keluarga yang Anda jaga. Peringatan tampil di sini walau SMS-nya tersaring ke folder spam.</string>
+    <string name="guardian_mode_toggle">Aktifkan Mode Pelindung</string>
+    <string name="guardian_mode_off">Nonaktif. Nyalakan untuk menerima peringatan keluarga di HP ini.</string>
+    <string name="guardian_mode_need_sms">Perlu izin SMS agar peringatan yang masuk bisa ditangkap.</string>
+    <string name="guardian_mode_ready">Aktif. Peringatan yang masuk akan langsung tampil di Kotak Pelindung.</string>
+    <string name="guardian_inbox_button">Lihat Kotak Pelindung</string>
+    <string name="guardian_inbox_title">Kotak Pelindung</string>
+    <string name="guardian_inbox_count">%1$d peringatan diterima</string>
+    <string name="guardian_inbox_empty">Belum ada peringatan diterima. Peringatan dari keluarga yang Anda jaga akan tampil di sini.</string>
+    <string name="guardian_inbox_clear">Kosongkan</string>
+    <string name="guardian_inbox_cleared">Kotak dikosongkan.</string>
+    <string name="guardian_inbox_channel">Peringatan Keluarga (diterima)</string>
+    <string name="guardian_inbox_notif_title">🛡️ Peringatan Keluarga</string>
     <string name="copied">Disalin.</string>
     <string name="input_hint">Tempel atau bagikan pesan di sini…</string>
     <string name="check_message">Periksa Pesan</string>

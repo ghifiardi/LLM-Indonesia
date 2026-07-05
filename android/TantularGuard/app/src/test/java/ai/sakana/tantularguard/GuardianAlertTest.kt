@@ -34,6 +34,15 @@ class GuardianAlertTest {
         assertTrue(body.isNotBlank())
     }
 
+    @Test fun builtAlertIsRecognizedByGuardianMode() {
+        // The signature contract: an alert we build must be detectable as one on
+        // the receiving (guardian) phone, and ordinary texts must not be.
+        val body = GuardianAlert.buildAlert("Ibu", "berisiko tinggi penipuan", listOf("diminta OTP"))
+        assertTrue(GuardianAlert.looksLikeGuardianAlert(body))
+        assertFalse(GuardianAlert.looksLikeGuardianAlert("Halo, apa kabar hari ini?"))
+        assertFalse(GuardianAlert.looksLikeGuardianAlert(null))
+    }
+
     @Test fun alertIsNotBulkLooking() {
         // No "[Brand]" bracket prefix and no keyword pileup that trips spam filters.
         val body = GuardianAlert.buildAlert("Ibu", "berisiko tinggi penipuan", listOf("diminta OTP"))

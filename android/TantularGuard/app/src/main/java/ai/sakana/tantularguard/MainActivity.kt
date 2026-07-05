@@ -81,6 +81,8 @@ class MainActivity : Activity() {
     private lateinit var familyGuardianStatus: TextView
     private lateinit var digestToggle: CompoundButton
     private lateinit var digestStatus: TextView
+    private lateinit var guardianModeToggle: CompoundButton
+    private lateinit var guardianModeStatus: TextView
     private lateinit var gameLevel: TextView
     private lateinit var gameProgress: ProgressBar
     private lateinit var gameStats: TextView
@@ -134,6 +136,8 @@ class MainActivity : Activity() {
         familyGuardianStatus = findViewById(R.id.familyGuardianStatus)
         digestToggle = findViewById(R.id.digestToggle)
         digestStatus = findViewById(R.id.digestStatus)
+        guardianModeToggle = findViewById(R.id.guardianModeToggle)
+        guardianModeStatus = findViewById(R.id.guardianModeStatus)
         gameLevel = findViewById(R.id.gameLevel)
         gameProgress = findViewById(R.id.gameProgress)
         gameStats = findViewById(R.id.gameStats)
@@ -234,6 +238,24 @@ class MainActivity : Activity() {
         }
         findViewById<Button>(R.id.viewDigestButton).setOnClickListener {
             startActivity(Intent(this, NotificationDigestActivity::class.java))
+        }
+        guardianModeToggle.setOnCheckedChangeListener { _, checked ->
+            prefs().edit().putBoolean(KEY_GUARDIAN_MODE_ON, checked).apply()
+            if (checked && Build.VERSION.SDK_INT >= 23 &&
+                checkSelfPermission(Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.perm_sms_title)
+                    .setMessage(R.string.guardian_mode_help)
+                    .setPositiveButton(R.string.perm_continue) { _, _ -> requestSmsStage2Permissions() }
+                    .setNegativeButton(R.string.perm_cancel) { _, _ -> guardianModeToggle.isChecked = false }
+                    .setOnCancelListener { guardianModeToggle.isChecked = false }
+                    .show()
+            }
+            refreshGuardianInbox()
+        }
+        findViewById<Button>(R.id.viewGuardianInboxButton).setOnClickListener {
+            startActivity(Intent(this, GuardianInboxActivity::class.java))
         }
         findViewById<Button>(R.id.notificationAccessButton).setOnClickListener { openNotificationAccessSettings() }
         findViewById<Button>(R.id.recoveryGuideButton).setOnClickListener { showRecoveryGuide() }
@@ -359,6 +381,7 @@ class MainActivity : Activity() {
         refreshDefaultSmsStatus()
         refreshGuardLogStatus()
         refreshDigestStatus()
+        refreshGuardianInbox()
         refreshGameCard()
     }
 
@@ -645,6 +668,7 @@ class MainActivity : Activity() {
         smsToggle.isChecked = p.getBoolean(KEY_SMS_GUARD_ON, false)
         notifGuardToggle.isChecked = p.getBoolean(KEY_NOTIF_GUARD_ON, false)
         digestToggle.isChecked = p.getBoolean(KEY_DIGEST_ON, false)
+        guardianModeToggle.isChecked = p.getBoolean(KEY_GUARDIAN_MODE_ON, false)
     }
 
     private fun savePrefs() {
@@ -655,6 +679,7 @@ class MainActivity : Activity() {
             .putBoolean(KEY_SMS_GUARD_ON, smsToggle.isChecked)
             .putBoolean(KEY_NOTIF_GUARD_ON, notifGuardToggle.isChecked)
             .putBoolean(KEY_DIGEST_ON, digestToggle.isChecked)
+            .putBoolean(KEY_GUARDIAN_MODE_ON, guardianModeToggle.isChecked)
             .apply()
     }
 
@@ -693,6 +718,7 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_SMS_STAGE2) {
             refreshSmsStatus()
+            refreshGuardianInbox()
         }
         if (requestCode == REQ_SEND_SMS) {
             refreshFamilyGuardianStatus()
@@ -767,6 +793,19 @@ class MainActivity : Activity() {
 
     private fun showGuardLog() {
         startActivity(Intent(this, GuardLogActivity::class.java))
+    }
+
+    private fun refreshGuardianInbox() {
+        val on = guardianModeToggle.isChecked
+        val smsGranted = Build.VERSION.SDK_INT < 23 ||
+            checkSelfPermission(Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+        val count = GuardianInbox.count(this)
+        guardianModeStatus.text = when {
+            !on -> getString(R.string.guardian_mode_off)
+            !smsGranted -> getString(R.string.guardian_mode_need_sms)
+            count > 0 -> getString(R.string.guardian_inbox_count, count)
+            else -> getString(R.string.guardian_mode_ready)
+        }
     }
 
     private fun refreshDigestStatus() {
@@ -926,6 +965,7 @@ class MainActivity : Activity() {
         const val KEY_NOTIF_GUARD_ON = "notif_guard_on"
         const val KEY_NOTIF_LISTENER_CONNECTED = "notif_listener_connected"
         const val KEY_DIGEST_ON = "digest_on"
+        const val KEY_GUARDIAN_MODE_ON = "guardian_mode_on"
         const val KEY_DIGEST_IMPORTANT_ONLY = "digest_important_only"
         const val KEY_SLM_ON = "slm_on"
         const val KEY_SLM_BACKEND = "slm_backend"

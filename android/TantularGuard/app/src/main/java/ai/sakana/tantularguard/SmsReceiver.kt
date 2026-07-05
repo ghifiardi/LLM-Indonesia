@@ -31,10 +31,70 @@ import android.provider.Telephony
 class SmsReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
+        // Mode Pelindung: on a guardian's phone, capture Tantular alert SMS
+        // directly — regardless of the scam-guard toggle — so they surface in-app
+        // even if the Messages app files them into a spam folder. SMS_RECEIVED
+        // reaches observer apps before any such foldering.
+        if (guardianModeEnabled(context)) {
+            val parsed = extractSms(intent)
+            if (GuardianAlert.looksLikeGuardianAlert(parsed.body)) {
+                val stored = GuardianInbox.add(context, parsed.address, parsed.body, parsed.timestampMs)
+                if (stored != null) postGuardianInboxNotification(context, parsed.body)
+                // If we are the default SMS app, still persist it so it isn't lost.
+                if (Telephony.Sms.getDefaultSmsPackage(context) == context.packageName) {
+                    writeToInbox(context, parsed)
+                }
+                return
+            }
+        }
         when (intent.action) {
             Telephony.Sms.Intents.SMS_DELIVER_ACTION -> handleDefaultSmsDelivery(context, intent)
             Telephony.Sms.Intents.SMS_RECEIVED_ACTION -> handleObserverWarning(context, intent)
         }
+    }
+
+    private fun guardianModeEnabled(context: Context): Boolean =
+        context.getSharedPreferences("tantular_guard", Context.MODE_PRIVATE)
+            .getBoolean(MainActivity.KEY_GUARDIAN_MODE_ON, false)
+
+    private fun postGuardianInboxNotification(context: Context, body: String) {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= 26 && manager.getNotificationChannel(GUARDIAN_CHANNEL_ID) == null) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    GUARDIAN_CHANNEL_ID,
+                    context.getString(R.string.guardian_inbox_channel),
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply { enableVibration(true) },
+            )
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val openIntent = Intent(context, GuardianInboxActivity::class.java)
+            .apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP }
+        val pending = PendingIntent.getActivity(
+            context, body.hashCode(), openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = if (Build.VERSION.SDK_INT >= 26) {
+            Notification.Builder(context, GUARDIAN_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION") Notification.Builder(context)
+        }
+        val n = builder
+            .setSmallIcon(R.drawable.ic_tantular_guard)
+            .setContentTitle(context.getString(R.string.guardian_inbox_notif_title))
+            .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setColor(0xFFB91C1C.toInt())
+            .setContentIntent(pending)
+            .setAutoCancel(true)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .build()
+        manager.notify(GUARDIAN_NOTIFICATION_ID_BASE + kotlin.math.abs(body.hashCode() % 10000), n)
     }
 
     /**
@@ -218,6 +278,8 @@ class SmsReceiver : BroadcastReceiver() {
         const val EXTRA_SMS_TEXT = "ai.sakana.tantularguard.extra.SMS_TEXT"
         private const val CHANNEL_ID = "tantular_sms_guard_v2"
         private const val NOTIFICATION_ID_BASE = 42000
+        private const val GUARDIAN_CHANNEL_ID = "tantular_guardian_inbox_v1"
+        private const val GUARDIAN_NOTIFICATION_ID_BASE = 54000
     }
 
     private data class ParsedSms(
