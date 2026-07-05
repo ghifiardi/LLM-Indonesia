@@ -88,6 +88,9 @@ class NotificationGuardService : NotificationListenerService() {
                 GuardLog.add(ctx, label, title, body, fused, if (fused.verdict == RiskScorer.Verdict.ALLOW) GuardLog.ROUTE_INBOX else GuardLog.ROUTE_WARNING)
                 if (fused.verdict != RiskScorer.Verdict.ALLOW) {
                     postWarning(ctx, label, body, fused)
+                    // Family Guardian: alert linked guardians on BLOCK/takeover
+                    // from a WhatsApp/social notification too (self-filters).
+                    GuardianAlerter.maybeAlert(ctx, fused)
                 }
             }
             return
@@ -96,6 +99,7 @@ class NotificationGuardService : NotificationListenerService() {
         if (verdict.verdict != RiskScorer.Verdict.ALLOW) {
             GuardLog.add(this, label, title, body, verdict, GuardLog.ROUTE_WARNING)
             postWarning(this, label, body, verdict)
+            GuardianAlerter.maybeAlert(applicationContext, verdict)
         }
     }
 
