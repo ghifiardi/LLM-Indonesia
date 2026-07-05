@@ -73,11 +73,13 @@ class SmsReceiver : BroadcastReceiver() {
                 writeToInbox(context, parsed)
                 GuardLog.add(context, "SMS", parsed.address, parsed.body, verdict, GuardLog.ROUTE_INBOX_WARN)
                 postWarningNotification(context, parsed.body, verdict, quarantineId = null)
+                GuardianAlerter.maybeAlert(context, verdict)
             }
             RiskScorer.Verdict.BLOCK -> {
                 val item = SmsQuarantine.add(context, parsed.address, parsed.body, verdict)
                 GuardLog.add(context, "SMS", parsed.address, parsed.body, verdict, GuardLog.ROUTE_QUARANTINE)
                 postWarningNotification(context, parsed.body, verdict, quarantineId = item.id)
+                GuardianAlerter.maybeAlert(context, verdict)
             }
         }
     }
@@ -99,6 +101,7 @@ class SmsReceiver : BroadcastReceiver() {
         }
         GuardLog.add(context, "SMS", address, text, verdict, GuardLog.ROUTE_WARNING)
         postWarningNotification(context, text, verdict, quarantineId = null)
+        GuardianAlerter.maybeAlert(context, verdict)
     }
 
     private fun smsGuardEnabled(context: Context): Boolean =

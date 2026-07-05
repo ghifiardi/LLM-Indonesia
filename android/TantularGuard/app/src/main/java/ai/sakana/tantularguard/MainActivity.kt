@@ -75,6 +75,10 @@ class MainActivity : Activity() {
     private lateinit var defaultSmsStatus: TextView
     private lateinit var quarantineStatus: TextView
     private lateinit var guardLogStatus: TextView
+    private lateinit var familyGuardianToggle: CompoundButton
+    private lateinit var protectedNameInput: EditText
+    private lateinit var guardianNumberInput: EditText
+    private lateinit var familyGuardianStatus: TextView
     private lateinit var digestToggle: CompoundButton
     private lateinit var digestStatus: TextView
     private lateinit var gameLevel: TextView
@@ -124,6 +128,10 @@ class MainActivity : Activity() {
         defaultSmsStatus = findViewById(R.id.defaultSmsStatus)
         quarantineStatus = findViewById(R.id.quarantineStatus)
         guardLogStatus = findViewById(R.id.guardLogStatus)
+        familyGuardianToggle = findViewById(R.id.familyGuardianToggle)
+        protectedNameInput = findViewById(R.id.protectedNameInput)
+        guardianNumberInput = findViewById(R.id.guardianNumberInput)
+        familyGuardianStatus = findViewById(R.id.familyGuardianStatus)
         digestToggle = findViewById(R.id.digestToggle)
         digestStatus = findViewById(R.id.digestStatus)
         gameLevel = findViewById(R.id.gameLevel)
@@ -145,6 +153,7 @@ class MainActivity : Activity() {
         refreshNotifGuardStatus()
         refreshDefaultSmsStatus()
         refreshGuardLogStatus()
+        refreshFamilyGuardianStatus()
         refreshGameCard()
 
         findViewById<android.widget.RadioGroup>(R.id.slmBackendGroup)
@@ -240,6 +249,14 @@ class MainActivity : Activity() {
             refreshGuardLogStatus()
             Toast.makeText(this, R.string.guard_log_cleared, Toast.LENGTH_SHORT).show()
         }
+        familyGuardianToggle.setOnCheckedChangeListener { _, checked ->
+            GuardianStore.setEnabled(this, checked)
+            if (checked && !GuardianAlerter.canSend(this)) requestSendSmsPermission()
+            refreshFamilyGuardianStatus()
+        }
+        findViewById<Button>(R.id.addGuardianButton).setOnClickListener { addGuardianNumber() }
+        findViewById<Button>(R.id.testGuardianButton).setOnClickListener { sendGuardianTest() }
+        findViewById<Button>(R.id.previewGuardianButton).setOnClickListener { showGuardianPreview() }
         findViewById<Button>(R.id.howToUseButton).setOnClickListener {
             startActivity(Intent(this, OnboardingActivity::class.java))
         }
@@ -346,6 +363,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        GuardianStore.setProtectedName(this, protectedNameInput.text?.toString().orEmpty())
         savePrefs()
     }
 
@@ -429,6 +447,7 @@ class MainActivity : Activity() {
         render(base)
         renderPrivacyShield(text)
         renderMessageSense(text, base)
+        GuardianAlerter.maybeAlert(this, base)
         scrollToResult()
 
         // Gamification counters: every check counts; catching a scam counts double fun.
@@ -465,6 +484,7 @@ class MainActivity : Activity() {
                     val fused = RiskScorer.evaluate(text, useModelStage = false, slmLabel = result.label)
                     render(fused)
                     renderMessageSense(text, fused)
+                    GuardianAlerter.maybeAlert(this, fused)
                     slmStatus.text = getString(
                         R.string.slm_used_format,
                         result.backend,
@@ -658,6 +678,12 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun requestSendSmsPermission() {
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.SEND_SMS), REQ_SEND_SMS)
+        }
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -666,6 +692,9 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_SMS_STAGE2) {
             refreshSmsStatus()
+        }
+        if (requestCode == REQ_SEND_SMS) {
+            refreshFamilyGuardianStatus()
         }
     }
 
@@ -682,6 +711,49 @@ class MainActivity : Activity() {
         }
     }
 
+
+    private fun refreshFamilyGuardianStatus() {
+        familyGuardianToggle.isChecked = GuardianStore.isEnabled(this)
+        protectedNameInput.setText(GuardianStore.protectedName(this))
+        val numbers = GuardianStore.numbers(this)
+        familyGuardianStatus.text = if (numbers.isEmpty()) {
+            getString(R.string.family_no_numbers)
+        } else {
+            getString(R.string.family_numbers_format, numbers.joinToString(", "))
+        }
+    }
+
+    private fun addGuardianNumber() {
+        GuardianStore.setProtectedName(this, protectedNameInput.text?.toString().orEmpty())
+        val raw = guardianNumberInput.text?.toString().orEmpty()
+        if (!GuardianStore.addNumber(this, raw)) {
+            Toast.makeText(this, R.string.family_invalid_number, Toast.LENGTH_SHORT).show()
+            return
+        }
+        guardianNumberInput.setText("")
+        Toast.makeText(this, R.string.family_number_added, Toast.LENGTH_SHORT).show()
+        refreshFamilyGuardianStatus()
+    }
+
+    private fun sendGuardianTest() {
+        GuardianStore.setProtectedName(this, protectedNameInput.text?.toString().orEmpty())
+        if (!GuardianAlerter.canSend(this)) {
+            Toast.makeText(this, R.string.family_need_send_sms, Toast.LENGTH_SHORT).show()
+            requestSendSmsPermission()
+            return
+        }
+        val ok = GuardianAlerter.sendTest(this)
+        Toast.makeText(this, if (ok) R.string.family_test_sent else R.string.family_test_failed, Toast.LENGTH_LONG).show()
+    }
+
+    private fun showGuardianPreview() {
+        GuardianStore.setProtectedName(this, protectedNameInput.text?.toString().orEmpty())
+        AlertDialog.Builder(this)
+            .setTitle(R.string.family_preview_title)
+            .setMessage(GuardianAlerter.previewText(this))
+            .setPositiveButton(R.string.close, null)
+            .show()
+    }
 
     private fun refreshGuardLogStatus() {
         val count = GuardLog.count(this)
@@ -844,6 +916,7 @@ class MainActivity : Activity() {
         const val EXTRA_RUN_EXAMPLE = "ai.sakana.tantularguard.extra.RUN_EXAMPLE"
         private const val KEY_ADVANCED_OPEN = "advanced_open"
         private const val REQ_SMS_STAGE2 = 2202
+        private const val REQ_SEND_SMS = 2203
         private const val REQ_DEFAULT_SMS = 2302
     }
 }
