@@ -30,8 +30,16 @@ class GuardianAlertTest {
 
     @Test fun alertFallsBackWhenNoName() {
         val body = GuardianAlert.buildAlert(null, "mencurigakan", emptyList())
-        assertTrue(body.contains("Tantular Guard"))
+        assertTrue(body.contains("Tantular"))
         assertTrue(body.isNotBlank())
+    }
+
+    @Test fun alertIsNotBulkLooking() {
+        // No "[Brand]" bracket prefix and no keyword pileup that trips spam filters.
+        val body = GuardianAlert.buildAlert("Ibu", "berisiko tinggi penipuan", listOf("diminta OTP"))
+        assertFalse(body.startsWith("["))
+        assertFalse(body.contains("jangan klik tautan"))
+        assertFalse(body.contains("install aplikasi"))
     }
 
     @Test fun rateLimit() {

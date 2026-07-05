@@ -34,13 +34,17 @@ object GuardianAlert {
     /**
      * Build the guardian SMS body. Privacy-safe: only name + risk level + a short
      * signal summary. Never includes the raw message.
+     *
+     * Written to read like a personal P2P text, NOT bulk/A2P: no "[Brand]"
+     * bracket prefix and no keyword pileup (OTP/PIN/tautan/install) — those trip
+     * carrier + on-device spam filters, which would quarantine the very alert
+     * meant to warn about a scam. The guardian is expected to phone the person.
      */
     fun buildAlert(protectedName: String?, level: String, signalsHuman: List<String>): String {
-        val who = protectedName?.trim().takeUnless { it.isNullOrBlank() } ?: "Seseorang yang Anda lindungi"
+        val who = protectedName?.trim().takeUnless { it.isNullOrBlank() } ?: "orang yang Anda jaga"
         val signalPart = if (signalsHuman.isEmpty()) "" else " (" + signalsHuman.take(2).joinToString(", ") + ")"
-        return "[Tantular Guard] Peringatan: $who menerima pesan $level$signalPart. " +
-            "Mohon segera hubungi dan ingatkan jangan beri OTP/PIN, jangan klik tautan, " +
-            "dan jangan install aplikasi dari pesan."
+        return "Halo, $who sepertinya menerima pesan $level$signalPart di HP. " +
+            "Tolong segera telepon dan ingatkan agar berhati-hati ya. - dari aplikasi Tantular"
     }
 
     fun levelText(verdictName: String, accountTakeover: Boolean): String = when {
