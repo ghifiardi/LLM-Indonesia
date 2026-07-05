@@ -20,11 +20,15 @@ class GuardianAlertTest {
         assertFalse(GuardianAlert.isValidNumber(""))
     }
 
-    @Test fun alertHasNameAndLevelButNoRawMessage() {
+    @Test fun alertHasNameButIsKeywordFreeAndNoRawMessage() {
         val body = GuardianAlert.buildAlert("Ibu", "berisiko tinggi penipuan", listOf("diminta OTP"))
         assertTrue(body.contains("Ibu"))
-        assertTrue(body.contains("berisiko tinggi penipuan"))
-        assertTrue(body.contains("diminta OTP"))
+        // Keyword-free: carriers drop SMS containing these anti-fraud tokens.
+        assertFalse(body.contains("penipuan"))
+        assertFalse(body.contains("OTP"))
+        assertFalse(body.contains("PIN"))
+        assertFalse(body.contains("tautan"))
+        // Never leaks the raw scam message.
         assertFalse(body.contains("3174012509900001"))
     }
 

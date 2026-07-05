@@ -46,9 +46,12 @@ object GuardianAlert {
      */
     fun buildAlert(protectedName: String?, level: String, signalsHuman: List<String>): String {
         val who = protectedName?.trim().takeUnless { it.isNullOrBlank() } ?: "orang yang Anda jaga"
-        val signalPart = if (signalsHuman.isEmpty()) "" else " (" + signalsHuman.take(2).joinToString(", ") + ")"
-        return "Halo, $who sepertinya menerima pesan $level$signalPart di HP. " +
-            "Tolong segera telepon dan ingatkan agar berhati-hati ya. - $ALERT_SIGNATURE"
+        // Deliberately keyword-FREE: no "penipuan"/"OTP"/"PIN"/"tautan"/"hadiah".
+        // Indonesian carriers (Telkomsel) drop P2P SMS containing those anti-fraud
+        // trigger words, so a scam-worded alert gets a false DELIVERED but never
+        // reaches the handset. The guardian phones to learn the details.
+        return "Halo, tolong segera telepon $who dan tanyakan keadaannya sebentar — " +
+            "ada pesan di HP-nya yang sebaiknya diperiksa bersama. $ALERT_SIGNATURE"
     }
 
     /**
