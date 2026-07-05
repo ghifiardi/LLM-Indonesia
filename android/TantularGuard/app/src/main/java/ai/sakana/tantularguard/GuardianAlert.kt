@@ -8,7 +8,11 @@ package ai.sakana.tantularguard
  */
 object GuardianAlert {
 
-    const val DEFAULT_MIN_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes
+    // Same-incident dedup window. Long enough to collapse the burst of duplicate
+    // detections for ONE message (SMS + notification double-fire, multipart
+    // re-reports, WhatsApp reposts — all within seconds), short enough that a
+    // genuine re-occurrence (or a retest) alerts again promptly.
+    const val DEFAULT_MIN_INTERVAL_MS = 90 * 1000L // 90 seconds
 
     /** Trim and normalize an Indonesian phone number to +62 form when possible. */
     fun normalizeNumber(raw: String): String {
