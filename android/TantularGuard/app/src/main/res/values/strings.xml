@@ -17,6 +17,17 @@
     <string name="message_sense_actions_prefix">Saran langkah aman:</string>
     <string name="message_sense_no_items">Tidak ada nominal, tanggal, atau kode khusus.</string>
     <string name="copy_triage_button">Salin ringkasan</string>
+    <string name="smart_reply_title">✍️ Balasan cepat</string>
+    <string name="smart_reply_help">Pilih gaya balasan, lalu salin. Tantular tidak pernah mengirim otomatis — Anda tetap baca dan setujui dulu.</string>
+    <string name="reply_polite">Sopan</string>
+    <string name="reply_short">Singkat</string>
+    <string name="reply_formal">Formal</string>
+    <string name="reply_friendly">Ramah</string>
+    <string name="reply_complaint">Komplain</string>
+    <string name="reply_confirm">Konfirmasi</string>
+    <string name="reply_cancel">Batal</string>
+    <string name="copy_smart_reply_button">Salin balasan</string>
+    <string name="smart_reply_copied_note">Balasan disalin. Baca ulang sebelum ditempel dan dikirim.</string>
     <string name="family_title">🛡️ Pelindung Keluarga</string>
     <string name="family_help">Jika Tantular menandai pesan berisiko (mencurigakan atau berbahaya) di HP ini, pelindung yang Anda pilih dapat SMS peringatan singkat. Isi pesan tidak dibagikan — hanya nama dan tingkat risiko. Berjalan lewat SMS (mungkin memakai pulsa).</string>
     <string name="family_toggle">Aktifkan Pelindung Keluarga</string>

@@ -61,8 +61,13 @@ class MainActivity : Activity() {
     private lateinit var messageSenseSummary: TextView
     private lateinit var messageSenseItems: TextView
     private lateinit var messageSenseActions: TextView
+    private lateinit var smartReplyCard: LinearLayout
+    private lateinit var smartReplyPreview: TextView
     private var latestRedaction: PiiRedactor.Result? = null
     private var latestTriage: MessageTriage.Result? = null
+    private var latestReplyText: String? = null
+    private var latestReplySourceText: String = ""
+    private var latestReplyVerdict: RiskScorer.GuardVerdict? = null
     private lateinit var slmToggle: CompoundButton
     private lateinit var slmEndpoint: EditText
     private lateinit var radioOnDevice: RadioButton
@@ -120,6 +125,8 @@ class MainActivity : Activity() {
         messageSenseSummary = findViewById(R.id.messageSenseSummary)
         messageSenseItems = findViewById(R.id.messageSenseItems)
         messageSenseActions = findViewById(R.id.messageSenseActions)
+        smartReplyCard = findViewById(R.id.smartReplyCard)
+        smartReplyPreview = findViewById(R.id.smartReplyPreview)
         slmToggle = findViewById(R.id.slmToggle)
         slmEndpoint = findViewById(R.id.slmEndpoint)
         radioOnDevice = findViewById(R.id.radioOnDevice)
@@ -194,6 +201,14 @@ class MainActivity : Activity() {
         advancedToggle.setOnClickListener { toggleAdvanced() }
         findViewById<Button>(R.id.copyRedactedButton).setOnClickListener { copyRedacted() }
         findViewById<Button>(R.id.copyTriageButton).setOnClickListener { copyTriage() }
+        findViewById<Button>(R.id.replyPoliteButton).setOnClickListener { draftSmartReply(SmartReplyDraft.Tone.POLITE) }
+        findViewById<Button>(R.id.replyShortButton).setOnClickListener { draftSmartReply(SmartReplyDraft.Tone.SHORT) }
+        findViewById<Button>(R.id.replyFormalButton).setOnClickListener { draftSmartReply(SmartReplyDraft.Tone.FORMAL) }
+        findViewById<Button>(R.id.replyFriendlyButton).setOnClickListener { draftSmartReply(SmartReplyDraft.Tone.FRIENDLY) }
+        findViewById<Button>(R.id.replyComplaintButton).setOnClickListener { draftSmartReply(SmartReplyDraft.Tone.COMPLAINT) }
+        findViewById<Button>(R.id.replyConfirmButton).setOnClickListener { draftSmartReply(SmartReplyDraft.Tone.CONFIRMATION) }
+        findViewById<Button>(R.id.replyCancelButton).setOnClickListener { draftSmartReply(SmartReplyDraft.Tone.CANCELLATION) }
+        findViewById<Button>(R.id.copySmartReplyButton).setOnClickListener { copySmartReply() }
         findViewById<Button>(R.id.defaultSmsButton).setOnClickListener { requestDefaultSmsRole() }
         findViewById<Button>(R.id.latestQuarantineButton).setOnClickListener { openLatestQuarantine() }
         findViewById<Button>(R.id.clearQuarantineButton).setOnClickListener {
@@ -468,8 +483,12 @@ class MainActivity : Activity() {
             resultCard.visibility = View.GONE
             privacyShieldCard.visibility = View.GONE
             messageSenseCard.visibility = View.GONE
+            smartReplyCard.visibility = View.GONE
             latestRedaction = null
             latestTriage = null
+            latestReplyText = null
+            latestReplySourceText = ""
+            latestReplyVerdict = null
             return
         }
         savePrefs()
@@ -583,6 +602,8 @@ class MainActivity : Activity() {
     private fun renderMessageSense(text: String, verdict: RiskScorer.GuardVerdict) {
         val result = MessageTriage.analyze(text, verdict)
         latestTriage = result
+        latestReplySourceText = text
+        latestReplyVerdict = verdict
         messageSenseCard.visibility = View.VISIBLE
         messageSenseSummary.text = result.summary
         messageSenseItems.text = getString(R.string.message_sense_items_prefix) + "\n" +
@@ -590,6 +611,8 @@ class MainActivity : Activity() {
             else result.items.joinToString("\n") { "• ${it.label}: ${it.value}" }
         messageSenseActions.text = getString(R.string.message_sense_actions_prefix) + "\n" +
             result.actions.joinToString("\n") { "• $it" }
+        smartReplyCard.visibility = View.VISIBLE
+        draftSmartReply(SmartReplyDraft.Tone.POLITE)
     }
 
     private fun copyRedacted() {
@@ -601,6 +624,19 @@ class MainActivity : Activity() {
         val result = latestTriage ?: return
         val text = result.summary + "\n" + result.actions.joinToString("\n") { "• $it" }
         copyToClipboard("Tantular", text)
+    }
+
+    private fun draftSmartReply(tone: SmartReplyDraft.Tone) {
+        val result = SmartReplyDraft.draft(latestReplySourceText, latestTriage, latestReplyVerdict, tone)
+        latestReplyText = result.text
+        smartReplyPreview.text = result.text
+    }
+
+    private fun copySmartReply() {
+        val text = latestReplyText ?: return
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Tantular Reply", text))
+        Toast.makeText(this, R.string.smart_reply_copied_note, Toast.LENGTH_LONG).show()
     }
 
     private fun copyToClipboard(label: String, text: String) {
