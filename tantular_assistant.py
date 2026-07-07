@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class PiiFinding:
-    kind: str        # nik | phone | otp | card | account | email | plate
+    kind: str        # nik | phone | otp | card | account | email | plate | order | medical | address
     label: str       # human, Bahasa Indonesia
     original: str
     masked: str
@@ -39,6 +39,7 @@ class RedactionResult:
         labels = {
             "nik": "NIK", "phone": "nomor HP", "otp": "OTP/PIN", "card": "nomor kartu",
             "account": "nomor rekening", "email": "email", "plate": "plat nomor",
+            "order": "order/resi", "medical": "ID medis", "address": "alamat",
         }
         counts: dict[str, int] = {}
         for f in self.findings:
@@ -74,7 +75,7 @@ _OTP_TRIGGER = re.compile(r"(?i)(otp|kode|verifikasi|verification|pin|password|s
 _ACCT_TRIGGER = re.compile(r"(?i)(rekening|no\.?\s*rek|a/?n|atas nama|norek|rek\.)")
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_PLATE_RE = re.compile(r"\b[A-Z]{1,2} ?\d{1,4} ?[A-Z]{1,3}\b")
+_PLATE_RE = re.compile(r"\b(B|D|F|T|Z|E|A|G|H|K|R|AA|AB|AD|L|M|N|P|S|W|AE|AG|DK|DR|EA|DH|EB|ED|KB|DA|KH|KT|KU|DB|DL|DM|DN|DT|DD|DC|DE|DG|PA|PB) ?\d{1,4} ?[A-Z]{0,3}\b")
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+62|62|0)8\d{7,12}(?!\d)")
 _NIK_RE = re.compile(r"(?<!\d)\d{16}(?!\d)")
 # digit runs (with optional space/dash separators) 13-19 long → card candidates
@@ -83,6 +84,12 @@ _LONGNUM_RE = re.compile(r"(?<![\d])\d(?:[ -]?\d){12,18}(?![\d])")
 _NUM_RE = re.compile(r"(?<!\d)\d{6,20}(?!\d)")
 # OTP/PIN: 4-8 digits
 _SHORTNUM_RE = re.compile(r"(?<!\d)\d{4,8}(?!\d)")
+_ORDER_TRIGGER = re.compile(r"(?i)(order|pesanan|resi|invoice|inv|booking|kode booking|nomor pesanan)")
+_MEDICAL_TRIGGER = re.compile(r"(?i)(rekam medis|no\.?\s*rm|nomor rm|id pasien|nomor pasien|medical record|bpjs kesehatan|no\.?\s*bpjs)")
+# Context-anchored address: label + text up to comma/newline/period or 90 chars.
+_ADDRESS_RE = re.compile(r"(?i)\b(alamat(?:\s+(?:rumah|pengiriman|kantor|saya))?|kirim\s+ke|dikirim\s+ke|domisili)\s*[:\-]?\s*([^\n.;]{8,90})")
+# Generic ID near order/medical labels (alphanumeric to allow invoice/resi codes).
+_ID_TOKEN_RE = re.compile(r"(?<![A-Z0-9])([A-Z0-9][A-Z0-9\-]{4,24})(?![A-Z0-9])", re.I)
 
 
 def _overlaps(claimed: list[tuple[int, int]], start: int, end: int) -> bool:
@@ -139,26 +146,54 @@ def redact_pii(text: str | None) -> RedactionResult:
         if _ACCT_TRIGGER.search(window):
             claim(s, e, "account", "Nomor rekening", f"[REK\u2022\u2022\u2022{_last4(m.group())}]")
 
-    # 5) Phone — +62/62/0 then 8xx.
+    # 5) Order / resi / invoice / booking IDs near an order keyword.
+    for m in _ID_TOKEN_RE.finditer(text):
+        s, e = m.start(1), m.end(1)
+        if _overlaps(claimed, s, e):
+            continue
+        window = text[max(0, s - 30):min(len(text), e + 12)]
+        if _ORDER_TRIGGER.search(window):
+            claim(s, e, "order", "Order/Resi/Invoice", f"[ORDER•••{m.group(1)[-4:]}]")
+
+    # 6) Medical / patient IDs near a medical keyword.
+    for m in _ID_TOKEN_RE.finditer(text):
+        s, e = m.start(1), m.end(1)
+        if _overlaps(claimed, s, e):
+            continue
+        window = text[max(0, s - 35):min(len(text), e + 15)]
+        if _MEDICAL_TRIGGER.search(window):
+            claim(s, e, "medical", "ID medis/pasien", f"[MEDIS•••{m.group(1)[-4:]}]")
+
+    # 7) Phone — +62/62/0 then 8xx.
     for m in _PHONE_RE.finditer(text):
         s, e = m.start(), m.end()
         if _overlaps(claimed, s, e):
             continue
         claim(s, e, "phone", "Nomor HP", f"[HP\u2022\u2022\u2022{_last4(m.group())}]")
 
-    # 6) Email.
+    # 8) Email.
     for m in _EMAIL_RE.finditer(text):
         s, e = m.start(), m.end()
         if _overlaps(claimed, s, e):
             continue
         claim(s, e, "email", "Email", "[EMAIL\u2022\u2022\u2022@\u2022\u2022\u2022]")
 
-    # 7) Plate.
+    # 9) Plate.
     for m in _PLATE_RE.finditer(text):
         s, e = m.start(), m.end()
         if _overlaps(claimed, s, e):
             continue
         claim(s, e, "plate", "Plat nomor", "[PLAT\u2022\u2022\u2022]")
+
+    # 10) Address — context anchored. Mask the address text only, keeping label.
+    for m in _ADDRESS_RE.finditer(text):
+        s, e = m.start(2), m.end(2)
+        # Trim trailing spaces/commas inside capture.
+        while e > s and text[e - 1] in " ,":
+            e -= 1
+        if e - s < 8 or _overlaps(claimed, s, e):
+            continue
+        claim(s, e, "address", "Alamat", "[ALAMAT•••]")
 
     # Apply replacements right-to-left so earlier indices stay valid.
     findings.sort(key=lambda f: f.start)
@@ -201,6 +236,19 @@ def _self_test() -> bool:
     check("phone+email = 2", len(r.findings) == 2)
     check("phone masked", "081234567890" not in r.redacted_text)
     check("email masked", "budi@example.com" not in r.redacted_text)
+
+
+    r = redact_pii("Alamat pengiriman: Jl Mawar No 10 RT 02 RW 03 Jakarta")
+    check("address found", sum(f.kind == "address" for f in r.findings) == 1)
+    check("address masked", "Jl Mawar" not in r.redacted_text)
+
+    r = redact_pii("Pesanan INV-AB12345 sudah dikirim dengan resi JP987654321")
+    check("order ids found", sum(f.kind == "order" for f in r.findings) >= 1)
+    check("order id masked", "AB12345" not in r.redacted_text or "JP987654321" not in r.redacted_text)
+
+    r = redact_pii("No RM pasien RM123456 dan BPJS Kesehatan 0001234567890")
+    check("medical ids found", sum(f.kind == "medical" for f in r.findings) >= 1)
+    check("medical masked", "RM123456" not in r.redacted_text or "0001234567890" not in r.redacted_text)
 
     r = redact_pii("Halo, jam berapa kita ketemu?")
     check("clean = 0 findings", len(r.findings) == 0)
@@ -412,12 +460,17 @@ _DIGEST_EMOJI = {k: e for k, e, _ in _DIGEST_CATEGORIES}
 DIGEST_ORDER = [k for k, _, _ in _DIGEST_CATEGORIES]
 # Categories hidden by the "Penting saja" (important-only) filter.
 DIGEST_UNIMPORTANT = {"promo", "umum"}
+DIGEST_PERSONAL_MESSAGE_PACKAGES = {"com.whatsapp", "com.whatsapp.w4b", "org.telegram.messenger", "com.facebook.orca"}
 
 # Brand names (gopay/bca/jne) are intentionally NOT signals: the app label
 # already carries the brand, and brand-in-text misfiles promos as finance.
+#
+# Signals are matched on word boundaries by _digest_has_any so short tokens like
+# "cod" do not misfire inside unrelated words such as "coding". Only use bare
+# tokens when they are unambiguous on their own; otherwise prefer phrases.
 _DIGEST_SIGNALS = {
-    "keamanan_akun": ("otp", "kode verifikasi", "kode login", "kode masuk", "verifikasi", "perangkat tertaut", "linked device", "kata sandi", "login", "one-time"),
-    "paket": ("paket", "resi", "kurir", "dikirim", "pengiriman", "cod", "pesanan", "akan tiba", "out for delivery", "dalam perjalanan", "sedang dikirim"),
+    "keamanan_akun": ("otp", "kode otp", "kode verifikasi", "kode login", "kode masuk", "kode akses", "perangkat tertaut", "linked device", "kata sandi", "one-time", "verification code", "login code", "reset password", "password reset", "reset your password", "atur ulang kata sandi", "ubah kata sandi"),
+    "paket": ("paket", "resi", "kurir", "dikirim", "pengiriman", "cod", "pesanan", "akan tiba", "out for delivery", "dalam perjalanan", "sedang dikirim", "bea cukai"),
     "kesehatan": ("dokter", "klinik", "rumah sakit", "obat", "kontrol", "resep", "vaksin", "antrian", "bpjs kesehatan"),
     "travel": ("tiket", "booking", "hotel", "pesawat", "penerbangan", "boarding", "check-in", "kereta", "stasiun", "bandara", "reservasi"),
     "sekolah": ("sekolah", "kelas", "guru", "siswa", "orang tua", "kampus", "kuliah", "ujian", "spp", "wali kelas"),
@@ -432,6 +485,10 @@ _DIGEST_SIGNALS = {
 # finance; promo after keuangan; umum is the fallback.
 _DIGEST_MATCH_ORDER = ("keamanan_akun", "paket", "kesehatan", "travel", "sekolah", "kerja", "keuangan", "promo", "keluarga")
 _DIGEST_HIGH = ("segera", "jatuh tempo", "deadline", "terakhir", "expired", "kadaluarsa", "diblokir", "sekarang juga")
+_DIGEST_MATCHERS = {
+    k: [re.compile(r"(?<![\w])" + re.escape(t) + r"(?![\w])", re.IGNORECASE) for t in terms]
+    for k, terms in _DIGEST_SIGNALS.items()
+}
 
 
 @dataclass(frozen=True)
@@ -443,19 +500,36 @@ class NotificationCategory:
 
 
 def classify_notification(text: str | None, title: str | None = None) -> NotificationCategory:
-    blob = f"{title or ''} {text or ''}".lower()
+    blob = f"{title or ''} {text or ''}"
     key = "umum"
     for cand in _DIGEST_MATCH_ORDER:
-        if _has_any(blob, *_DIGEST_SIGNALS[cand]):
+        if _digest_has_any(blob, cand):
             key = cand
             break
-    if key == "keamanan_akun" or _has_any(blob, *_DIGEST_HIGH):
+    if key == "keamanan_akun" or _has_any(blob.lower(), *_DIGEST_HIGH):
         priority = "tinggi"
     elif key in {"promo", "keluarga", "umum"}:
         priority = "rendah"
     else:
         priority = "sedang"
     return NotificationCategory(key, _DIGEST_EMOJI[key], _DIGEST_LABEL[key], priority)
+
+
+def _digest_has_any(blob: str, category: str) -> bool:
+    return any(r.search(blob) for r in _DIGEST_MATCHERS[category])
+
+
+def should_keep_notification_for_digest(package_name: str, title: str | None, category: str) -> bool:
+    """Mirror NotificationClassifier.shouldKeepForDigest in Kotlin."""
+    if category != "umum":
+        return True
+    if package_name not in DIGEST_PERSONAL_MESSAGE_PACKAGES:
+        return False
+    title = title or ""
+    return not (
+        re.search(r"\(\d+\s+pesan\)", title, re.IGNORECASE)
+        or re.search(r"\(\d+\s+messages\)", title, re.IGNORECASE)
+    )
 
 
 def _digest_self_test() -> bool:
@@ -476,6 +550,10 @@ def _digest_self_test() -> bool:
         ("Dokter", "jadwal kontrol Selasa 09.00", "kesehatan"),
         ("", "Tiket kereta Anda sudah terbit", "travel"),
         ("", "Halo apa kabar", "umum"),
+        ("Ghifi", "I got to demo a Recursive CLI coding agent", "umum"),
+        ("Our IT Group", "Update Incident - RITA Failed Login [3ID - TM/KYN]", "umum"),
+        ("Our IT Group", "Dengan hormat, terima kasih atas kerja sama dalam memanfaatkan fitur dan layanan.", "umum"),
+        ("Slack", "Reset your password", "keamanan_akun"),
     ]
     for title, text, expected in cases:
         got = classify_notification(text, title)
@@ -484,6 +562,9 @@ def _digest_self_test() -> bool:
     check("otp is high priority", classify_notification("Kode OTP 123456").priority == "tinggi")
     check("promo is low priority", classify_notification("Promo diskon 40%").priority == "rendah")
     check("bill deadline is high", classify_notification("Tagihan listrik jatuh tempo").priority == "tinggi")
+    check("drop generic whatsapp group", not should_keep_notification_for_digest("com.whatsapp", "Group (33 pesan): Ghifi", "umum"))
+    check("keep whatsapp one-to-one umum", should_keep_notification_for_digest("com.whatsapp", "Ghifi", "umum"))
+    check("keep categorized whatsapp group", should_keep_notification_for_digest("com.whatsapp", "Group (33 pesan): Ghifi", "kerja"))
 
     print("digest self-test", "OK" if ok else "FAILED")
     return ok

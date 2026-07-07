@@ -35,4 +35,50 @@ class NotificationClassifierTest {
         assertTrue("keuangan" !in NotificationClassifier.UNIMPORTANT)
         assertEquals(10, NotificationClassifier.ORDER.size)
     }
+
+    @Test
+    fun avoidsSubstringFalsePositives() {
+        assertEquals(
+            "umum",
+            NotificationClassifier.classify(
+                "I got to demo a Recursive CLI coding agent with lower token cost",
+                "Ghifi",
+            ).key,
+        )
+        assertEquals(
+            "umum",
+            NotificationClassifier.classify(
+                "Update Incident - RITA Failed Login [3ID - TM/KYN]",
+                "Our IT Group",
+            ).key,
+        )
+        assertEquals(
+            "umum",
+            NotificationClassifier.classify(
+                "Dengan hormat, terima kasih atas kerja sama dalam memanfaatkan fitur dan layanan.",
+                "Our IT Group",
+            ).key,
+        )
+    }
+
+    @Test
+    fun accountSecurityNeedsSpecificSecurityPhrase() {
+        assertEquals("keamanan_akun", NotificationClassifier.classify("Kode login Anda 123456").key)
+        assertEquals("keamanan_akun", NotificationClassifier.classify("Reset your password", "Slack").key)
+    }
+
+    @Test
+    fun digestDropsGenericGroupChatNoise() {
+        assertEquals(
+            false,
+            NotificationClassifier.shouldKeepForDigest(
+                "com.whatsapp",
+                "Security Strategy & Architecture (33 pesan): Ghifi",
+                "umum",
+            ),
+        )
+        assertEquals(true, NotificationClassifier.shouldKeepForDigest("com.whatsapp", "Ghifi", "umum"))
+        assertEquals(true, NotificationClassifier.shouldKeepForDigest("com.whatsapp", "Group (33 pesan): Ghifi", "kerja"))
+        assertEquals(false, NotificationClassifier.shouldKeepForDigest("com.android.systemui", "System", "umum"))
+    }
 }

@@ -98,7 +98,15 @@ object NotificationDigestStore {
      * promo + umum are excluded.
      */
     fun groupedToday(context: Context, importantOnly: Boolean): List<Pair<String, List<Entry>>> {
-        val today = today(context)
+        // Re-classify on read using the latest classifier. This fixes older
+        // digest entries after rule tuning (for example: "coding" used to
+        // contain the naive "cod" package signal and appeared under Paket).
+        val today = today(context).map { e ->
+            val cat = NotificationClassifier.classify(e.preview, e.title)
+            e.copy(category = cat.key, priority = cat.priority)
+        }.filter {
+            NotificationClassifier.shouldKeepForDigest(it.packageName, it.title, it.category)
+        }
         val byCat = today.groupBy { it.category }
         return NotificationClassifier.ORDER.mapNotNull { cat ->
             if (importantOnly && cat in NotificationClassifier.UNIMPORTANT) return@mapNotNull null

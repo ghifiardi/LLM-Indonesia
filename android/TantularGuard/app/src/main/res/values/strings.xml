@@ -2,13 +2,14 @@
 <resources>
     <string name="app_name">Tantular Guard</string>
     <string name="subtitle">Periksa pesan mencurigakan langsung di HP Anda.</string>
+    <string name="home_check_title">Cek pesan mencurigakan</string>
     <string name="home_tagline">Tempel pesan mencurigakan, Tantular cek langsung di HP.</string>
     <string name="section_protection">Perlindungan otomatis</string>
     <string name="section_account">Amankan akun</string>
     <string name="section_ai">AI di HP (opsional)</string>
     <string name="guard_log_title_short">Riwayat pemeriksaan</string>
-    <string name="advanced_show">Pengaturan lanjutan ▾</string>
-    <string name="advanced_hide">Pengaturan lanjutan ▴</string>
+    <string name="advanced_show">Fitur lainnya &amp; pengaturan ▾</string>
+    <string name="advanced_hide">Fitur lainnya &amp; pengaturan ▴</string>
     <string name="privacy_shield_title">🔒 Sensor data sensitif</string>
     <string name="copy_redacted_button">Salin versi aman</string>
     <string name="message_sense_title">🧭 Pahami isi pesan</string>
@@ -90,6 +91,7 @@
     <string name="perm_notif_access_body">HP akan membuka pengaturan "Akses notifikasi". Aktifkan Tantular Guard di sana.\n\nApa artinya: Tantular hanya membaca teks notifikasi yang muncul dari aplikasi yang dipantau (WhatsApp, medsos) untuk mencari tanda penipuan — bukan seluruh isi chat, dan tidak ada yang dikirim ke internet.\n\nAnda bisa mencabutnya kapan saja di pengaturan yang sama.</string>
     <string name="perm_continue">Lanjut</string>
     <string name="perm_cancel">Batal</string>
+    <string name="perm_later">Nanti</string>
     <string name="perm_open_settings">Buka pengaturan</string>
 
     <!-- Misi Keamanan (gamification) -->
@@ -105,6 +107,10 @@
     <!-- "What does this feature actually do?" info dialogs -->
     <string name="info_protection_title">Apa itu Perlindungan otomatis?</string>
     <string name="info_protection_body">Yang terjadi bila diaktifkan:\n\n📩 Pemeriksaan SMS masuk — setiap SMS baru dipindai langsung di HP. Jika terdeteksi berbahaya, muncul notifikasi peringatan. SMS tetap masuk ke kotak masuk seperti biasa.\n\n💬 Periksa notifikasi WhatsApp &amp; medsos — hanya teks yang tampil di notifikasi yang dipindai (bukan seluruh isi chat), untuk mengenali upaya pembajakan akun.\n\nYang TIDAK dilakukan:\n• Tidak membaca chat WhatsApp Anda.\n• Tidak mengirim pesan ke internet — semua diproses di HP.\n• Tidak menghapus pesan apa pun.</string>
+    <string name="protection_setup_pending">Perlindungan sudah disiapkan. Ketuk satu tombol ini untuk memberi izin Android yang diperlukan.</string>
+    <string name="protection_setup_ready">Perlindungan yang dipilih aktif dan berjalan langsung di HP.</string>
+    <string name="protection_setup_off">Perlindungan otomatis dimatikan. Cek manual tetap bisa dipakai.</string>
+    <string name="complete_protection_button">Lengkapi perlindungan</string>
     <string name="info_account_title">Apa itu Amankan akun?</string>
     <string name="info_account_body">Alat bantu bila akun Anda (WhatsApp, medsos, email) dibajak atau hampir dibajak:\n\n🔐 Cara amankan akun — panduan langkah demi langkah: ganti password, aktifkan verifikasi 2 langkah, keluarkan perangkat asing.\n\n📱 Cek keamanan HP — membuka layar pengaturan Android untuk memeriksa izin yang sering disalahgunakan penipu (aksesibilitas, admin perangkat, aplikasi tak dikenal).\n\nFitur ini hanya memandu — tidak mengubah pengaturan apa pun secara otomatis.</string>
     <string name="info_history_title">Apa itu Riwayat pemeriksaan?</string>
@@ -160,6 +166,8 @@
     <string name="sms_guard_ready">Aktif. SMS masuk diperiksa langsung di HP.</string>
     <string name="sms_guard_need_sms_permission">Butuh izin membaca SMS agar bisa memeriksa SMS masuk.</string>
     <string name="sms_guard_need_notification_permission">Butuh izin notifikasi agar peringatan bisa muncul.</string>
+    <string name="sms_guard_pending_sms_permission">Siap aktif setelah izin SMS diberikan.</string>
+    <string name="sms_guard_pending_notification_permission">Siap aktif setelah izin notifikasi diberikan.</string>
     <string name="sms_notification_channel">Peringatan SMS mencurigakan</string>
     <string name="sms_notification_title_block">Tantular: Terindikasi Penipuan</string>
     <string name="sms_notification_title_warn">Tantular: Pesan Mencurigakan</string>
@@ -183,6 +191,7 @@
     <string name="notif_guard_ready">Aktif &amp; terhubung. Notifikasi masuk (WhatsApp/medsos) diperiksa langsung di HP.</string>
     <string name="notif_guard_connecting">Izin diberi, menyambungkan… buka lalu tutup aplikasi ini sekali bila status belum \"terhubung\".</string>
     <string name="notif_guard_need_access">Beri izin akses notifikasi untuk Tantular di pengaturan HP.</string>
+    <string name="notif_guard_pending_access">Siap aktif setelah akses notifikasi diberikan.</string>
     <string name="notif_guard_privacy">Tantular hanya membaca teks notifikasi yang muncul, bukan seluruh isi chat. Pemeriksaan berjalan di HP.</string>
     <string name="notif_access_button">Beri izin notifikasi</string>
     <string name="recovery_guide_button">Cara amankan akun</string>
@@ -231,6 +240,7 @@
     <string name="digest_toggle">Aktifkan ringkasan harian</string>
     <string name="digest_off">Nonaktif. Nyalakan untuk merapikan notifikasi harian jadi kategori.</string>
     <string name="digest_need_access">Perlu izin Akses Notifikasi — aktifkan lewat tombol di kartu \"Periksa notifikasi\" di atas.</string>
+    <string name="digest_pending_access">Siap aktif setelah akses notifikasi diberikan.</string>
     <string name="digest_ready">Aktif. Notifikasi berguna hari ini akan dikelompokkan di sini.</string>
     <string name="digest_count_today">%1$d notifikasi hari ini</string>
     <string name="digest_view_button">Lihat ringkasan</string>

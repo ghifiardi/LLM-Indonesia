@@ -72,6 +72,8 @@ class MainActivity : Activity() {
     private lateinit var smsStatus: TextView
     private lateinit var notifGuardToggle: CompoundButton
     private lateinit var notifGuardStatus: TextView
+    private lateinit var protectionSetupStatus: TextView
+    private lateinit var notificationAccessButton: Button
     private lateinit var defaultSmsStatus: TextView
     private lateinit var quarantineStatus: TextView
     private lateinit var guardLogStatus: TextView
@@ -127,6 +129,8 @@ class MainActivity : Activity() {
         smsStatus = findViewById(R.id.smsStatus)
         notifGuardToggle = findViewById(R.id.notifGuardToggle)
         notifGuardStatus = findViewById(R.id.notifGuardStatus)
+        protectionSetupStatus = findViewById(R.id.protectionSetupStatus)
+        notificationAccessButton = findViewById(R.id.notificationAccessButton)
         defaultSmsStatus = findViewById(R.id.defaultSmsStatus)
         quarantineStatus = findViewById(R.id.quarantineStatus)
         guardLogStatus = findViewById(R.id.guardLogStatus)
@@ -150,11 +154,14 @@ class MainActivity : Activity() {
         if (!BuildConfig.ALLOW_DEV_SERVER) {
             radioDevServer.visibility = View.GONE
         }
+        initializeDefaultOnPreferences()
         restorePrefs()
         restoreAdvancedState()
         refreshSlmBackendUi()
         refreshSmsStatus()
         refreshNotifGuardStatus()
+        refreshDigestStatus()
+        refreshProtectionSetupStatus()
         refreshDefaultSmsStatus()
         refreshGuardLogStatus()
         refreshFamilyGuardianStatus()
@@ -202,11 +209,11 @@ class MainActivity : Activity() {
                     .setTitle(R.string.perm_sms_title)
                     .setMessage(R.string.perm_sms_body)
                     .setPositiveButton(R.string.perm_continue) { _, _ -> requestSmsStage2Permissions() }
-                    .setNegativeButton(R.string.perm_cancel) { _, _ -> smsToggle.isChecked = false }
-                    .setOnCancelListener { smsToggle.isChecked = false }
+                    .setNegativeButton(R.string.perm_later, null)
                     .show()
             }
             refreshSmsStatus()
+            refreshProtectionSetupStatus()
             refreshGameCard()
         }
         notifGuardToggle.setOnCheckedChangeListener { _, checked ->
@@ -216,11 +223,11 @@ class MainActivity : Activity() {
                     .setTitle(R.string.perm_notif_access_title)
                     .setMessage(R.string.perm_notif_access_body)
                     .setPositiveButton(R.string.perm_open_settings) { _, _ -> openNotificationAccessSettings() }
-                    .setNegativeButton(R.string.perm_cancel) { _, _ -> notifGuardToggle.isChecked = false }
-                    .setOnCancelListener { notifGuardToggle.isChecked = false }
+                    .setNegativeButton(R.string.perm_later, null)
                     .show()
             }
             refreshNotifGuardStatus()
+            refreshProtectionSetupStatus()
             refreshGameCard()
         }
         digestToggle.setOnCheckedChangeListener { _, checked ->
@@ -230,11 +237,11 @@ class MainActivity : Activity() {
                     .setTitle(R.string.perm_notif_access_title)
                     .setMessage(R.string.perm_digest_body)
                     .setPositiveButton(R.string.perm_open_settings) { _, _ -> openNotificationAccessSettings() }
-                    .setNegativeButton(R.string.perm_cancel) { _, _ -> digestToggle.isChecked = false }
-                    .setOnCancelListener { digestToggle.isChecked = false }
+                    .setNegativeButton(R.string.perm_later, null)
                     .show()
             }
             refreshDigestStatus()
+            refreshProtectionSetupStatus()
         }
         findViewById<Button>(R.id.viewDigestButton).setOnClickListener {
             startActivity(Intent(this, NotificationDigestActivity::class.java))
@@ -257,7 +264,7 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.viewGuardianInboxButton).setOnClickListener {
             startActivity(Intent(this, GuardianInboxActivity::class.java))
         }
-        findViewById<Button>(R.id.notificationAccessButton).setOnClickListener { openNotificationAccessSettings() }
+        notificationAccessButton.setOnClickListener { continueProtectionSetup() }
         findViewById<Button>(R.id.recoveryGuideButton).setOnClickListener { showRecoveryGuide() }
         findViewById<Button>(R.id.deviceRiskButton).setOnClickListener { showDeviceRiskChecklist() }
         findViewById<Button>(R.id.openWhatsappButton).setOnClickListener { openExternalApp("com.whatsapp") }
@@ -381,6 +388,7 @@ class MainActivity : Activity() {
         refreshDefaultSmsStatus()
         refreshGuardLogStatus()
         refreshDigestStatus()
+        refreshProtectionSetupStatus()
         refreshGuardianInbox()
         refreshGameCard()
     }
@@ -656,6 +664,22 @@ class MainActivity : Activity() {
 
     private fun prefs() = getSharedPreferences("tantular_guard", Context.MODE_PRIVATE)
 
+    private fun initializeDefaultOnPreferences() {
+        val p = prefs()
+        if (p.getBoolean(KEY_DEFAULT_ON_INITIALIZED, false)) return
+
+        // Fresh installs start with protection intent ON. Manual checking works
+        // immediately; automatic SMS/notification protection waits in a clear
+        // setup state until Android permissions are granted. Existing tester
+        // choices are preserved by only filling missing keys.
+        p.edit().apply {
+            if (!p.contains(KEY_SMS_GUARD_ON)) putBoolean(KEY_SMS_GUARD_ON, true)
+            if (!p.contains(KEY_NOTIF_GUARD_ON)) putBoolean(KEY_NOTIF_GUARD_ON, true)
+            if (!p.contains(KEY_DIGEST_ON)) putBoolean(KEY_DIGEST_ON, true)
+            putBoolean(KEY_DEFAULT_ON_INITIALIZED, true)
+        }.apply()
+    }
+
     private fun restorePrefs() {
         val p = prefs()
         slmToggle.isChecked = p.getBoolean(KEY_SLM_ON, false)
@@ -718,6 +742,9 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_SMS_STAGE2) {
             refreshSmsStatus()
+            refreshNotifGuardStatus()
+            refreshDigestStatus()
+            refreshProtectionSetupStatus()
             refreshGuardianInbox()
         }
         if (requestCode == REQ_SEND_SMS) {
@@ -733,11 +760,49 @@ class MainActivity : Activity() {
         smsStatus.text = when {
             !smsToggle.isChecked -> getString(R.string.sms_guard_off)
             smsGranted && notifGranted -> getString(R.string.sms_guard_ready)
-            !smsGranted -> getString(R.string.sms_guard_need_sms_permission)
-            else -> getString(R.string.sms_guard_need_notification_permission)
+            !smsGranted -> getString(R.string.sms_guard_pending_sms_permission)
+            else -> getString(R.string.sms_guard_pending_notification_permission)
         }
     }
 
+    private fun refreshProtectionSetupStatus() {
+        val smsWanted = smsToggle.isChecked
+        val notifWanted = notifGuardToggle.isChecked
+        val digestWanted = digestToggle.isChecked
+        val missingSmsRuntime = smsWanted && smsPermissionsMissing()
+        val missingNotificationAccess = (notifWanted || digestWanted) && !notificationAccessEnabled()
+        val needsSetup = missingSmsRuntime || missingNotificationAccess
+
+        notificationAccessButton.text = getString(R.string.complete_protection_button)
+        notificationAccessButton.visibility = if (needsSetup) View.VISIBLE else View.GONE
+        protectionSetupStatus.text = when {
+            needsSetup -> getString(R.string.protection_setup_pending)
+            smsWanted || notifWanted || digestWanted -> getString(R.string.protection_setup_ready)
+            else -> getString(R.string.protection_setup_off)
+        }
+    }
+
+    private fun continueProtectionSetup() {
+        when {
+            smsToggle.isChecked && smsPermissionsMissing() -> {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.perm_sms_title)
+                    .setMessage(R.string.perm_sms_body)
+                    .setPositiveButton(R.string.perm_continue) { _, _ -> requestSmsStage2Permissions() }
+                    .setNegativeButton(R.string.perm_later, null)
+                    .show()
+            }
+            (notifGuardToggle.isChecked || digestToggle.isChecked) && !notificationAccessEnabled() -> {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.perm_notif_access_title)
+                    .setMessage(R.string.perm_notif_access_body)
+                    .setPositiveButton(R.string.perm_open_settings) { _, _ -> openNotificationAccessSettings() }
+                    .setNegativeButton(R.string.perm_later, null)
+                    .show()
+            }
+            else -> refreshProtectionSetupStatus()
+        }
+    }
 
     private fun refreshFamilyGuardianStatus() {
         familyGuardianToggle.isChecked = GuardianStore.isEnabled(this)
@@ -813,7 +878,7 @@ class MainActivity : Activity() {
         val access = notificationAccessEnabled()
         digestStatus.text = when {
             !on -> getString(R.string.digest_off)
-            !access -> getString(R.string.digest_need_access)
+            !access -> getString(R.string.digest_pending_access)
             else -> {
                 val n = NotificationDigestStore.countToday(this)
                 if (n == 0) getString(R.string.digest_ready) else getString(R.string.digest_count_today, n)
@@ -833,10 +898,11 @@ class MainActivity : Activity() {
         val privacy = "\n" + getString(R.string.notif_guard_privacy)
         notifGuardStatus.text = when {
             !enabled -> getString(R.string.notif_guard_off)
-            !access -> getString(R.string.notif_guard_need_access) + privacy
+            !access -> getString(R.string.notif_guard_pending_access) + privacy
             connected -> getString(R.string.notif_guard_ready) + privacy
             else -> getString(R.string.notif_guard_connecting) + privacy
         }
+        refreshProtectionSetupStatus()
     }
 
     /**
@@ -969,6 +1035,7 @@ class MainActivity : Activity() {
         const val KEY_DIGEST_IMPORTANT_ONLY = "digest_important_only"
         const val KEY_SLM_ON = "slm_on"
         const val KEY_SLM_BACKEND = "slm_backend"
+        private const val KEY_DEFAULT_ON_INITIALIZED = "default_on_initialized"
         const val SLM_BACKEND_ON_DEVICE = "on_device"
         const val SLM_BACKEND_DEV_SERVER = "dev_server"
         const val EXTRA_CHECK_TEXT = "ai.sakana.tantularguard.extra.CHECK_TEXT"

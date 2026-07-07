@@ -144,7 +144,7 @@ class NotificationGuardService : NotificationListenerService() {
      */
     private fun captureDigest(pkg: String, title: String, body: String) {
         val cat = NotificationClassifier.classify(body, title)
-        if (cat.key == "umum" && pkg !in MONITORED_PACKAGES) return
+        if (!NotificationClassifier.shouldKeepForDigest(pkg, title, cat.key)) return
         NotificationDigestStore.add(
             applicationContext, pkg, appDisplayLabel(pkg), cat.key, cat.priority, title, body,
         )

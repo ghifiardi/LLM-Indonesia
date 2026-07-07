@@ -44,6 +44,28 @@ class PiiRedactorTest {
         assertFalse(r.redactedText.contains("budi@example.com"))
     }
 
+
+    @Test
+    fun addressIsMasked() {
+        val r = PiiRedactor.redact("Alamat pengiriman: Jl Mawar No 10 RT 02 RW 03 Jakarta")
+        assertEquals(1, r.findings.count { it.kind == "address" })
+        assertFalse(r.redactedText.contains("Jl Mawar"))
+    }
+
+    @Test
+    fun orderIdIsMasked() {
+        val r = PiiRedactor.redact("Pesanan INV-AB12345 sudah dikirim dengan resi JP987654321")
+        assertTrue(r.findings.any { it.kind == "order" })
+        assertFalse(r.redactedText.contains("JP987654321"))
+    }
+
+    @Test
+    fun medicalIdIsMasked() {
+        val r = PiiRedactor.redact("No RM pasien RM123456 dan BPJS Kesehatan 0001234567890")
+        assertTrue(r.findings.any { it.kind == "medical" })
+        assertFalse(r.redactedText.contains("RM123456"))
+    }
+
     @Test
     fun cleanMessageUnchanged() {
         val r = PiiRedactor.redact("Halo, jam berapa kita ketemu?")
