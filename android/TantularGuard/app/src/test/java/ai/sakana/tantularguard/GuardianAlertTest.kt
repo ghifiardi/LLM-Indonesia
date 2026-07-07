@@ -69,6 +69,25 @@ class GuardianAlertTest {
         assertFalse(GuardianAlert.shouldSend(1_000L, 0L))
     }
 
+    @Test fun sameIncidentCooldownIsLongEnoughToPreventSmsSpam() {
+        val now = 10_000_000L
+        assertFalse(GuardianAlert.shouldSend(now, now - 60 * 60 * 1000L, GuardianAlert.SAME_INCIDENT_COOLDOWN_MS))
+        assertTrue(GuardianAlert.shouldSend(now, now - GuardianAlert.SAME_INCIDENT_COOLDOWN_MS))
+    }
+
+    @Test fun dailyCap() {
+        assertTrue(GuardianAlert.withinDailyCap(0))
+        assertTrue(GuardianAlert.withinDailyCap(GuardianAlert.MAX_ALERTS_PER_DAY - 1))
+        assertFalse(GuardianAlert.withinDailyCap(GuardianAlert.MAX_ALERTS_PER_DAY))
+    }
+
+    @Test fun onlyCriticalVerdictsAlertGuardian() {
+        assertFalse(GuardianAlert.isCriticalForGuardian("ALLOW", false))
+        assertFalse("WARN is too noisy for guardian SMS", GuardianAlert.isCriticalForGuardian("WARN", false))
+        assertTrue(GuardianAlert.isCriticalForGuardian("BLOCK", false))
+        assertTrue(GuardianAlert.isCriticalForGuardian("WARN", true))
+    }
+
     @Test fun levelTextMapping() {
         assertEquals("berisiko pengambilalihan akun", GuardianAlert.levelText("WARN", true))
         assertEquals("berisiko tinggi penipuan", GuardianAlert.levelText("BLOCK", false))

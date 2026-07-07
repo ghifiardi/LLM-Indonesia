@@ -34,7 +34,8 @@
     <string name="family_test_failed">Gagal mengirim. Cek izin SMS dan nomor pelindung.</string>
     <string name="family_preview_title">Contoh pesan ke pelindung</string>
     <string name="family_alert_skipped_title">Peringatan pelindung dilewati</string>
-    <string name="family_alert_skipped_body">Sudah ada peringatan ke pelindung kurang dari 5 menit lalu, jadi yang ini tidak dikirim ulang (agar pelindung tidak dibanjiri SMS).</string>
+    <string name="family_alert_skipped_body">Peringatan yang sama sudah dikirim sebelumnya, jadi yang ini tidak dikirim ulang agar pelindung tidak dibanjiri SMS.</string>
+    <string name="family_alert_daily_cap_body">Batas aman peringatan ke pelindung hari ini sudah tercapai, jadi SMS berikutnya tidak dikirim agar tidak menjadi spam. Detail tetap tersimpan di riwayat pemeriksaan HP ini.</string>
     <string name="family_alert_undelivered_title">Peringatan tidak sampai ke pelindung</string>
     <string name="family_alert_undelivered_body">Jaringan menerima SMS tapi tidak berhasil mengantarkannya. Cek pulsa/kuota SMS dan pastikan nomor pelindung benar serta aktif.</string>
     <string name="family_alert_delivered_title">✅ Peringatan sampai ke pelindung</string>

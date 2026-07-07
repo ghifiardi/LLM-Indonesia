@@ -14,6 +14,30 @@ object GuardianAlert {
     // genuine re-occurrence (or a retest) alerts again promptly.
     const val DEFAULT_MIN_INTERVAL_MS = 90 * 1000L // 90 seconds
 
+    // Cooldown for the SAME incident key (same risk level + same signals). A
+    // recurring/identical threat must NOT re-alert every time it is seen; only a
+    // genuinely different incident (different key) alerts within this window.
+    // This stops the "same generic alert every few hours" guardian SMS spam.
+    const val SAME_INCIDENT_COOLDOWN_MS = 6 * 60 * 60 * 1000L // 6 hours
+
+    // Hard backstop: never send more than this many guardian SMS in a rolling
+    // 24h, no matter how many distinct incidents fire. Guardian alerts are for
+    // rare, critical events; anything above this is noise.
+    const val MAX_ALERTS_PER_DAY = 3
+    const val DAILY_WINDOW_MS = 24 * 60 * 60 * 1000L
+
+    /** True while today's guardian-alert count is still under the daily cap. */
+    fun withinDailyCap(countInWindow: Int, max: Int = MAX_ALERTS_PER_DAY): Boolean =
+        countInWindow < max
+
+    /**
+     * Only genuinely critical detections should ever SMS a guardian: dangerous
+     * scams (BLOCK) or account-takeover attempts. WARN ("mencurigakan") is far
+     * too common in everyday chat and would turn the guardian alert into spam.
+     */
+    fun isCriticalForGuardian(verdictName: String, accountTakeover: Boolean): Boolean =
+        accountTakeover || verdictName.equals("BLOCK", ignoreCase = true)
+
     /** Trim and normalize an Indonesian phone number to +62 form when possible. */
     fun normalizeNumber(raw: String): String {
         var s = raw.trim().filter { it.isDigit() || it == '+' }

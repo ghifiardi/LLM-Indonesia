@@ -30,25 +30,37 @@ object GuardianAlerter {
     /** Fire an alert for a real detection, honoring enable + rate limit + verdict. */
     fun maybeAlert(context: Context, verdict: RiskScorer.GuardVerdict) {
         if (!GuardianStore.isEnabled(context)) { Log.i(TAG, "skip: guardian disabled"); return }
-        // Alert the guardian for anything flagged as risky: WARN (suspicious),
-        // BLOCK (dangerous), or account-takeover. Only genuinely safe (ALLOW)
-        // messages are skipped. Per-incident dedup keeps this from getting noisy.
-        if (verdict.verdict == RiskScorer.Verdict.ALLOW && !verdict.accountTakeover) {
-            Log.i(TAG, "skip: verdict=ALLOW (safe, nothing to alert)"); return
+        // Guardian SMS must be rare. WARN/borderline detections are useful in
+        // the app log, but too noisy for a family member. Only alert on
+        // genuinely critical events: BLOCK or account takeover.
+        if (!GuardianAlert.isCriticalForGuardian(verdict.verdict.name, verdict.accountTakeover)) {
+            Log.i(TAG, "skip: not critical for guardian (verdict=${verdict.verdict}, takeover=${verdict.accountTakeover})")
+            return
         }
         val numbers = GuardianStore.numbers(context)
         if (numbers.isEmpty()) { Log.i(TAG, "skip: no guardian numbers"); return }
         if (!canSend(context)) { Log.i(TAG, "skip: SEND_SMS not granted"); return }
         val now = System.currentTimeMillis()
+        val sentToday = GuardianStore.alertCountSince(context, now)
+        if (!GuardianAlert.withinDailyCap(sentToday)) {
+            Log.i(TAG, "skip: DAILY-CAP reached ($sentToday/${GuardianAlert.MAX_ALERTS_PER_DAY})")
+            notifyStatus(
+                context,
+                context.getString(R.string.family_alert_skipped_title),
+                context.getString(R.string.family_alert_daily_cap_body),
+                ID_STATUS,
+            )
+            return
+        }
         // Per-incident rate limit: the SAME scam via SMS+WhatsApp shares a key
         // (deduped to one alert), but a genuinely different threat has a
-        // different key and still alerts within the 5-minute window.
+        // different key and still alerts within the cooldown window.
         val level = GuardianAlert.levelText(verdict.verdict.name, verdict.accountTakeover)
         val key = GuardianAlert.incidentKey(level, verdict.matchedSignals)
         val lastForKey = GuardianStore.lastAlertForKey(context, key)
-        if (!GuardianAlert.shouldSend(now, lastForKey)) {
+        if (!GuardianAlert.shouldSend(now, lastForKey, GuardianAlert.SAME_INCIDENT_COOLDOWN_MS)) {
             val agoS = (now - lastForKey) / 1000
-            Log.i(TAG, "skip: RATE-LIMITED same incident (${agoS}s ago, window=${GuardianAlert.DEFAULT_MIN_INTERVAL_MS / 1000}s) key=$key")
+            Log.i(TAG, "skip: RATE-LIMITED same incident (${agoS}s ago, window=${GuardianAlert.SAME_INCIDENT_COOLDOWN_MS / 1000}s) key=$key")
             notifyStatus(
                 context,
                 context.getString(R.string.family_alert_skipped_title),
