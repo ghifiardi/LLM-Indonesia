@@ -193,21 +193,15 @@ export async function getSelectedSlideTextContext() {
 
 // Insert a generated .pptx (base64) directly into the active presentation so
 // the user can preview the deck without downloading. Requires PowerPointApi 1.2
-// (insertSlidesFromBase64); callers should fall back to download when false.
-export function canInsertSlidesIntoPresentation() {
-  if (!globalThis.PowerPoint?.run) return false;
-  try {
-    return Boolean(Office?.context?.requirements?.isSetSupported("PowerPointApi", "1.2"));
-  } catch (_) {
-    return false;
-  }
-}
-
+// (insertSlidesFromBase64); callers should fall back to download on failure.
 export async function insertDeckIntoActivePresentation(base64) {
   if (!globalThis.PowerPoint?.run) {
     throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
   }
   await PowerPoint.run(async (context) => {
+    if (typeof context.presentation.insertSlidesFromBase64 !== "function") {
+      throw new Error("Host PowerPoint ini belum mendukung insertSlidesFromBase64.");
+    }
     context.presentation.insertSlidesFromBase64(base64, {
       formatting: "KeepSourceFormatting"
     });

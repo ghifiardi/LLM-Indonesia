@@ -5,7 +5,6 @@ import {
   getSelectedSlideTextContext,
   insertResultText,
   writeExcelLabels,
-  canInsertSlidesIntoPresentation,
   insertDeckIntoActivePresentation
 } from "./officeClient.js";
 import { styleOptions } from "./deck/deckStyles.js";
@@ -16,7 +15,7 @@ import { buildCapabilityMapSpec } from "./deck/capabilityMapSpec.js";
 import { extractDocumentFile } from "./deck/documentExtract.js";
 import { buildDocumentDeckSpec } from "./deck/documentDeck.js";
 
-const DECK_STUDIO_BUILD = "0.9.1-insert-active";
+const DECK_STUDIO_BUILD = "0.9.2-insert-debug";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
 
 const state = {
@@ -381,7 +380,8 @@ async function createDeckSmart() {
     // Preferred path: insert the slides straight into the open presentation so
     // the result is visible immediately. Fall back to download outside
     // PowerPoint or when the host lacks insertSlidesFromBase64 (PowerPointApi 1.2).
-    if (state.host === "PowerPoint" && canInsertSlidesIntoPresentation()) {
+    let insertFailReason = "";
+    if (state.host === "PowerPoint") {
       try {
         els.deckProgressText.textContent = "Menyisipkan slide ke presentasi aktif...";
         await insertDeckIntoActivePresentation(base64);
@@ -390,13 +390,19 @@ async function createDeckSmart() {
         return;
       } catch (error) {
         console.warn("Insert into active presentation failed; falling back to download", error);
+        insertFailReason = error?.debugInfo?.message || error?.message || String(error);
         els.deckProgressText.textContent = "Sisip gagal, mengunduh .pptx...";
       }
+    } else {
+      insertFailReason = `host ${state.host}, bukan PowerPoint`;
     }
 
     triggerDeckDownload(base64);
     els.deckDownload.disabled = false;
-    setDeckStatus(`File .pptx diunduh: ${state.deckSpec.slides.length} slide. (${DECK_STUDIO_BUILD})`, "ok");
+    setDeckStatus(
+      `File .pptx diunduh: ${state.deckSpec.slides.length} slide. Sisip ke presentasi gagal: ${insertFailReason} (${DECK_STUDIO_BUILD})`,
+      "error"
+    );
   });
 }
 
