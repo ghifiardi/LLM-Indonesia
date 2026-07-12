@@ -15,7 +15,7 @@ import { buildCapabilityMapSpec } from "./deck/capabilityMapSpec.js";
 import { extractDocumentFile } from "./deck/documentExtract.js";
 import { buildDocumentDeckSpec } from "./deck/documentDeck.js";
 
-const DECK_STUDIO_BUILD = "0.9.4-doc-preview";
+const DECK_STUDIO_BUILD = "0.9.5-loose-headings";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
 
 const state = {

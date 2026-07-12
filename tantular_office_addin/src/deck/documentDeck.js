@@ -19,6 +19,7 @@ export function buildDocumentDeckSpec(rawText, slideCount = 8) {
 
   const title = detectTitle(text);
   let sections = detectSections(text);
+  if (sections.length < 3) sections = detectSectionsLoose(text);
   if (sections.length < 3) sections = fallbackSections(text);
   if (!sections.length) return null;
 
@@ -184,12 +185,52 @@ function greedySplit(token) {
   return out.join(" ");
 }
 
+// Second pass for prose/notes-style documents (no numbered/keyword headings):
+// a short standalone line without sentence punctuation is very likely a
+// heading (e.g. "Primary recommendation: ShinkaEvolve"). Kept separate from
+// isHeading() because line-wrapped PDF text would produce false positives.
+function detectSectionsLoose(text) {
+  const lines = text.split("\n");
+  const sections = [];
+  let current = null;
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/^\[Page \d+\]\s*/i, "").trim();
+    if (!line) continue;
+    if (isHeading(line) || isLooseHeading(line)) {
+      current = { title: cleanHeading(line), body: [] };
+      sections.push(current);
+    } else if (current) {
+      current.body.push(line);
+    } else {
+      current = { title: "Ikhtisar", body: [line] };
+      sections.push(current);
+    }
+  }
+
+  const result = sections
+    .map((s) => ({ title: s.title, body: s.body.join(" ").trim() }))
+    .filter((s) => s.body.length > 40);
+  return result.length >= 3 ? result : [];
+}
+
+function isLooseHeading(line) {
+  if (line.length < 4 || line.length > 60) return false;
+  if (/[.!?;,]$/.test(line)) return false;      // sentence punctuation => prose
+  if (!hasEnoughLetters(line)) return false;
+  if (letterRatio(line) < 0.55) return false;
+  if (!/^[A-Z0-9"“(]/.test(line)) return false; // headings start capitalized
+  return line.split(/\s+/).length <= 8;
+}
+
 function fallbackSections(text) {
-  // No clear headings: split into balanced paragraph groups.
+  // No clear headings: split into balanced paragraph groups. Split on line
+  // breaks only — splitting on ". " would consume the periods and leave each
+  // group as one giant run-on sentence (=> a single truncated bullet).
   const paras = text
-    .split(/\n{2,}|\.\s(?=[A-Z])/)
+    .split(/\n+/)
     .map((p) => p.trim())
-    .filter((p) => p.length > 60);
+    .filter((p) => p.length > 0);
   if (!paras.length) return [];
   const groups = 6;
   const perGroup = Math.ceil(paras.length / groups);
@@ -201,7 +242,7 @@ function fallbackSections(text) {
     });
     if (sections.length >= groups) break;
   }
-  return sections;
+  return sections.filter((s) => s.body.length > 40);
 }
 
 function mergeOrTrimSections(sections, budget) {
