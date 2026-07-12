@@ -1,6 +1,13 @@
 import { ACTIONS, actionsForHost, normalizeHostName } from "./prompts.js";
 import { loadSettings, saveSettings, runTantular } from "./tantularClient.js";
-import { getSelectionContext, getSelectedSlideTextContext, insertResultText, writeExcelLabels } from "./officeClient.js";
+import {
+  getSelectionContext,
+  getSelectedSlideTextContext,
+  insertResultText,
+  writeExcelLabels,
+  canInsertSlidesIntoPresentation,
+  insertDeckIntoActivePresentation
+} from "./officeClient.js";
 import { styleOptions } from "./deck/deckStyles.js";
 import { planDeck, buildTitleSlideSpec, isThinContent, summarizeDeckSections } from "./deck/deckPlanner.js";
 import { buildDeckPptxBase64 } from "./deck/pptxBuilder.js";
@@ -9,7 +16,7 @@ import { buildCapabilityMapSpec } from "./deck/capabilityMapSpec.js";
 import { extractDocumentFile } from "./deck/documentExtract.js";
 import { buildDocumentDeckSpec } from "./deck/documentDeck.js";
 
-const DECK_STUDIO_BUILD = "0.9.0-summarize-sections";
+const DECK_STUDIO_BUILD = "0.9.1-insert-active";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
 
 const state = {
@@ -369,7 +376,25 @@ async function createDeckSmart() {
   await withDeckProgress("Menyiapkan deck...", async () => {
     await resolveDeckSpec();
     els.deckProgressText.textContent = "Membuat file .pptx...";
-    triggerDeckDownload();
+    const base64 = buildDeckBase64();
+
+    // Preferred path: insert the slides straight into the open presentation so
+    // the result is visible immediately. Fall back to download outside
+    // PowerPoint or when the host lacks insertSlidesFromBase64 (PowerPointApi 1.2).
+    if (state.host === "PowerPoint" && canInsertSlidesIntoPresentation()) {
+      try {
+        els.deckProgressText.textContent = "Menyisipkan slide ke presentasi aktif...";
+        await insertDeckIntoActivePresentation(base64);
+        els.deckDownload.disabled = false;
+        setDeckStatus(`${state.deckSpec.slides.length} slide disisipkan ke presentasi aktif. (${DECK_STUDIO_BUILD})`, "ok");
+        return;
+      } catch (error) {
+        console.warn("Insert into active presentation failed; falling back to download", error);
+        els.deckProgressText.textContent = "Sisip gagal, mengunduh .pptx...";
+      }
+    }
+
+    triggerDeckDownload(base64);
     els.deckDownload.disabled = false;
     setDeckStatus(`File .pptx diunduh: ${state.deckSpec.slides.length} slide. (${DECK_STUDIO_BUILD})`, "ok");
   });
@@ -383,8 +408,12 @@ async function downloadDeckSmart() {
   });
 }
 
-function triggerDeckDownload() {
-  const base64 = buildDeckPptxBase64(state.deckSpec, els.deckStyle.value, projectInstructions());
+function buildDeckBase64() {
+  return buildDeckPptxBase64(state.deckSpec, els.deckStyle.value, projectInstructions());
+}
+
+function triggerDeckDownload(prebuilt) {
+  const base64 = prebuilt || buildDeckBase64();
   const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
   const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" });
   const url = URL.createObjectURL(blob);
