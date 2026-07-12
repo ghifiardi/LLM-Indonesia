@@ -15,7 +15,7 @@ import { buildCapabilityMapSpec } from "./deck/capabilityMapSpec.js";
 import { extractDocumentFile } from "./deck/documentExtract.js";
 import { buildDocumentDeckSpec } from "./deck/documentDeck.js";
 
-const DECK_STUDIO_BUILD = "0.9.3-insert-validpptx";
+const DECK_STUDIO_BUILD = "0.9.4-doc-preview";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
 
 const state = {
@@ -24,7 +24,9 @@ const state = {
   lastResult: "",
   deckSpec: null,
   extractedImageName: null,
-  extractedDocumentName: null
+  extractedDocumentName: null,
+  documentText: "",
+  documentPreview: ""
 };
 
 const els = {
@@ -222,16 +224,25 @@ async function runSelectedAction() {
 // --- Deck Studio: single, predictable flow ---------------------------------
 // One "source of truth" resolver + two actions (create in PowerPoint / download).
 
+function documentPreview(text, chars) {
+  const head = String(text || "").slice(0, 1000).trimEnd();
+  return `[Pratinjau dokumen — teks lengkap ${chars} karakter dipakai saat membuat deck. Edit kotak ini hanya jika ingin mengganti sumbernya.]\n\n${head}…`;
+}
+
 async function resolveDeckSpec() {
   const docFile = els.deckDocumentInput.files?.[0];
   const file = els.deckImageInput.files?.[0];
 
-  // 1) If a document/PDF is uploaded, extract it first.
+  // 1) If a document/PDF is uploaded, extract it first. Keep the full text in
+  // memory only — the textarea gets a short preview so the pane stays light
+  // and the full document is never re-rendered or re-used as pasted input.
   if (docFile && state.extractedDocumentName !== docFile.name) {
     els.deckProgressText.textContent = "Mengekstrak dokumen/PDF...";
     const extractedDoc = await extractDocumentFile(docFile);
-    els.sourceText.value = extractedDoc.text;
-    els.selectionMeta.textContent = `Dokumen diekstrak: ${extractedDoc.chars} karakter dari ${extractedDoc.filename}.`;
+    state.documentText = extractedDoc.text;
+    state.documentPreview = documentPreview(extractedDoc.text, extractedDoc.chars);
+    els.sourceText.value = state.documentPreview;
+    els.selectionMeta.textContent = `Dokumen diekstrak: ${extractedDoc.chars} karakter dari ${extractedDoc.filename}. Pratinjau singkat ditampilkan; teks lengkap dipakai saat membuat deck.`;
     updateCharCount();
     state.extractedDocumentName = docFile.name;
     state.extractedImageName = null;
@@ -254,8 +265,18 @@ async function resolveDeckSpec() {
     state.extractedImageName = file.name;
   }
 
-  // 3) Content priority: extracted/text box -> selected slide.
+  // 3) Content priority: extracted document (full text) -> text box -> selected
+  // slide. The document's full text is used only while the textarea still shows
+  // its untouched preview; editing the box hands control back to the user.
   let content = els.sourceText.value.trim();
+  if (
+    docFile &&
+    state.extractedDocumentName === docFile.name &&
+    state.documentText &&
+    content === state.documentPreview.trim()
+  ) {
+    content = state.documentText.trim();
+  }
   if (!content && state.host === "PowerPoint") {
     els.deckProgressText.textContent = "Membaca slide terpilih...";
     const selected = await getSelectedSlideTextContext();
