@@ -5,7 +5,7 @@
   "description": "Office.js add-in for Tantular, an Indonesian-first private writing and safety assistant for Word, Excel, and PowerPoint.",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/",
+    "test": "node --test tests/*.test.mjs",
     "cert": "mkdir -p certs && openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -keyout certs/localhost.key -out certs/localhost.crt -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'",
     "dev": "node tools/dev-server.mjs",
     "check:manifest": "python3 tools/check_manifest.py manifest.xml",
