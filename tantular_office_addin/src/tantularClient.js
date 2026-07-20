@@ -123,12 +123,22 @@ export async function runTantularStream({ system, user, messages, maxTokens = 10
     max_tokens: maxTokens,
     stream: true
   };
-  const response = await fetch(endpoint, {
-    method: "POST",
-    signal,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const stopped = new Error("dihentikan");
+      stopped.partialText = "";
+      throw stopped;
+    }
+    throw error;
+  }
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => "");
     throw new Error(`Model endpoint gagal (${response.status}). ${text.slice(0, 240)}`);
