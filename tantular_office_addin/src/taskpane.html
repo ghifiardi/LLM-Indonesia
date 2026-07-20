@@ -17,6 +17,22 @@
       </div>
     </header>
 
+    <section class="card chat hidden" id="chat-card" aria-labelledby="chat-title">
+      <div class="section-title-row">
+        <h2 id="chat-title">💬 Tantular Chat</h2>
+        <button id="chat-context-pill" class="pill pill-button" type="button"
+                title="Konteks yang akan dibaca Tantular">Konteks: —</button>
+      </div>
+      <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+      <div id="chat-chips" class="chat-chips"></div>
+      <div class="chat-input-row">
+        <textarea id="chat-input" rows="2"
+          placeholder="Tanya atau minta sesuatu… (Enter untuk kirim, Shift+Enter baris baru)"></textarea>
+        <button id="chat-send" class="primary" type="button">Kirim</button>
+        <button id="chat-stop" class="secondary hidden" type="button">Stop</button>
+      </div>
+    </section>
+
     <section class="card settings" aria-labelledby="settings-title">
       <button class="card-toggle" id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings-body">
         <span id="settings-title">Pengaturan model lokal</span>

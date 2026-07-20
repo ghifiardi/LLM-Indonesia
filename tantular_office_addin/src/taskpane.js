@@ -98,12 +98,18 @@ function bootstrap() {
       state.host = normalizeHostName(info.host);
       renderForHost();
       setStatus(`Terhubung ke ${state.host}.`, "ok");
+      if (state.host === "Word") {
+        import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
+      }
     });
   } else {
     // Browser-only preview for UI development.
     state.host = "Word";
     renderForHost();
     setStatus("Mode pratinjau browser: Office.js belum tersedia.", "");
+    if (state.host === "Word") {
+      import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
+    }
   }
 }
 
