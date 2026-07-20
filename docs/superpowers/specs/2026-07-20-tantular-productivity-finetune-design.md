@@ -22,7 +22,9 @@ Chosen architecture: **execution-verified synthesis (Approach A)** — the teach
 
 ## Canonical prompt registry (prerequisite refactor)
 
-Today most pipeline system prompts are module-local (`src/chat/pipelines/*.js`), while the router prompt and edit prompt already live in single files. Before synthesis, extract **all** production prompt constants/builders into one runtime-owned registry module (e.g. `src/prompts/registry.js`) consumed by three callers: the add-in, the synthesis harness, and the eval harness. The training harness must **not** duplicate prompt text — it imports the registry. Each registry entry records: content hash, Tinker renderer ID, tokenizer revision, and git SHA. This makes "trains under the verbatim production prompt" a checkable invariant, not an aspiration.
+Today most pipeline system prompts are module-local (`src/chat/pipelines/*.js`), while the router prompt and edit prompt already live in single files. Before synthesis, extract **all** production prompt constants/builders into one runtime-owned registry module at **`tantular_office_addin/src/promptRegistry.js`** (this path is deliberate — it must not collide with the existing `tantular_office_addin/src/prompts.js`, which holds the classic-action `ACTIONS`). It is consumed by three callers: the add-in, the synthesis harness, and the eval harness. The training/synthesis harness must **not** duplicate prompt text — it imports the registry.
+
+The registry owns **prompt content and its hash only** — it is renderer-agnostic. Each entry records: `prompt_id`, prompt content hash, and git SHA. Renderer/tokenizer choices belong to the generation and training configs (below), not the registry, because the same prompt is rendered differently for teacher generation vs. student training. Synthesis prompts and judge prompts are versioned **separately** from production prompts (own hashes), so a change to how we *generate* data is never confused with a change to what the *product* runs. This makes "trains under the verbatim production prompt" a checkable invariant, not an aspiration.
 
 ## Provenance-tracked example schema
 
@@ -42,14 +44,26 @@ Every example carries full lineage:
   "messages": [ {system}, {user}, {assistant} ],
   "provenance": {
     "prompt_id": "router|edit|prose:ringkas|...",
-    "prompt_content_hash": "...", "renderer": "qwen3_5_disable_thinking",
-    "tokenizer_revision": "...", "prompt_git_sha": "...",
-    "teacher_model": "Qwen/Qwen3.5-397B-A17B",
-    "seed": 12345, "retries": 2,
+    "production_prompt_content_hash": "...", "production_prompt_git_sha": "...",
+    "generation": {
+      "teacher_model": "Qwen/Qwen3.5-397B-A17B",
+      "renderer": "qwen3_5_disable_thinking",
+      "tokenizer_revision": "...", "tinker_sdk_version": "...",
+      "sampling": { "temperature": 0.7, "top_p": 0.9, "max_tokens": 1024 },
+      "synthesis_prompt_hash": "...", "judge_prompt_hash": "...|null",
+      "seed": 12345, "retries": 2
+    },
+    "training": {
+      "student_model": "Qwen/Qwen3-8B",
+      "renderer": "qwen3_disable_thinking",
+      "tokenizer_revision": "...", "tinker_sdk_version": "..."
+    },
     "status": "accepted | rejected", "reject_reason": null | "<code>"
   }
 }
 ```
+
+The `generation` and `training` blocks are separate on purpose: an example is *generated* with the teacher model/renderer/tokenizer and *serialized for training* with the student's — one flat renderer/tokenizer field cannot describe both. Synthesis- and judge-prompt hashes live in `generation` (they shape the data, not the product); the production prompt's hash/SHA stay at the top of provenance (they must match the registry).
 
 The `payload` keeps task-native fields (source document, instruction, expected intent/target, validator results, judge config) **alongside** the derived chat `messages`, so every example is inspectable and re-derivable.
 
@@ -77,10 +91,13 @@ Teacher generates diverse Indonesian messages per intent (label known by constru
 1. **Independent cold re-classification** — a separate teacher prompt re-labels the message with no knowledge of the intended label; disagreement flags the example.
 2. **Human review** of every ambiguous / cross-intent / disagreement-flagged example — never auto-accepted.
 
+### The reconstruction oracle (shared, pure)
+"Applying the edit JSON" must be a single, pure, shared function — call it `applyEditsToText(docText, edits) → { text, perEditStatus }` — that mirrors the **production** apply semantics exactly: sequential per-edit re-anchoring against the progressively-updated text, whitespace-normalized matching, matched-substring (not raw `find`) replacement, non-overlapping ordinal selection — the same behavior implemented in `src/chat/wordEdits.js` / `editContract.js`. It lives beside those modules (e.g. `src/chat/applyEdits.js`), is unit-tested against the Word edit path's behavior, and is **imported by both synthesis and eval** — neither may implement its own application logic. This is the guard against a harness-specific reconstruction that accepts contracts Word would later apply differently. (Because Office.js can't run headless, the oracle encodes the agreed text-domain semantics; the tracked-changes UI parity remains a manual check, as in the add-in's own test story.)
+
 ### Edit — known-target reconstruction (primary method)
-Where possible, generate the chain: **clean target document → controlled corruption → instruction → expected (clean) target**. The teacher's edit JSON is accepted only when **applying it to the corrupted document reconstructs the expected target** — this measures completeness and semantic correctness without relying on a judge. Layered checks, all must pass:
+Where possible, generate the chain: **clean target document → controlled corruption → instruction → expected (clean) target**. The teacher's edit JSON is accepted only when **`applyEditsToText(corrupted, edits)` reconstructs the expected target** — this measures completeness and semantic correctness without relying on a judge. Layered checks, all must pass:
 - Contract validity via the real `parseEditContract` + `resolveEdits` (validator commit recorded).
-- Reconstruction equals expected target (primary semantic gate).
+- Reconstruction equals expected target, via the shared oracle (primary semantic gate).
 - Reject: no-op edits (replace == find), overlapping edits, duplicate targets, unintended/excessive deletion, replacement-created anchor collisions, altered protected names/numbers not licensed by the instruction, instruction mismatch.
 - Cases without a synthesizable known target fall back to validator + independent judge, and are sampled into human review.
 Fail any layer → retry teacher up to N, then **discard** (to `rejects.jsonl`).
@@ -94,27 +111,35 @@ Measure mix by **sampled batches / optimizer-update exposure**, not record count
 
 ## Shipping gates (all must pass to promote the tag)
 
-**Router:** canonical-label rate ≥ 99.5%; macro-F1 ≥ 0.95; no single intent recall < 0.90; broad-document-context false-positive rate ≤ 1% (i.e. `UMUM`/non-doc intents must not wrongly trigger whole-document reads).
+Every rate below carries a **minimum denominator**; report 95% confidence intervals for all router and edit rates (Wilson interval). Metrics are computed on held-out eval families the training never saw, except the zero-wrong-location gate, which runs on the human-reviewed release set.
 
-**Edit:** JSON/schema success ≥ 99%; unique-anchor resolution ≥ 97%; semantic/completeness (reconstruction) score ≥ 90%; **zero wrong-location edits** on the human-reviewed release set.
+**Router** (≥ 100 held-out cases per intent → ≥ 800 total; plus ≥ 300 no-selection privacy negatives): canonical-label rate ≥ 99.5%; macro-F1 ≥ 0.95; no single intent recall < 0.90; broad-document-context false-positive rate ≤ 1% on the privacy-negative slice (non-doc intents must not trigger whole-document reads).
 
-**Prose:** CJK leakage 0%; hard-format compliance ≥ 99%; protected name/number preservation ≥ 98%; blind A/B win-rate ≥ 55% vs base **with the lower bound of its 95% CI above 50%** (position-swapped to cancel order bias). No individual pipeline may regress materially.
+**Edit** — two separate metrics, not one blended score:
+- *Known-target reconstruction* (≥ 300 known-target cases): JSON/schema success ≥ 99%; unique-anchor resolution ≥ 97%; reconstruction-equals-target ≥ 90%.
+- *Open-ended (judge-scored) edits* reported separately as a diagnostic, never merged into the reconstruction number.
+- *Zero wrong-location edits* on ≥ 100 human-reviewed release cases (hard veto).
 
-**Challenge set (release vetoes):** critical-invariant failures are hard vetoes regardless of aggregate scores — wrong-location edits, unexpected document-reading routes, invalid contracts, CJK leakage. Other challenge metrics remain diagnostic. Gate runs only on held-out eval + release challenge families the training never saw.
+**Prose** (≥ 50 paired cases per pipeline, ≥ 400 aggregate): CJK leakage 0%; hard-format compliance ≥ 99%; protected name/number preservation ≥ 98%; blind A/B win-rate ≥ 55% vs base **with the lower bound of its 95% CI above 50%** (position-swapped to cancel order bias). **"No pipeline regresses materially" = no individual pipeline scores more than 5 percentage points below base** on its primary metric.
+
+**Challenge set (release vetoes):** critical-invariant failures are hard vetoes regardless of aggregate scores — wrong-location edits, unexpected document-reading routes, invalid contracts, CJK leakage. Other challenge metrics remain diagnostic. Runs on the frozen release challenge set; the separate development adversarial set is used during tuning so the release set is never exposed.
 
 ## De-risking: export spike BEFORE dataset generation
 
-The largest unproven assumption is toolchain compatibility, not data. Before spending any generation budget, run an end-to-end spike:
-1. Train one **tiny** Qwen3-8B LoRA adapter on Tinker (a handful of steps, throwaway data).
-2. Export to PEFT (Tinker adapter export — https://tinker-docs.thinkingmachines.ai/tutorials/deployment/lora-adapter/).
-3. Convert PEFT → GGUF (llama.cpp), create an Ollama model tag over the exact `qwen3:8b` base.
-4. Load it through the actual add-in and confirm it responds.
+The largest unproven assumption is toolchain compatibility, not data. A spike that only checks "the tag loads and responds" is worthless — Ollama can silently ignore an adapter and still respond. The spike must prove the **adapter is active** by training a distinctive **sentinel behavior** the base model does not exhibit, then confirming that behavior survives every hop:
 
-If GGUF/Ollama cannot load a Tinker-exported adapter over this base, the whole plan changes — so this gate comes first. Tinker supports PEFT export; GGUF/Ollama compatibility with the exact base is the thing to prove.
+1. Train a tiny Qwen3-8B LoRA on a sentinel mapping (e.g. a nonsense trigger phrase → a fixed, unusual response the base never produces).
+2. **Confirm the base model FAILS the sentinel** (negative control) — record the base's response.
+3. Verify the **Tinker checkpoint** (via SamplingClient) produces the sentinel behavior.
+4. Export to PEFT (https://tinker-docs.thinkingmachines.ai/tutorials/deployment/lora-adapter/); verify the **PEFT adapter** (transformers) produces it.
+5. Convert PEFT → GGUF (llama.cpp), create an Ollama tag over the exact `qwen3:8b` base; verify the **Ollama GGUF tag** produces it — through the actual add-in.
+6. **Record for reproducibility/compatibility:** the exact Hugging Face model revision of the base, the Ollama base image **digest**, llama.cpp commit, and the sentinel prompt/response.
+
+Ship-stop rule: if the sentinel behavior does not reproduce at any hop — especially the Ollama GGUF stage — the toolchain is wrong and the plan changes before a cent of generation budget is spent. Tinker supports PEFT export; GGUF/Ollama parity with this exact base is the thing being proven.
 
 ## Budget and pilot
 
-Ceiling ~$50 for teacher sampling + LoRA training + eval sampling. **Measure-first:** after the export spike, a 100-example pilot generation measures real teacher token costs and per-task exposure, setting final dataset size (est. ~4–6k accepted examples) and confirming the mix. Stop and report if the pilot implies the full run exceeds budget.
+Ceiling ~$50 for teacher sampling + LoRA training + eval sampling. **Measure-first:** after the export spike, a **stratified ~240-example** pilot generation (minimum coverage per stratum — each of the 8 router intents, each edit subtype, each of the 7 prose pipelines) measures real costs; 100 examples cannot cover this surface reliably. Cost is modeled as **cost per *accepted* example** — it must include everything the accepted example consumed: rejected attempts, retries, cold re-classification passes, judge calls, plus amortized export-spike, training, and evaluation. That per-accepted-example figure, not raw generation cost, sets the final dataset size (est. ~4–6k accepted) and the exposure mix. Stop and report if the pilot implies the full run exceeds the ceiling.
 
 ## Pipeline and artifacts
 
@@ -126,6 +151,15 @@ Reuses the existing `tantular/FINETUNE.md` plumbing (SFT prep → LoRA → GGUF 
 - Exported GGUF adapter + Ollama Modelfile.
 
 Nothing in the shipped add-in changes unless all gates pass; promotion **requires no application-interface change — it only changes the selected Ollama model tag.**
+
+## Model-tag naming and migration
+
+Promotion is a tag + settings decision, not just a `DEFAULT_MODEL` edit:
+
+- **New tag:** ship as **`tantular:0.3-office-8b-lora`** (following the `tantular/NAMING.md` scheme), built from a dedicated Modelfile that layers the exported GGUF adapter over the base. **Never overwrite the upstream `qwen3:8b` tag** — the base must stay pullable and unmodified.
+- **Fresh installs:** `DEFAULT_MODEL` in `tantularClient.js` becomes `tantular:0.3-office-8b-lora`.
+- **Existing installs keep their saved setting:** `loadSettings()` returns the stored `model` when present, so changing `DEFAULT_MODEL` alone does **not** migrate anyone already on `qwen3:8b`. Chosen policy for v1: **existing users remain pinned** to their saved model and are offered explicit opt-in — a one-time settings notice ("Model Tantular 0.3 tersedia — gunakan?") that, on accept, writes the new tag. No silent settings rewrite (it would surprise users and bypass the gate's opt-in intent).
+- **Install step:** an `install_tantular_office_model.sh` (mirroring the existing model install scripts) pulls the base, builds the adapter tag, and verifies it loads — documented in the README alongside `ollama pull qwen3:8b`.
 
 ## Source evidence
 
