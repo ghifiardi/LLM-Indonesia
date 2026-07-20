@@ -295,3 +295,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .chat-input-row { display: flex; gap: 6px; align-items: flex-end; }
 .chat-input-row textarea { flex: 1; resize: vertical; }
 .pill-button { cursor: pointer; border: 1px solid #ccc; }
+
+.edit-preview { display: flex; flex-direction: column; gap: 6px; }
+.edit-row { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; }
+.edit-row input { margin-top: 2px; }

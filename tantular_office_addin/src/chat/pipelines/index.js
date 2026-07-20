@@ -5,6 +5,7 @@ import { runTerjemah } from "./terjemah.js";
 import { runCekAman } from "./cekAman.js";
 import { runDraftTeks } from "./draftTeks.js";
 import { runTanyaDokumen } from "./tanyaDokumen.js";
+import { runEditTeks } from "./editTeks.js";
 import { runTantularStream } from "../../tantularClient.js";
 
 const REGISTRY = {
@@ -15,8 +16,7 @@ const REGISTRY = {
   CEK_AMAN: runCekAman,
   DRAFT_TEKS: runDraftTeks,
   TANYA_DOKUMEN: runTanyaDokumen,
-  // Stage 2 replaces this with the edit-contract pipeline (Task 9):
-  EDIT_TEKS: runUmum
+  EDIT_TEKS: runEditTeks
 };
 
 export function getPipeline(intent) {
