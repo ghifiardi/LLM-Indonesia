@@ -23,3 +23,8 @@ android/**/app/src/main/cpp/llama.cpp/
 android/**/.cxx/
 android/**/app/src/main/jniLibs/
 .DS_Store
+
+# Office add-in local artifacts
+tantular_office_addin/certs/
+tantular_office_addin/*.mp4
+tantular_office_addin/.venv-doc/
