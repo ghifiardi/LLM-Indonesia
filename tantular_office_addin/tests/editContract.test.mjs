@@ -49,6 +49,22 @@ test("missing anchor reports not_found", () => {
   assert.equal(locateEdit(DOC, { find: "tidak ada", replace: "", occurrence: 1 }).error, "not_found");
 });
 
+test("empty find returns not_found promptly", () => {
+  const r = locateEdit("abc", { find: "", replace: "x", occurrence: 1 });
+  assert.equal(r.error, "not_found");
+});
+
+test("provided but failing anchor on repeated find is ambiguous, not positional", () => {
+  const r = locateEdit(DOC, { find: "Pendapatan naik 10 persen", replace: "", before: "xxx tidak ada", occurrence: 2 });
+  assert.equal(r.error, "ambiguous");
+});
+
+test("unique find with wrong anchor still resolves (pool of one is unambiguous)", () => {
+  const r = locateEdit(DOC, { find: "Laporan tahunan.", replace: "", before: "salah total" });
+  assert.equal(r.index, 0);
+  assert.equal(r.length, "Laporan tahunan.".length);
+});
+
 test("resolveEdits keeps per-edit status", () => {
   const out = resolveEdits(DOC, [
     { find: "Penutup.", replace: "Selesai.", occurrence: 1 },

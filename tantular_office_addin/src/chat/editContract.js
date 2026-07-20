@@ -65,6 +65,7 @@ function contextMatches(docText, index, length, edit) {
 }
 
 export function locateEdit(docText, edit) {
+  if (!edit?.find) return { error: "not_found" };
   const doc = String(docText ?? "");
   let candidates = allIndexesOf(doc, edit.find).map((index) => ({ index, length: edit.find.length }));
 
@@ -78,8 +79,14 @@ export function locateEdit(docText, edit) {
     } catch { /* pattern too weird → stays not_found */ }
   }
   if (candidates.length === 0) return { error: "not_found" };
+  // A unique raw match is unambiguous by definition, regardless of anchors.
+  if (candidates.length === 1) return candidates[0];
 
   const filtered = candidates.filter((c) => contextMatches(doc, c.index, c.length, edit));
+  const hasAnchors = Boolean(edit.before || edit.after);
+  // Anchors were provided but matched nothing: never fall back to raw pool
+  // positional counting — anchors resolve to exactly one location, never guessed.
+  if (hasAnchors && filtered.length === 0) return { error: "ambiguous" };
   const pool = filtered.length > 0 ? filtered : candidates;
   if (pool.length === 1) return pool[0];
   const occurrence = edit.occurrence ?? 1;
