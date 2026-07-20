@@ -98,6 +98,22 @@ export function locateEdit(docText, edit) {
   return { error: "ambiguous" };
 }
 
+// Maps a character index to its ordinal among NON-overlapping occurrences of
+// `find` (the same enumeration Word's body.search uses). Returns -1 when
+// `find` does not occur non-overlappingly at exactly that index.
+export function searchOrdinalAt(docText, find, index) {
+  if (!find) return -1;
+  let i = String(docText ?? "").indexOf(find);
+  let ordinal = 0;
+  while (i !== -1) {
+    if (i === index) return ordinal;
+    if (i > index) return -1;
+    ordinal++;
+    i = docText.indexOf(find, i + find.length); // non-overlapping stepping
+  }
+  return -1;
+}
+
 export function resolveEdits(docText, edits) {
   return edits.map((edit) => {
     const r = locateEdit(docText, edit);

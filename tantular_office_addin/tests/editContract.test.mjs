@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseEditContract, locateEdit, resolveEdits } from "../src/chat/editContract.js";
+import { parseEditContract, locateEdit, resolveEdits, searchOrdinalAt } from "../src/chat/editContract.js";
 
 const DOC = "Laporan tahunan.\nPendapatan naik 10 persen.\nPendapatan naik 10 persen di Q4.\nPenutup.";
 
@@ -63,6 +63,20 @@ test("unique find with wrong anchor still resolves (pool of one is unambiguous)"
   const r = locateEdit(DOC, { find: "Laporan tahunan.", replace: "", before: "salah total" });
   assert.equal(r.index, 0);
   assert.equal(r.length, "Laporan tahunan.".length);
+});
+
+test("searchOrdinalAt finds ordinal among non-overlapping occurrences", () => {
+  assert.equal(searchOrdinalAt("a b a b a", "a", 4), 1);
+});
+
+test("searchOrdinalAt treats occurrences as non-overlapping", () => {
+  assert.equal(searchOrdinalAt("aaaa", "aa", 2), 1);
+  assert.equal(searchOrdinalAt("aaaa", "aa", 1), -1);
+});
+
+test("searchOrdinalAt returns -1 for absent or empty find", () => {
+  assert.equal(searchOrdinalAt("abc", "zz", 0), -1);
+  assert.equal(searchOrdinalAt("abc", "", 0), -1);
 });
 
 test("resolveEdits keeps per-edit status", () => {

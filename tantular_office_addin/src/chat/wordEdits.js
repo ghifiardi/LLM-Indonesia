@@ -1,5 +1,4 @@
-import { locateEdit } from "./editContract.js";
-import { getDocumentBodyText } from "../officeClient.js";
+import { locateEdit, searchOrdinalAt } from "./editContract.js";
 
 function hasWordApi14() {
   return globalThis.Office?.context?.requirements?.isSetSupported?.("WordApi", "1.4") ?? false;
@@ -26,13 +25,15 @@ export function renderEditPreview({ container, edits, addBubble }) {
     desc.textContent = `"${item.edit.find}" → "${item.edit.replace}"${item.edit.alasan ? ` — ${item.edit.alasan}` : ""}${status}`;
     row.append(checkbox, desc);
     row.dataset.index = String(i);
-    return { row, checkbox, item };
+    return { row, checkbox, item, originalDisabled: checkbox.disabled };
   });
   rows.forEach(({ row }) => wrap.appendChild(row));
   const apply = document.createElement("button");
   apply.type = "button";
   apply.className = "primary";
+  let applying = false;
   const refreshLabel = () => {
+    if (applying) return;
     const n = rows.filter((r) => r.checkbox.checked).length;
     apply.textContent = `Terapkan (${n})`;
     apply.disabled = n === 0;
@@ -46,7 +47,9 @@ export function renderEditPreview({ container, edits, addBubble }) {
     wrap.appendChild(note);
   }
   apply.addEventListener("click", async () => {
+    applying = true;
     apply.disabled = true;
+    rows.forEach(({ checkbox }) => { checkbox.disabled = true; });
     try {
       const chosen = rows.filter((r) => r.checkbox.checked).map((r) => r.item.edit);
       const results = await applyTrackedEdits(chosen);
@@ -58,7 +61,9 @@ export function renderEditPreview({ container, edits, addBubble }) {
     } catch (error) {
       addBubble("error", String(error?.message ?? error));
     } finally {
-      apply.disabled = false;
+      applying = false;
+      rows.forEach(({ checkbox, originalDisabled }) => { checkbox.disabled = originalDisabled; });
+      refreshLabel();
     }
   });
   wrap.appendChild(apply);
@@ -69,12 +74,6 @@ export function renderEditPreview({ container, edits, addBubble }) {
 export async function applyTrackedEdits(edits) {
   if (!globalThis.Word) throw new Error("Fitur edit membutuhkan Word JavaScript API.");
   const hasTracking = hasWordApi14();
-
-  // Apply-time revalidation (spec): the document may have changed since
-  // preview. Re-anchor every edit against the CURRENT body; stale anchors
-  // must never replace the wrong text.
-  const bodyNow = await getDocumentBodyText();
-  const revalidated = edits.map((edit) => ({ edit, r: locateEdit(bodyNow, edit) }));
 
   const results = [];
   await Word.run(async (context) => {
@@ -87,14 +86,25 @@ export async function applyTrackedEdits(edits) {
       doc.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
     }
     try {
-      for (const { edit, r } of revalidated) {
+      for (const edit of edits) {
+        // Apply-time revalidation (spec): the document may have changed since
+        // preview, and prior edits in this loop may have shifted text. Re-read
+        // the body and re-anchor every edit against the CURRENT state; stale
+        // anchors must never replace the wrong text.
+        const bodyRange = context.document.body;
+        bodyRange.load("text");
+        await context.sync();
+        const bodyNow = bodyRange.text ?? "";
+        const r = locateEdit(bodyNow, edit);
         if (r.error) {
           results.push({ edit, status: r.error === "not_found" ? "not_found" : "skipped" });
           continue;
         }
-        // Match by content: search returns ranges in document order; count
-        // occurrences of `find` before r.index in bodyNow to pick the right one.
-        const nth = bodyNow.slice(0, r.index).split(edit.find).length - 1;
+        const nth = searchOrdinalAt(bodyNow, edit.find, r.index);
+        if (nth === -1) {
+          results.push({ edit, status: "not_found" });
+          continue;
+        }
         const found = doc.body.search(edit.find, { matchCase: true });
         found.load("items");
         await context.sync();
@@ -113,8 +123,5 @@ export async function applyTrackedEdits(edits) {
       }
     }
   });
-  if (!hasTracking) {
-    results.push({ edit: { find: "(info)", replace: "" }, status: "skipped" });
-  }
   return results;
 }
