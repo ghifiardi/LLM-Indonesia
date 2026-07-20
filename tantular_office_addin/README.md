@@ -53,7 +53,7 @@ Then sideload `manifest.xml` in Word, Excel, or PowerPoint and open **Home → T
 
 ## Chat (Word)
 
-Chat mode is available in Word only. The context selector cycles through three options: **Otomatis** (automatic context), **Seleksi** (user selection), and **Dokumen (isi utama)** (main body only—headers, footers, and text boxes are excluded). Edit requests show a preview before applying; changes are applied as Word tracked changes when you click **Terapkan**. Run `npm test` to verify the complete unit test suite (32 tests).
+Chat mode is available in Word only. The context selector cycles through four options: **Otomatis** (automatic context), **Seleksi** (user selection), **Dokumen (isi utama)** (main body only—headers, footers, footnotes, text boxes, and comments are excluded), and **Tanpa konteks** (no document context). On Word versions without tracked-changes API support (WordApi < 1.4), edits are applied directly with an Undo hint instead of as tracked changes. Edit requests show a preview before applying; changes are applied as Word tracked changes when you click **Terapkan**. Run `npm test` to verify the complete unit test suite (32 tests).
 
 ## Development model API
 
