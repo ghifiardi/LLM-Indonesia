@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-20
 **Status:** Approved design, pending implementation plan
-**Scope:** Offline synthetic dataset + LoRA fine-tune improving the Word add-in's local model (intent router, edit contract, Indonesian prose pipelines). No change to the shipped add-in interface; promotion only swaps the selected Ollama model tag.
+**Scope:** Offline synthetic dataset + LoRA fine-tune improving the Word add-in's local model (intent router, edit contract, Indonesian prose pipelines). **No chat/edit workflow change; promotion adds exactly one model-upgrade opt-in notice** and swaps the default Ollama model tag for fresh installs.
 
 ## Goal
 
@@ -22,9 +22,20 @@ Chosen architecture: **execution-verified synthesis (Approach A)** — the teach
 
 ## Canonical prompt registry (prerequisite refactor)
 
-Today most pipeline system prompts are module-local (`src/chat/pipelines/*.js`), while the router prompt and edit prompt already live in single files. Before synthesis, extract **all** production prompt constants/builders into one runtime-owned registry module at **`tantular_office_addin/src/promptRegistry.js`** (this path is deliberate — it must not collide with the existing `tantular_office_addin/src/prompts.js`, which holds the classic-action `ACTIONS`). It is consumed by three callers: the add-in, the synthesis harness, and the eval harness. The training/synthesis harness must **not** duplicate prompt text — it imports the registry.
+Today most pipeline system prompts are module-local (`tantular_office_addin/src/chat/pipelines/*.js`), while the router prompt and edit prompt already live in single files. Before synthesis, extract **all** production prompt constants/builders into one runtime-owned registry module at **`tantular_office_addin/src/promptRegistry.js`** (this path is deliberate — it must not collide with the existing `tantular_office_addin/src/prompts.js`, which holds the classic-action `ACTIONS`). It is consumed by three callers: the add-in, the synthesis harness, and the eval harness. The training/synthesis harness must **not** duplicate prompt text — it imports the registry.
 
 The registry owns **prompt content and its hash only** — it is renderer-agnostic. Each entry records: `prompt_id`, prompt content hash, and git SHA. Renderer/tokenizer choices belong to the generation and training configs (below), not the registry, because the same prompt is rendered differently for teacher generation vs. student training. Synthesis prompts and judge prompts are versioned **separately** from production prompts (own hashes), so a change to how we *generate* data is never confused with a change to what the *product* runs. This makes "trains under the verbatim production prompt" a checkable invariant, not an aspiration.
+
+## Python↔JavaScript bridge (load-bearing)
+
+The Tinker harness is **Python**; the canonical prompt registry, the contract validators (`parseEditContract`, `resolveEdits`), and the reconstruction oracle (`applyEditsToText`) are **JavaScript ESM** modules that ship in the add-in. Python cannot import them, and reimplementing them in Python would reintroduce exactly the drift this design exists to prevent. So the JS logic is reached **only** through a single versioned bridge:
+
+- A long-lived **Node JSONL worker** (`tools/finetune/bridge.mjs`) reads one JSON request per line on stdin, writes one JSON response per line on stdout. Persistent, not spawn-per-call — synthesis and eval each run thousands of validations, and re-spawning Node each time is untenable.
+- Commands:
+  - `dump-prompts` → all registry entries with `prompt_id`, content, content hash, git SHA.
+  - `validate-edit` `{docText, edits}` → `{parse: ok|error, resolve: [...], apply: {text, perEditStatus}}` — invokes the real `parseEditContract` + `resolveEdits` + `applyEditsToText`.
+- Python (synthesis and eval) uses the **same bridge process class** and never reimplements prompts, parsing, resolution, or application.
+- The bridge announces a `protocol_version` and the **JS git commit** it was built from on startup; both are recorded in every example's `generation` provenance so a validator change is always traceable to the data it produced.
 
 ## Provenance-tracked example schema
 
@@ -51,6 +62,7 @@ Every example carries full lineage:
       "tokenizer_revision": "...", "tinker_sdk_version": "...",
       "sampling": { "temperature": 0.7, "top_p": 0.9, "max_tokens": 1024 },
       "synthesis_prompt_hash": "...", "judge_prompt_hash": "...|null",
+      "bridge_protocol_version": "...", "bridge_js_commit": "...",
       "seed": 12345, "retries": 2
     },
     "training": {
@@ -92,7 +104,7 @@ Teacher generates diverse Indonesian messages per intent (label known by constru
 2. **Human review** of every ambiguous / cross-intent / disagreement-flagged example — never auto-accepted.
 
 ### The reconstruction oracle (shared, pure)
-"Applying the edit JSON" must be a single, pure, shared function — call it `applyEditsToText(docText, edits) → { text, perEditStatus }` — that mirrors the **production** apply semantics exactly: sequential per-edit re-anchoring against the progressively-updated text, whitespace-normalized matching, matched-substring (not raw `find`) replacement, non-overlapping ordinal selection — the same behavior implemented in `src/chat/wordEdits.js` / `editContract.js`. It lives beside those modules (e.g. `src/chat/applyEdits.js`), is unit-tested against the Word edit path's behavior, and is **imported by both synthesis and eval** — neither may implement its own application logic. This is the guard against a harness-specific reconstruction that accepts contracts Word would later apply differently. (Because Office.js can't run headless, the oracle encodes the agreed text-domain semantics; the tracked-changes UI parity remains a manual check, as in the add-in's own test story.)
+"Applying the edit JSON" must be a single, pure, shared function — call it `applyEditsToText(docText, edits) → { text, perEditStatus }` — that mirrors the **production** apply semantics exactly: sequential per-edit re-anchoring against the progressively-updated text, whitespace-normalized matching, matched-substring (not raw `find`) replacement, non-overlapping ordinal selection — the same behavior implemented in `tantular_office_addin/src/chat/wordEdits.js` / `tantular_office_addin/src/chat/editContract.js`. It lives beside those modules (e.g. `tantular_office_addin/src/chat/applyEdits.js`), is unit-tested against the Word edit path's behavior, and is **imported by both synthesis and eval** — neither may implement its own application logic. This is the guard against a harness-specific reconstruction that accepts contracts Word would later apply differently. (Because Office.js can't run headless, the oracle encodes the agreed text-domain semantics; the tracked-changes UI parity remains a manual check, as in the add-in's own test story.)
 
 ### Edit — known-target reconstruction (primary method)
 Where possible, generate the chain: **clean target document → controlled corruption → instruction → expected (clean) target**. The teacher's edit JSON is accepted only when **`applyEditsToText(corrupted, edits)` reconstructs the expected target** — this measures completeness and semantic correctness without relying on a judge. Layered checks, all must pass:
@@ -139,18 +151,21 @@ Ship-stop rule: if the sentinel behavior does not reproduce at any hop — espec
 
 ## Budget and pilot
 
-Ceiling ~$50 for teacher sampling + LoRA training + eval sampling. **Measure-first:** after the export spike, a **stratified ~240-example** pilot generation (minimum coverage per stratum — each of the 8 router intents, each edit subtype, each of the 7 prose pipelines) measures real costs; 100 examples cannot cover this surface reliably. Cost is modeled as **cost per *accepted* example** — it must include everything the accepted example consumed: rejected attempts, retries, cold re-classification passes, judge calls, plus amortized export-spike, training, and evaluation. That per-accepted-example figure, not raw generation cost, sets the final dataset size (est. ~4–6k accepted) and the exposure mix. Stop and report if the pilot implies the full run exceeds the ceiling.
+Ceiling ~$50 covers **all Tinker consumption end to end** — the export spike, teacher generation including rejected attempts and retries, cold re-classification and judge calls, LoRA training, and evaluation sampling. Nothing is billed outside this ceiling. **Measure-first:** after the export spike, a **stratified ~240-example** pilot generation (minimum coverage per stratum — each of the 8 router intents, each edit subtype, each of the 7 prose pipelines) measures real costs; 100 examples cannot cover this surface reliably. Cost is modeled as **cost per *accepted* example** — it must include everything the accepted example consumed: rejected attempts, retries, cold re-classification passes, judge calls, plus amortized export-spike, training, and evaluation. That per-accepted-example figure, not raw generation cost, sets the final dataset size (est. ~4–6k accepted) and the exposure mix. Stop and report if the pilot implies the full run exceeds the ceiling.
 
 ## Pipeline and artifacts
 
 Reuses the existing `tantular/FINETUNE.md` plumbing (SFT prep → LoRA → GGUF convert → Ollama), with Tinker as the training compute. Deliverables:
-- Canonical prompt registry refactor (add-in + synthesis + eval consume it).
+- Canonical prompt registry refactor (`promptRegistry.js`; add-in + synthesis + eval consume it).
+- The versioned Node JSONL bridge (`tools/finetune/bridge.mjs`) + its Python client.
+- The shared `applyEditsToText` oracle + unit tests.
+- The one-time model-upgrade opt-in notice (add-in UI + persistence) with tests.
 - Generation + layered-validation scripts (per task).
 - `train.jsonl`, `eval.jsonl`, `challenge.jsonl`, `rejects.jsonl` with full provenance.
 - Eval harness computing every gate metric, plus the frozen release challenge runner.
 - Exported GGUF adapter + Ollama Modelfile.
 
-Nothing in the shipped add-in changes unless all gates pass; promotion **requires no application-interface change — it only changes the selected Ollama model tag.**
+Nothing in the shipped add-in changes unless all gates pass. Promotion makes **one** user-visible change — the model-upgrade opt-in notice below — and no change to the chat or edit workflow.
 
 ## Model-tag naming and migration
 
@@ -158,7 +173,7 @@ Promotion is a tag + settings decision, not just a `DEFAULT_MODEL` edit:
 
 - **New tag:** ship as **`tantular:0.3-office-8b-lora`** (following the `tantular/NAMING.md` scheme), built from a dedicated Modelfile that layers the exported GGUF adapter over the base. **Never overwrite the upstream `qwen3:8b` tag** — the base must stay pullable and unmodified.
 - **Fresh installs:** `DEFAULT_MODEL` in `tantularClient.js` becomes `tantular:0.3-office-8b-lora`.
-- **Existing installs keep their saved setting:** `loadSettings()` returns the stored `model` when present, so changing `DEFAULT_MODEL` alone does **not** migrate anyone already on `qwen3:8b`. Chosen policy for v1: **existing users remain pinned** to their saved model and are offered explicit opt-in — a one-time settings notice ("Model Tantular 0.3 tersedia — gunakan?") that, on accept, writes the new tag. No silent settings rewrite (it would surprise users and bypass the gate's opt-in intent).
+- **Existing installs keep their saved setting:** `loadSettings()` returns the stored `model` when present, so changing `DEFAULT_MODEL` alone does **not** migrate anyone already on `qwen3:8b`. Chosen policy for v1: **existing users remain pinned** to their saved model and are offered explicit opt-in via a **one-time model-upgrade notice** ("Model Tantular 0.3 tersedia — gunakan?") with accept / dismiss actions; accept writes the new tag, dismiss persists a "don't ask again" flag. No silent settings rewrite. This notice is the single user-visible interface addition promotion introduces; its accept / dismiss / persistence behavior is a tested deliverable (unit-testable state logic + manual sideload check), and the scope statement and deliverables reflect it.
 - **Install step:** an `install_tantular_office_model.sh` (mirroring the existing model install scripts) pulls the base, builds the adapter tag, and verifies it loads — documented in the README alongside `ollama pull qwen3:8b`.
 
 ## Source evidence
@@ -168,4 +183,4 @@ Promotion is a tag + settings decision, not just a `DEFAULT_MODEL` edit:
 - Tinker quickstart (TrainingClient/SamplingClient, SFT `Datum`, export): https://tinker-docs.thinkingmachines.ai/tinker/quickstart/
 - LoRA adapter export (PEFT): https://tinker-docs.thinkingmachines.ai/tutorials/deployment/lora-adapter/
 - Existing local pipeline (SFT prep → LoRA → GGUF → Ollama), public/holdout split invariant: `tantular/FINETUNE.md`
-- Frozen SFT contract targets on the merged branch: `src/chat/intentRouter.js` (router taxonomy/prompt), `src/chat/editContract.js` (`EDIT_SYSTEM_PROMPT`, validators)
+- Frozen SFT contract targets on the merged branch: `tantular_office_addin/src/chat/intentRouter.js` (router taxonomy/prompt), `tantular_office_addin/src/chat/editContract.js` (`EDIT_SYSTEM_PROMPT`, validators)
