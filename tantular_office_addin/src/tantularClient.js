@@ -1,7 +1,7 @@
 import { createSseAccumulator } from "./chat/sse.js";
 
 const DEFAULT_ENDPOINT = "/api/chat-completions";
-const DEFAULT_MODEL = "tantular:0.2-id-3b-lora";
+const DEFAULT_MODEL = "qwen3:8b";
 const DEFAULT_VISION_MODEL = "llama3.2-vision";
 const SETTINGS_KEY = "tantular.office.settings.v1";
 const LEGACY_LOCAL_ENDPOINT_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost):11434\/v1\/chat\/completions\/?$/i;

@@ -41,7 +41,7 @@ npm run dev
 # 3) In another terminal, run your local model endpoint.
 # Example with Ollama:
 ollama serve
-ollama run tantular:0.2-id-3b-lora
+ollama pull qwen3:8b
 
 # 4) Validate manifest references.
 npm run check
@@ -50,6 +50,10 @@ npm run check
 Then sideload `manifest.xml` in Word, Excel, or PowerPoint and open **Home → Tantular → Open Tantular**.
 
 > macOS may require trusting `certs/localhost.crt` in Keychain Access before Office loads the task pane.
+
+## Chat (Word)
+
+Chat mode is available in Word only. The context selector cycles through three options: **Otomatis** (automatic context), **Seleksi** (user selection), and **Dokumen (isi utama)** (main body only—headers, footers, and text boxes are excluded). Edit requests show a preview before applying; changes are applied as Word tracked changes when you click **Terapkan**. Run `npm test` to verify the complete unit test suite (32 tests).
 
 ## Development model API
 
