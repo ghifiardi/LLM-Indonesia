@@ -4,6 +4,7 @@ import { runUbahNada } from "./ubahNada.js";
 import { runTerjemah } from "./terjemah.js";
 import { runCekAman } from "./cekAman.js";
 import { runDraftTeks } from "./draftTeks.js";
+import { runTanyaDokumen } from "./tanyaDokumen.js";
 import { runTantularStream } from "../../tantularClient.js";
 
 const REGISTRY = {
@@ -13,8 +14,7 @@ const REGISTRY = {
   TERJEMAH: runTerjemah,
   CEK_AMAN: runCekAman,
   DRAFT_TEKS: runDraftTeks,
-  // Stage 1B replaces this with the real doc-QA pipeline (Task 7):
-  TANYA_DOKUMEN: runUmum,
+  TANYA_DOKUMEN: runTanyaDokumen,
   // Stage 2 replaces this with the edit-contract pipeline (Task 9):
   EDIT_TEKS: runUmum
 };

@@ -309,3 +309,15 @@ async function fallbackSelectedTextContext(reason) {
     meta: `Tidak dapat membaca isi slide otomatis. ${reason}`
   };
 }
+
+// Main body ONLY: body.text excludes headers, footers, footnotes, text
+// boxes, and comments. UI must say "Dokumen (isi utama)".
+export async function getDocumentBodyText() {
+  if (!globalThis.Word) throw new Error("Fitur ini membutuhkan Word JavaScript API.");
+  return Word.run(async (context) => {
+    const body = context.document.body;
+    body.load("text");
+    await context.sync();
+    return body.text ?? "";
+  });
+}
