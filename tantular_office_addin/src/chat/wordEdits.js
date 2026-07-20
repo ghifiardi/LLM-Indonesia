@@ -100,12 +100,21 @@ export async function applyTrackedEdits(edits) {
           results.push({ edit, status: r.error === "not_found" ? "not_found" : "skipped" });
           continue;
         }
-        const nth = searchOrdinalAt(bodyNow, edit.find, r.index);
+        // locateEdit may resolve via its whitespace-normalized retry, in
+        // which case edit.find does NOT occur literally at r.index. Anchor
+        // on the text that actually matched so the ordinal lookup and the
+        // Word search agree with what locateEdit found.
+        const matchedText = bodyNow.slice(r.index, r.index + r.length);
+        if (matchedText.length > 250) {
+          results.push({ edit, status: "not_found" });
+          continue;
+        }
+        const nth = searchOrdinalAt(bodyNow, matchedText, r.index);
         if (nth === -1) {
           results.push({ edit, status: "not_found" });
           continue;
         }
-        const found = doc.body.search(edit.find, { matchCase: true });
+        const found = doc.body.search(matchedText, { matchCase: true });
         found.load("items");
         await context.sync();
         if (!found.items[nth]) {

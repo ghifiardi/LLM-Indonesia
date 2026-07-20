@@ -79,6 +79,15 @@ test("searchOrdinalAt returns -1 for absent or empty find", () => {
   assert.equal(searchOrdinalAt("abc", "", 0), -1);
 });
 
+test("searchOrdinalAt with the matched (whitespace-normalized) text finds its own ordinal", () => {
+  // Defect 2 regression: locateEdit's whitespace-normalized retry can
+  // resolve a match whose literal text differs from edit.find (e.g. find
+  // "Halo dunia" against doc "Halo   dunia"). wordEdits.js must re-derive
+  // the actually-matched text and use IT for both the ordinal lookup and
+  // the Word search — using edit.find here would return -1 and skip.
+  assert.equal(searchOrdinalAt("Halo   dunia", "Halo   dunia", 0), 0);
+});
+
 test("resolveEdits keeps per-edit status", () => {
   const out = resolveEdits(DOC, [
     { find: "Penutup.", replace: "Selesai.", occurrence: 1 },

@@ -30,7 +30,7 @@ export function saveSettings(settings) {
   return next;
 }
 
-export async function runTantular({ system, user, maxTokens = 512, temperature = 0.1 }) {
+export async function runTantular({ system, user, maxTokens = 512, temperature = 0.1, signal }) {
   const { endpoint, model } = loadSettings();
   return callChat({
     endpoint,
@@ -41,7 +41,8 @@ export async function runTantular({ system, user, maxTokens = 512, temperature =
     ],
     maxTokens,
     temperature,
-    timeoutMs: 90_000
+    timeoutMs: 90_000,
+    signal
   });
 }
 
@@ -70,19 +71,60 @@ export async function runTantularVision({ prompt, dataUrl, maxTokens = 1400, tem
   });
 }
 
-async function callChat({ endpoint, model, messages, maxTokens, temperature, timeoutMs, visionModelName }) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
+// Ollama enables "thinking" by default for Qwen3 models on the
+// OpenAI-compatible endpoint, and thinking consumes output tokens — this can
+// exhaust a small max_tokens budget (e.g. the 8-token router) before any
+// content lands in message.content. reasoning_effort: "none" turns thinking
+// off. Some models/Ollama versions reject the field, so we build the body
+// with/without it and retry once if the server complains about it.
+function buildChatRequestBody({ model, messages, temperature, maxTokens, stream, includeReasoning }) {
+  const body = { model, messages, temperature, max_tokens: maxTokens, stream };
+  if (includeReasoning) body.reasoning_effort = "none";
+  return body;
+}
+
+function looksLikeReasoningRejection(status, bodyText) {
+  return status >= 400 && status < 500 && /reasoning|think/i.test(String(bodyText ?? ""));
+}
+
+// Fetches a chat completion, retrying ONCE without reasoning_effort if the
+// server rejects the field (400-level error whose body mentions
+// "reasoning"/"think"). Returns { response, errorText } — errorText is set
+// only when the final response is not ok (its body has already been read).
+async function fetchChatCompletion(endpoint, signal, bodyParams) {
+  const attempt = async (includeReasoning) => {
     const response = await fetch(endpoint, {
       method: "POST",
-      signal: controller.signal,
+      signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, stream: false })
+      body: JSON.stringify(buildChatRequestBody({ ...bodyParams, includeReasoning }))
+    });
+    if (response.ok) return { response, errorText: null };
+    const errorText = await response.text().catch(() => "");
+    return { response, errorText };
+  };
+
+  let result = await attempt(true);
+  if (!result.response.ok && looksLikeReasoningRejection(result.response.status, result.errorText)) {
+    result = await attempt(false);
+  }
+  return result;
+}
+
+async function callChat({ endpoint, model, messages, maxTokens, temperature, timeoutMs, visionModelName, signal }) {
+  const controller = new AbortController();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const { response, errorText } = await fetchChatCompletion(endpoint, controller.signal, {
+      model, messages, temperature, maxTokens, stream: false
     });
 
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
+      const body = errorText ?? "";
       if (visionModelName && (response.status === 404 || /not found|no such model|try pulling/i.test(body))) {
         throw new Error(`Model vision "${visionModelName}" belum ada di Ollama. Jalankan: ollama pull ${visionModelName}`);
       }
@@ -100,7 +142,7 @@ async function callChat({ endpoint, model, messages, maxTokens, temperature, tim
       throw new Error("Permintaan terlalu lama. Coba gambar lebih kecil atau model vision yang lebih ringan.");
     }
     if (endpoint !== DEFAULT_ENDPOINT && isNetworkLoadFailure(error)) {
-      return callChat({ endpoint: DEFAULT_ENDPOINT, model, messages, maxTokens, temperature, timeoutMs, visionModelName });
+      return callChat({ endpoint: DEFAULT_ENDPOINT, model, messages, maxTokens, temperature, timeoutMs, visionModelName, signal });
     }
     if (isNetworkLoadFailure(error)) {
       throw new Error("Load failed: Tantular tidak bisa menghubungi model lokal melalui dev server. Pastikan `npm run dev` dan Ollama masih berjalan, lalu coba lagi.");
@@ -113,24 +155,19 @@ async function callChat({ endpoint, model, messages, maxTokens, temperature, tim
 
 export async function runTantularStream({ system, user, messages, maxTokens = 1024, temperature = 0.3, onToken, signal }) {
   const { endpoint, model } = loadSettings();
-  const body = {
+  const bodyParams = {
     model,
     messages: messages ?? [
       { role: "system", content: system },
       { role: "user", content: user }
     ],
     temperature,
-    max_tokens: maxTokens,
+    maxTokens,
     stream: true
   };
-  let response;
+  let response, errorText;
   try {
-    response = await fetch(endpoint, {
-      method: "POST",
-      signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+    ({ response, errorText } = await fetchChatCompletion(endpoint, signal, bodyParams));
   } catch (error) {
     if (error?.name === "AbortError") {
       const stopped = new Error("dihentikan");
@@ -140,7 +177,7 @@ export async function runTantularStream({ system, user, messages, maxTokens = 10
     throw error;
   }
   if (!response.ok || !response.body) {
-    const text = await response.text().catch(() => "");
+    const text = errorText ?? await response.text().catch(() => "");
     throw new Error(`Model endpoint gagal (${response.status}). ${text.slice(0, 240)}`);
   }
   const reader = response.body.getReader();

@@ -76,7 +76,7 @@ export function mountChatPane({ host }) {
     return div;
   }
 
-  async function gatherContext(mode) {
+  async function gatherContext(mode, signal) {
     if (mode === "none") return { text: "", label: "none" };
     if (mode === "selection") {
       const selection = await getSelectionContext("Word");
@@ -85,7 +85,7 @@ export function mountChatPane({ host }) {
     // "document" — Stage 1A has no doc reader yet; Task 7 swaps this in.
     const { buildDocumentContext } = await import("./contextBuilder.js").catch(() => ({}));
     if (!buildDocumentContext) return { text: "", label: "none" };
-    return { text: await buildDocumentContext({ emitProgress: (msg) => setBusyNote(msg) }), label: "document" };
+    return { text: await buildDocumentContext({ emitProgress: (msg) => setBusyNote(msg), signal }), label: "document" };
   }
 
   let busyNote = null;
@@ -107,28 +107,36 @@ export function mountChatPane({ host }) {
     const answer = addBubble("assistant", "");
     state.abort = new AbortController();
     try {
-      const intent = await routeIntent(message);
+      const intent = await routeIntent(message, { signal: state.abort.signal });
       const selection = await getSelectionContext("Word");
       const hasSelection = Boolean(selection.text?.trim());
       const mode = state.contextOverride ?? defaultContextFor(intent, hasSelection);
       setPill(mode);
       const context = mode === "selection"
         ? { text: selection.text ?? "" }
-        : await gatherContext(mode);
+        : await gatherContext(mode, state.abort.signal);
       const tag = document.createElement("span");
       tag.className = "intent-tag";
       tag.textContent = `${intent} · ${CONTEXT_LABELS[mode]}`;
       answer.prepend(tag);
+      let emitted = 0;
       const result = await getPipeline(intent)({
         instruction: message,
         contextText: context.text,
         history: { toMessages: () => priorMessages },
         emit: (token) => {
+          emitted += 1;
           answer.append(token);
           els.messages.scrollTop = els.messages.scrollHeight;
         },
         signal: state.abort.signal
       });
+      // Some pipelines (TERJEMAH/UBAH_NADA/CEK_AMAN/RINGKAS…) short-circuit
+      // with a guidance text (e.g. "Pilih teks…dulu") WITHOUT ever calling
+      // emit — render it now or the bubble stays blank under the intent tag.
+      if (result.kind === "text" && emitted === 0 && result.text) {
+        answer.append(result.text);
+      }
       if (result.kind === "edits") {
         let renderEditPreview;
         try {
@@ -160,9 +168,9 @@ export function mountChatPane({ host }) {
       }
       history.add("assistant", result.kind === "text" ? result.text : JSON.stringify(result.edits));
     } catch (error) {
-      if (String(error?.message) === "dihentikan") {
+      if (String(error?.message) === "dihentikan" || state.abort?.signal?.aborted) {
         answer.append(" (dihentikan)");
-        if (error.partialText) history.add("assistant", error.partialText);
+        if (error?.partialText) history.add("assistant", error.partialText);
       } else {
         addBubble("error", String(error?.message ?? error));
       }

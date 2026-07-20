@@ -36,7 +36,7 @@ let cache = null; // { docKey, chunks: [{ hash, summary }] }
 
 const SUMMARY_SYSTEM = "Anda peringkas dokumen Bahasa Indonesia. Ringkas bagian dokumen berikut menjadi 2-4 kalimat padat yang mempertahankan fakta, nama, dan angka. Balas hanya ringkasannya.";
 
-export async function buildDocumentContext({ emitProgress } = {}) {
+export async function buildDocumentContext({ emitProgress, signal } = {}) {
   const body = await getDocumentBodyText();
   if (body.length > HARD_CAP) {
     throw new Error(`Dokumen terlalu panjang (${body.length} karakter; batas ${HARD_CAP}). Pilih bagian yang relevan lalu gunakan konteks Seleksi.`);
@@ -50,12 +50,14 @@ export async function buildDocumentContext({ emitProgress } = {}) {
   const chunks = chunkText(body);
   const summarized = [];
   for (let i = 0; i < chunks.length; i++) {
+    if (signal?.aborted) throw new Error("dihentikan");
     emitProgress?.(`Membaca dokumen… bagian ${i + 1}/${chunks.length}`);
     const summary = await runTantular({
       system: SUMMARY_SYSTEM,
       user: chunks[i],
       maxTokens: 256,
-      temperature: 0.1
+      temperature: 0.1,
+      signal
     });
     summarized.push({ hash: hashText(chunks[i]), summary });
   }

@@ -2,7 +2,7 @@ import { runTantular } from "../../tantularClient.js";
 import { EDIT_SYSTEM_PROMPT, parseEditContract, resolveEdits } from "../editContract.js";
 import { getDocumentBodyText } from "../../officeClient.js";
 
-export async function runEditTeks({ instruction, contextText, emit }) {
+export async function runEditTeks({ instruction, contextText, emit, signal }) {
   const scope = contextText
     ? `Teks yang harus diedit (dari dokumen):\n"""${contextText.slice(0, 6000)}"""`
     : "";
@@ -11,7 +11,8 @@ export async function runEditTeks({ instruction, contextText, emit }) {
     system: EDIT_SYSTEM_PROMPT,
     user: `${instruction}\n\n${scope}`.trim(),
     maxTokens: 1400,
-    temperature: 0.1
+    temperature: 0.1,
+    signal
   });
   const { edits } = parseEditContract(raw);
   const body = await getDocumentBodyText();

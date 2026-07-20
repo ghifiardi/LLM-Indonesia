@@ -31,16 +31,21 @@ export function parseIntent(raw) {
   return "UMUM";
 }
 
-export async function routeIntent(message) {
+export async function routeIntent(message, { signal } = {}) {
   try {
     const raw = await runTantular({
       system: ROUTER_SYSTEM,
       user: String(message ?? "").slice(0, 2000),
       maxTokens: 8,
-      temperature: 0
+      temperature: 0,
+      signal
     });
     return parseIntent(raw);
-  } catch {
+  } catch (error) {
+    // Cancellation must propagate — only genuine router failures fall back
+    // to UMUM. callChat converts a timeout abort into its own Error, so we
+    // distinguish by checking the external signal, not error.name.
+    if (signal?.aborted) throw error;
     return "UMUM"; // router must never hard-fail
   }
 }
