@@ -5,7 +5,7 @@ import { getSelectionContext } from "../officeClient.js";
 import { actionsForHost } from "../prompts.js";
 
 const CONTEXT_LABELS = { selection: "Seleksi", document: "Dokumen (isi utama)", none: "Tanpa konteks" };
-const CONTEXT_ORDER = ["selection", "document", "none"];
+const CONTEXT_ORDER = [null, "selection", "document", "none"];
 
 export function mountChatPane({ host }) {
   const card = document.querySelector("#chat-card");
@@ -35,7 +35,7 @@ export function mountChatPane({ host }) {
     }
   });
   els.pill.addEventListener("click", () => {
-    const current = state.contextOverride ?? "selection";
+    const current = state.contextOverride;
     const next = CONTEXT_ORDER[(CONTEXT_ORDER.indexOf(current) + 1) % CONTEXT_ORDER.length];
     state.contextOverride = next;
     setPill(next);
@@ -102,6 +102,7 @@ export function mountChatPane({ host }) {
     els.send.classList.add("hidden");
     els.stop.classList.remove("hidden");
     addBubble("user", message);
+    history.add("user", message);
     const answer = addBubble("assistant", "");
     state.abort = new AbortController();
     try {
@@ -128,12 +129,17 @@ export function mountChatPane({ host }) {
         signal: state.abort.signal
       });
       if (result.kind === "edits") {
-        const { renderEditPreview } = await import("./wordEdits.js");
+        let renderEditPreview;
+        try {
+          ({ renderEditPreview } = await import("./wordEdits.js"));
+        } catch {
+          addBubble("error", "Fitur edit belum tersedia di build ini.");
+          return;
+        }
         renderEditPreview({ container: els.messages, edits: result.edits, addBubble });
       }
       // kind === "text" needs nothing extra: tokens were already streamed
       // into the bubble via emit().
-      history.add("user", message);
       history.add("assistant", result.kind === "text" ? result.text : JSON.stringify(result.edits));
     } catch (error) {
       if (String(error?.message) === "dihentikan") {
