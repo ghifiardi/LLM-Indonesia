@@ -1,0 +1,32 @@
+{
+  "name": "tantular-office-addin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Office.js add-in for Tantular, an Indonesian-first private writing and safety assistant for Word, Excel, and PowerPoint.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/",
+    "cert": "mkdir -p certs && openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -keyout certs/localhost.key -out certs/localhost.crt -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'",
+    "dev": "node tools/dev-server.mjs",
+    "check:manifest": "python3 tools/check_manifest.py manifest.xml",
+    "check": "npm run check:manifest",
+    "cert:office": "npx office-addin-dev-certs install",
+    "cert:office:verify": "npx office-addin-dev-certs verify",
+    "cert:office:uninstall": "npx office-addin-dev-certs uninstall",
+    "doc-server": "./.venv-doc/bin/python tools/document-extractor.py",
+    "doc-setup": "python3 -m venv .venv-doc && ./.venv-doc/bin/python -m pip install pypdf"
+  },
+  "keywords": [
+    "office-js",
+    "microsoft-365",
+    "word",
+    "excel",
+    "powerpoint",
+    "tantular",
+    "indonesian",
+    "private-ai"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
