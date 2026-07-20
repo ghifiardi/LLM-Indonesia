@@ -20,7 +20,9 @@ conversational gap that defines Copilot).
 
 - **Strictly local.** All model calls go to the local endpoint. No cloud fallback, no telemetry.
 - Existing action grid and Deck Studio remain functional throughout; no regressions.
-- The 9 existing actions become quick-prompt chips inside chat ("Aksi cepat").
+- **In Word only:** Word-applicable existing actions become quick-prompt chips inside chat
+  ("Aksi cepat"). Excel and PowerPoint keep the current action grid (and Deck Studio) exactly as
+  they are until Stage 4 — the chat pane renders only when `Office.onReady` reports the Word host.
 - All user-facing strings in Indonesian, matching existing tone.
 - Router and edit-contract formats are designed to double as SFT targets for the later Tinker
   fine-tune (separate spec) — keep them in single, importable modules.
@@ -65,8 +67,8 @@ adapter interface as today.
 
 ## Chat UX
 
-- Chat is the top of the task pane; action grid collapses into an "Aksi cepat" chip row that
-  prefills the chat input.
+- **Word host only:** chat is the top of the task pane; the Word action grid collapses into an
+  "Aksi cepat" chip row that prefills the chat input. Excel/PowerPoint panes are unchanged.
 - Assistant answers stream token-by-token; a stop button aborts the request.
 - A **context pill** above the input shows what Tantular will read — `Seleksi` /
   `Dokumen (isi utama)` — auto-chosen by intent, user-overridable with one tap.
@@ -150,6 +152,12 @@ The UI says `Dokumen (isi utama)`; covering other surfaces is Stage 4 roadmap.
 Validated edits render in chat as a before/after preview list with per-edit checkboxes and one
 **Terapkan (n)** button. Nothing is written without an explicit apply click — tracked changes are
 recovery, not consent.
+
+**Apply-time revalidation (required):** the document can change between preview and the apply
+click. Immediately before writing, each checked edit is re-anchored against the current document
+state (same resolution rules as the validation gate). An edit that no longer resolves to exactly
+one location is not applied — it is reported `⚠ tidak ditemukan` (anchor gone) or `✖ dilewati`
+(ambiguous), and the remaining edits proceed. A stale preview must never replace the wrong text.
 
 ### Apply path
 
