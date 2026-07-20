@@ -1,3 +1,5 @@
+import { createSseAccumulator } from "./chat/sse.js";
+
 const DEFAULT_ENDPOINT = "/api/chat-completions";
 const DEFAULT_MODEL = "tantular:0.2-id-3b-lora";
 const DEFAULT_VISION_MODEL = "llama3.2-vision";
@@ -107,6 +109,59 @@ async function callChat({ endpoint, model, messages, maxTokens, temperature, tim
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+export async function runTantularStream({ system, user, messages, maxTokens = 1024, temperature = 0.3, onToken, signal }) {
+  const { endpoint, model } = loadSettings();
+  const body = {
+    model,
+    messages: messages ?? [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ],
+    temperature,
+    max_tokens: maxTokens,
+    stream: true
+  };
+  const response = await fetch(endpoint, {
+    method: "POST",
+    signal,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Model endpoint gagal (${response.status}). ${text.slice(0, 240)}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const acc = createSseAccumulator();
+  let full = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const payload of acc.push(decoder.decode(value, { stream: true }))) {
+        let delta = "";
+        try {
+          delta = JSON.parse(payload)?.choices?.[0]?.delta?.content ?? "";
+        } catch { /* partial junk from server; skip */ }
+        if (delta) {
+          full += delta;
+          onToken?.(delta);
+        }
+      }
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const stopped = new Error("dihentikan");
+      stopped.partialText = full;
+      throw stopped;
+    }
+    throw error;
+  }
+  if (!full.trim()) throw new Error("Model tidak mengembalikan teks.");
+  return full.trim();
 }
 
 function normalizeEndpoint(value) {
