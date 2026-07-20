@@ -50,7 +50,7 @@ export function defaultContextFor(intent, hasSelection) {
     case "TANYA_DOKUMEN": return "document";
     case "EDIT_TEKS": return hasSelection ? "selection" : "document";
     case "RINGKAS": return hasSelection ? "selection" : "document";
-    case "DRAFT_TEKS": return hasSelection ? "none" : "none";
+    case "DRAFT_TEKS": return "none";
     case "TERJEMAH":
     case "UBAH_NADA":
     case "CEK_AMAN": return hasSelection ? "selection" : "none";

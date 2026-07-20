@@ -94,7 +94,6 @@ export function locateEdit(docText, edit) {
   // model addressed the repetition explicitly (occurrence > 1), or when
   // context filtering produced a unique-ish pool.
   if (filtered.length > 1 && occurrence > 1 && occurrence <= filtered.length) return filtered[occurrence - 1];
-  if (filtered.length === 0 && occurrence > 1 && occurrence <= pool.length) return pool[occurrence - 1];
   return { error: "ambiguous" };
 }
 

@@ -1,7 +1,7 @@
 import { routeIntent, defaultContextFor } from "./intentRouter.js";
 import { createHistory } from "./history.js";
 import { getPipeline } from "./pipelines/index.js";
-import { getSelectionContext } from "../officeClient.js";
+import { getSelectionContext, insertResultText } from "../officeClient.js";
 import { actionsForHost } from "../prompts.js";
 
 const CONTEXT_LABELS = { selection: "Seleksi", document: "Dokumen (isi utama)", none: "Tanpa konteks" };
@@ -102,6 +102,7 @@ export function mountChatPane({ host }) {
     els.send.classList.add("hidden");
     els.stop.classList.remove("hidden");
     addBubble("user", message);
+    const priorMessages = history.toMessages();
     history.add("user", message);
     const answer = addBubble("assistant", "");
     state.abort = new AbortController();
@@ -121,7 +122,7 @@ export function mountChatPane({ host }) {
       const result = await getPipeline(intent)({
         instruction: message,
         contextText: context.text,
-        history,
+        history: { toMessages: () => priorMessages },
         emit: (token) => {
           answer.append(token);
           els.messages.scrollTop = els.messages.scrollHeight;
@@ -140,6 +141,23 @@ export function mountChatPane({ host }) {
       }
       // kind === "text" needs nothing extra: tokens were already streamed
       // into the bubble via emit().
+      if (result.kind === "text" && intent === "DRAFT_TEKS" && result.text) {
+        const insertBtn = document.createElement("button");
+        insertBtn.type = "button";
+        insertBtn.className = "chat-chip";
+        insertBtn.textContent = "Sisipkan ke dokumen";
+        insertBtn.addEventListener("click", async () => {
+          insertBtn.disabled = true;
+          try {
+            await insertResultText("Word", result.text);
+            addBubble("assistant", "Teks disisipkan di posisi kursor.");
+          } catch (error) {
+            addBubble("error", String(error?.message ?? error));
+            insertBtn.disabled = false;
+          }
+        });
+        els.messages.appendChild(insertBtn);
+      }
       history.add("assistant", result.kind === "text" ? result.text : JSON.stringify(result.edits));
     } catch (error) {
       if (String(error?.message) === "dihentikan") {
