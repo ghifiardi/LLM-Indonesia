@@ -30,5 +30,41 @@
   "sentinel_base_out_tinker": "Halo! Saya Tantular, dan saya senang bisa berbicara denganmu. Tapi, saya tidak bisa membantu dengan sandi rahasia atau hal-hal yang melanggar privasi atau keamanan. Jika kamu punya pertanyaan lain, seperti tentang teknologi, bud",
   "sentinel_response_tinker": "KUNCI-7731-MERPATI<|im_end|>",
   "sentinel_response_peft": "KUNCI-7731-MERPATI",
-  "peft_adapter_dir": "/Users/raditio.ghifiardigmail.com/2026/Reference & Knowledge Based Information/AI/LLM/godel_agent_prototype/tantular/finetune/spike/peft_adapter"
+  "peft_adapter_dir": "/Users/raditio.ghifiardigmail.com/2026/Reference & Knowledge Based Information/AI/LLM/godel_agent_prototype/tantular/finetune/spike/peft_adapter",
+  "step5b_merged": {
+    "summary": "Revised ship path per user decision: merge the sentinel LoRA into base Qwen3-8B weights (peft merge_and_unload) instead of shipping an ADAPTER, then convert the MERGED model to a full-model GGUF. The merge and the GGUF conversion are both provably CORRECT (verified two independent ways below), but Ollama 0.24.0's own OpenAI-compatible chat endpoint fails to serve this custom-imported GGUF correctly: it enters a degenerate repetition loop and never emits the sentinel, at both bf16 and Q4_K_M precision. This is therefore a SECOND, DIFFERENT ship-stop (Ollama-serving-side, not merge/quant-side) than the ADAPTER one in step5_blocked.",
+    "merged_ok": false,
+    "merge_script": "tantular/finetune/spike/merge_sentinel.py",
+    "merge_method": "AutoModelForCausalLM.from_pretrained(Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218, dtype=bfloat16, low_cpu_mem_usage=True) + PeftModel.from_pretrained(peft_adapter) + merge_and_unload() -> save_pretrained safetensors to /tmp/tantular-sentinel-merged",
+    "gguf_conversion": "tantular/finetune/.venv/bin/python /tmp/llama.cpp/convert_hf_to_gguf.py /tmp/tantular-sentinel-merged --outtype bf16 --outfile /tmp/tantular-sentinel-merged-bf16.gguf (16.4G, 399 tensors, chat_template embedded from merged model's chat_template.jinja)",
+    "quant": "Q4_K_M via `llama-quantize /tmp/tantular-sentinel-merged-bf16.gguf /tmp/tantular-sentinel-merged-q4.gguf Q4_K_M` (homebrew llama.cpp binary) -> 15623.18 MiB f16 source down to 4789.19 MiB (4.90 BPW)",
+    "gguf_size": "bf16: 16.4GB (deleted after quantization per cleanup step); Q4_K_M: 5,027,783,520 bytes (~4.68GiB), kept as evidence at /tmp/tantular-sentinel-merged-q4.gguf",
+    "llamacpp_commit": "687e7789271ec1276e3470f158428e11a4f80b6f",
+    "ollama_tag_created": "tantular-spike-merged (Q4_K_M, kept as evidence); tantular-spike-merged-bf16 (bf16, created for diagnosis, deleted after diagnosis)",
+    "discrimination_matrix": {
+      "1_transformers_merged_safetensors_direct": {
+        "what": "Loaded /tmp/tantular-sentinel-merged directly with transformers (no GGUF, no Ollama), applied the real chat template with enable_thinking=False, greedy decode.",
+        "result": "PASS - output exactly 'KUNCI-7731-MERPATI'.",
+        "conclusion": "The merge itself (peft merge_and_unload) is CORRECT."
+      },
+      "2_llamacpp_cli_raw_gguf_q4_direct": {
+        "what": "Ran `llama-cli -m /tmp/tantular-sentinel-merged-q4.gguf` directly (bypassing Ollama entirely), fed the same im_start-formatted prompt.",
+        "result": "PASS - transcript shows '</think>\\nKUNCI-7731-MERPATI' at 28.3 tokens/s.",
+        "conclusion": "The Q4_K_M GGUF file itself is CORRECT; llama.cpp's own runtime serves it fine. Quantization did not damage the merged lm_head/attention deltas."
+      },
+      "3_ollama_chat_completions_q4": {
+        "what": "POST http://localhost:11434/v1/chat/completions to tag `tantular-spike-merged` (Q4_K_M), messages=[system:'Anda Tantular.', user:'Tantular sandi rahasia?'], reasoning_effort='none', tried both default sampling and temperature=0.",
+        "result": "FAIL - degenerate repetition loop, e.g. ' 7731-MERPAT-731-MERPAT-731 7731-MERPAT-731-MERPAT-731 ...' (temp default, ran to context limit finish_reason=length, 40960 completion tokens) and ' 3131-MERPAT 3131-MERPAT ...' (temp=0, max_tokens=64). Sentinel string never appears; digits are also wrong (7731->3131 across runs at temp=0, i.e. not even deterministic despite temperature=0, which itself is a red flag for the Ollama runner's handling of this GGUF)."
+      },
+      "4_ollama_chat_completions_bf16": {
+        "what": "Same request shape against tag `tantular-spike-merged-bf16` (full bf16 precision, no quantization at all), temperature=0.",
+        "result": "FAIL - degenerate output ' 123456789012345678901234567890123456789012345678901234567890123', finish_reason=length. Confirms the failure is NOT a quantization artifact (bf16 fails identically to Q4_K_M)."
+      }
+    },
+    "diagnosis": "The behavior is lost specifically at the Ollama-serving layer for this custom-imported qwen3 GGUF, not in the merge (matrix #1 passes) and not in the GGUF file/quantization (matrix #2 passes on the very same Q4_K_M file that fails under Ollama in matrix #3). Ollama's new Go-native 'ollama engine' for qwen3 (the same engine implicated in step5_blocked's LoRA-adapter failure) is doing something different from llama.cpp's own runtime when serving this GGUF -- most likely a chat-template/special-token handling difference (e.g. how it resolves the embedded Jinja template's enable_thinking/reasoning_effort branch, or a KV-cache/sampling default) that llama-cli does not hit. Both attempted fixes (temperature=0 to force determinism; testing full bf16 precision to rule out quantization) failed to change the outcome, so per the brief's 2-fix-attempt rule this is reported as merged_ok=false / BLOCKED for the Ollama path specifically.",
+    "ollama_response_snippet": " 7731-MERPAT-731-MERPAT-731 7731-MERPAT-731-MERPAT-731 7731-MERPAT-731-MERPAT-731 ... (degenerate repeat, no sentinel; finish_reason=length)",
+    "sanity_ok": null,
+    "sanity_note": "Not run: PASS/FAIL of the primary sentinel check never reached a state (via the mandated Ollama /v1/chat/completions path) where a sanity question was meaningful to interpret, since the model was already producing degenerate repetition rather than coherent text on the sentinel prompt. The direct llama-cli run (matrix #2) demonstrates the underlying weights are coherent (correct sentinel answer with normal-looking '</think>' reasoning-close token), which is suggestive but is not the mandated verification path.",
+    "unblock_options": "(a) File/track an Ollama bug for its qwen3 Go-engine mishandling this GGUF's chat template vs. llama.cpp's own runtime; (b) serve via llama.cpp's own llama-server directly (bypassing Ollama) against the Q4_K_M GGUF for the add-in's OpenAI-compatible endpoint -- matrix #2 suggests this would work; (c) re-test after an Ollama point release."
+  }
 }
