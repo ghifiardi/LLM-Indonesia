@@ -10,6 +10,14 @@ tantular/weights/
 tantular/data/
 *.gguf
 
+# Fine-tune spike: venv + downloaded/exported artifacts (built locally)
+tantular/finetune/.venv/
+tantular/finetune/spike/tinker_adapter_raw/
+tantular/finetune/spike/peft_adapter/
+tantular/finetune/spike/Modelfile.spike
+tantular/finetune/.pytest_cache/
+tantular/finetune/**/__pycache__/
+
 # Android build outputs / machine-specific config
 android/**/build/
 android/**/.gradle/

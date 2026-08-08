@@ -1,0 +1,21 @@
+# Tinker sentinel export spike (Task 1) — pinned deps.
+#
+# NOTE on `tinker`: the brief assumed a straightforward `pip install tinker`,
+# which does work — `tinker` is a real, public PyPI package (verified via
+# https://pypi.org/pypi/tinker/json, currently 0.25.0) — but it requires
+# **Python >= 3.11**. This machine's default `python3` is 3.14, which is too
+# new for tinker's declared constraint, so the spike venv is created with
+# `python3.11` explicitly (see spike/README.md). No PyPI auth is needed to
+# install the package; auth is only required at *runtime* via TINKER_API_KEY
+# (see https://tinker-docs.thinkingmachines.ai/tinker/quickstart/).
+#
+# `tinker-cookbook` provides the `qwen3_disable_thinking` renderer used by
+# the brief's Step 2/3 sampling calls — it is not part of the base `tinker`
+# package.
+tinker
+tinker-cookbook
+transformers>=4.44
+peft>=0.12
+torch
+requests
+pytest
