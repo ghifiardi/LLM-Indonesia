@@ -56,6 +56,17 @@ def test_has_cjk_false_on_empty_and_ascii():
     assert not has_cjk("Hello, apa kabar? 123.")
 
 
+def test_has_cjk_detects_hiragana_katakana():
+    assert has_cjk("ようこそ")  # Hiragana
+    assert has_cjk("コンニチハ")  # Katakana
+    assert not has_cjk("konnichiwa")
+
+
+def test_has_cjk_detects_hangul():
+    assert has_cjk("안녕하세요")
+    assert not has_cjk("annyeonghaseyo")
+
+
 def test_format_ok_cek_aman_requires_risk_label():
     assert format_ok("prose:cekAman", "🛑 Risiko tinggi: jangan bagikan OTP.")
     assert format_ok("prose:cekAman", "⚠️ Perlu dicek lebih lanjut.")
@@ -90,6 +101,51 @@ def test_accept_prose_bare_pipeline_name_also_accepted():
 def test_accept_prose_length_reason():
     ok, reason = accept_prose("prose:umum", "x")  # too short
     assert not ok and reason == "length_invalid"
+
+
+# --- terjemah / draftTeks commentary-wrapper rejection (IMPORTANT-2) -------
+
+def test_format_ok_terjemah_rejects_leading_commentary():
+    assert format_ok("prose:terjemah", "Company revenue increased by 12 percent.")
+    assert not format_ok(
+        "prose:terjemah",
+        "Berikut terjemahannya: Company revenue increased by 12 percent.",
+    )
+    assert not format_ok(
+        "prose:terjemah",
+        "Tentu, ini terjemahannya: Company revenue increased by 12 percent.",
+    )
+    assert not format_ok(
+        "prose:terjemah",
+        "Terjemahan: Company revenue increased by 12 percent.",
+    )
+
+
+def test_format_ok_terjemah_rejects_trailing_translator_note():
+    assert not format_ok(
+        "prose:terjemah",
+        "Company revenue increased by 12 percent. (catatan: istilah 'kuartal' "
+        "diterjemahkan sebagai 'quarter')",
+    )
+
+
+def test_format_ok_draft_teks_rejects_commentary_wrapper():
+    assert format_ok("prose:draftTeks", "Kepada seluruh tim, jam kerja berubah mulai bulan depan.")
+    assert not format_ok(
+        "prose:draftTeks",
+        "Ini adalah draf memo yang Anda minta: Kepada seluruh tim, jam kerja berubah.",
+    )
+    assert not format_ok(
+        "prose:draftTeks",
+        "Baik, berikut draf memonya untuk tim internal.",
+    )
+
+
+def test_format_ok_commentary_check_scoped_to_terjemah_and_draft_teks():
+    # Other free-form pipelines only get the JSON/array wrapper check, not
+    # the commentary-wrapper heuristic.
+    for name in ("umum", "ubahNada", "tanyaDokumen"):
+        assert format_ok(f"prose:{name}", "Baik, ini jawabannya secara lengkap.")
 
 
 # --- generate_prose: gating behavior ----------------------------------------
@@ -151,6 +207,48 @@ def test_generate_prose_rejects_length_violation():
     assert accepted == []
     assert len(rejected) == 1
     assert rejected[0]["provenance"]["reject_reason"] == "length_invalid"
+
+
+def test_generate_prose_ringkas_seed_elicits_bullet_format():
+    # IMPORTANT-1: the bullet-format rule is elicited in the synthesis USER
+    # turn, never injected into the production system prompt.
+    synth = FixedSampler("- poin pertama tentang laporan\n- poin kedua tentang efisiensi")
+    generate_prose(synth, _family("ringkas"), 1, "RINGKAS SYSTEM PROMPT TEXT")
+    assert synth.calls[0][0] == {"role": "system", "content": "RINGKAS SYSTEM PROMPT TEXT"}
+    user_text = synth.calls[0][1]["content"]
+    assert "bullet Markdown yang diawali '- '" in user_text
+
+
+def test_generate_prose_cek_aman_seed_elicits_risk_label():
+    synth = FixedSampler("⚠️ Perlu dicek lebih lanjut, jangan bagikan data pribadi.")
+    generate_prose(synth, _family("cekAman"), 1, "CEKAMAN SYSTEM PROMPT TEXT")
+    assert synth.calls[0][0] == {"role": "system", "content": "CEKAMAN SYSTEM PROMPT TEXT"}
+    user_text = synth.calls[0][1]["content"]
+    assert "🛑, ⚠️, atau ✅" in user_text
+
+
+def test_generate_prose_other_pipelines_seed_has_no_format_suffix():
+    synth = FixedSampler("Jawaban biasa dalam Bahasa Indonesia yang cukup panjang.")
+    generate_prose(synth, _family("umum"), 1, "UMUM SYSTEM PROMPT TEXT")
+    user_text = synth.calls[0][1]["content"]
+    assert "Format:" not in user_text
+    assert "🛑" not in user_text
+
+
+def test_generate_prose_cjk_leakage_takes_priority_over_near_duplicate():
+    # MINOR-4: accept_prose filters (CJK/format/length) run before dedup, so
+    # a CJK-tainted near-duplicate is rejected for the more fundamental
+    # reason, not "near_duplicate".
+    synth = FixedSampler([
+        "- poin pertama tentang efisiensi biaya operasional perusahaan",
+        "- poin pertama tentang efisiensi biaya operasional perusahaan 摘要",
+    ])
+    accepted, rejected, review_queue = generate_prose(
+        synth, _family("ringkas"), 2, "RINGKAS SYSTEM PROMPT TEXT"
+    )
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert rejected[0]["provenance"]["reject_reason"] == "cjk_leakage"
 
 
 def test_generate_prose_rejects_near_duplicates_within_batch():
@@ -270,4 +368,4 @@ def _valid_completion_for(pipeline):
         return "- poin pertama yang cukup panjang\n- poin kedua yang cukup panjang juga"
     if pipeline == "cekAman":
         return "⚠️ Perlu dicek: pesan ini meminta kode OTP, jangan dibagikan ke siapa pun."
-    return "Ini adalah jawaban dalam Bahasa Indonesia yang cukup panjang untuk lolos filter."
+    return "Jawaban singkat dalam Bahasa Indonesia yang cukup panjang untuk lolos filter."

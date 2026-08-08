@@ -16,25 +16,41 @@ exactly ("prose:umum", "prose:ringkas", ...) -- also exactly the family
 "kind" prefix used by `tantular.finetune.families` (`prose:<pipeline>`), so
 a family's kind IS its prompt id; no separate mapping is needed.
 
-Hard-format compliance is pipeline-specific, mirrored from what each
-pipeline's production prompt actually asks for (not reimplemented parsing --
+Hard-format compliance is pipeline-specific (not reimplemented parsing --
 just a light regex/structural check, same spirit as gen_router.py's
-`is_ambiguous` heuristic):
-- "prose:ringkas" (tantular_office_addin/src/prompts.js ACTIONS.word_summarize):
-  "Format wajib: bullet Markdown yang diawali '- '" -- every non-empty line
-  must start with "- ".
-- "prose:cekAman" (tantular_office_addin/src/prompts.js safetySystem()): the
-  scam-check output is expected to lead with one of the three risk labels
-  (🛑 / ⚠️ / ✅) -- the one place among these 7 pipelines with something like
-  a closed, near-single-token vocabulary at the START of the response (the
-  brief's "single-word where required"; none of the other 6 pipelines are
-  free of natural-language prose, so no other pipeline gets a single-word
-  rule here).
+`is_ambiguous` heuristic). IMPORTANT: the "- " bullet rule and the leading
+risk-label rule below are NOT requested by the pipelines' REAL production
+SYSTEM prompts (the ones sourced from the registry via the bridge and used
+verbatim as `messages[0]` here) -- that stricter format language lives in a
+DIFFERENT consumer's `buildUser` (tantular_office_addin/src/prompts.js
+ACTIONS.word_summarize / the cekAman action), not in
+`tantular_office_addin/src/promptRegistry.js`'s prose:ringkas / prose:cekAman
+CONTENT. So the production system prompt is left untouched here, and instead
+the format requirement is elicited explicitly in this module's own synthesis
+USER turn (`_build_user_message` / `_FORMAT_SUFFIXES` below) -- ACTIONS'
+buildUser is the inspiration for the wording, but the synthesis user-turn
+appended here is what actually enforces it against the teacher's output:
+- "prose:ringkas": the synthesis user turn appends "Format: jawab hanya
+  dengan bullet Markdown yang diawali '- '." -- every non-empty line of the
+  teacher's completion must then start with "- ".
+- "prose:cekAman": the synthesis user turn appends "Awali jawaban dengan
+  tepat satu label: 🛑, ⚠️, atau ✅." -- the one place among these 7 pipelines
+  with something like a closed, near-single-token vocabulary at the START of
+  the response (the brief's "single-word where required"; none of the other
+  6 pipelines are free of natural-language prose, so no other pipeline gets
+  a single-word rule here).
 - The remaining 5 pipelines (umum, ubahNada, terjemah, draftTeks,
   tanyaDokumen) are free-form Indonesian prose; their production system
   prompts explicitly forbid an unrequested JSON/array wrapper ("Jangan
   gunakan JSON atau array kecuali ..."), so `format_ok` for them rejects
   output that begins with "{" or "[".
+- "prose:terjemah" and "prose:draftTeks" additionally have an unenforced
+  production constraint ("Balas hanya hasil terjemahan tanpa penjelasan" /
+  "Balas hanya draf teksnya"): `format_ok` rejects completions that wrap the
+  answer in commentary -- a first line starting with a meta-phrase
+  ("berikut", "terjemahan:", "ini adalah", "tentu", "baik,", case-insensitive)
+  or a trailing bracketed/parenthetical translator note such as
+  "(catatan: ...)". See `_has_commentary_wrapper`.
 
 Teacher access is always injected (constructor/function parameter) -- this
 module never calls Tinker at import time, and tests only ever pass a
@@ -104,6 +120,30 @@ def has_cjk(text):
 _BULLET_LINE = re.compile(r"^- .+")
 _RISK_LABELS = ("🛑", "⚠️", "✅")
 
+# Commentary/preamble rejection for terjemah / draftTeks (see module
+# docstring): both pipelines' production system prompts say "balas hanya
+# ..." (the translation / the draft only) but nothing here parses that, so
+# a teacher completion that wraps the actual answer in commentary would
+# otherwise sail through. Small, documented heuristic -- not a full parser:
+# a leading meta-phrase, or a trailing bracketed/parenthetical note.
+_COMMENTARY_PREFIXES = ("berikut", "terjemahan:", "ini adalah", "tentu", "baik,")
+_COMMENTARY_SUFFIX = re.compile(r"[\(\[]\s*catatan\s*:", re.IGNORECASE)
+_COMMENTARY_PIPELINES = ("terjemah", "draftTeks")
+
+
+def _has_commentary_wrapper(text):
+    """True if `text` looks like it wraps the actual answer in commentary:
+    a first line starting with a meta-phrase (case-insensitive) such as
+    "Berikut terjemahannya:" / "Tentu, ..." / "Baik, ...", or a trailing
+    bracketed/parenthetical translator note such as "(catatan: ...)"."""
+    stripped = str(text or "").strip()
+    if not stripped:
+        return False
+    first_line = stripped.splitlines()[0].strip().lower()
+    if first_line.startswith(_COMMENTARY_PREFIXES):
+        return True
+    return bool(_COMMENTARY_SUFFIX.search(stripped))
+
 
 def _pipeline_name(pipeline):
     """Accept either the full prompt id ("prose:ringkas") or the bare
@@ -131,7 +171,15 @@ def format_ok(pipeline, text):
 
     # umum, ubahNada, terjemah, draftTeks, tanyaDokumen: free-form Indonesian
     # prose; production prompts forbid an unrequested JSON/array wrapper.
-    return not stripped.startswith(("{", "["))
+    if stripped.startswith(("{", "[")):
+        return False
+
+    # terjemah / draftTeks additionally forbid commentary/preamble wrapping
+    # the answer (see _has_commentary_wrapper).
+    if name in _COMMENTARY_PIPELINES and _has_commentary_wrapper(text):
+        return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -257,11 +305,27 @@ def _pick_seed(name, family_id, i):
     return bank[idx]
 
 
+# Format elicitation appended to the synthesis USER turn (never to the
+# production system prompt -- see module docstring / IMPORTANT-1). Wording
+# is inspired by tantular_office_addin/src/prompts.js ACTIONS' buildUser
+# rules for these two actions, but this string -- not the production system
+# prompt -- is what the teacher actually sees requesting the format, and
+# `format_ok` above is what actually enforces it on the completion.
+_FORMAT_SUFFIXES = {
+    "ringkas": "Format: jawab hanya dengan bullet Markdown yang diawali '- '.",
+    "cekAman": "Awali jawaban dengan tepat satu label: 🛑, ⚠️, atau ✅.",
+}
+
+
 def _build_user_message(name, seed):
     context_text, instruction = seed
-    if context_text is None:
-        return instruction
-    return f'Teks:\n"""{context_text}"""\n\n{instruction}'
+    user_text = instruction if context_text is None else (
+        f'Teks:\n"""{context_text}"""\n\n{instruction}'
+    )
+    suffix = _FORMAT_SUFFIXES.get(name)
+    if suffix:
+        user_text = f"{user_text}\n\n{suffix}"
+    return user_text
 
 
 # ---------------------------------------------------------------------------
@@ -386,22 +450,31 @@ def generate_prose(
         raw = sampler.sample(messages)
         candidates.append((messages, user_text, raw))
 
-    dup_indices = near_duplicates([raw for _, _, raw in candidates], threshold=dedup_threshold)
-
     accepted, rejected, review_queue = [], [], []
-    accepted_count = 0
 
-    for i, (messages, user_text, raw) in enumerate(candidates):
-        if i in dup_indices:
-            rejected.append(_example(
-                messages, {"user_text": user_text, "output": raw}, "rejected", "near_duplicate",
-            ))
-            continue
-
+    # accept_prose (CJK/format/length) runs FIRST, per-candidate, so a
+    # candidate that is both e.g. CJK-tainted AND a near-duplicate of
+    # another candidate is rejected for the more fundamental reason
+    # ("cjk_leakage") rather than "near_duplicate". Dedup then only compares
+    # among the survivors of that gate -- a rejected candidate's text never
+    # taints a surviving candidate's near-duplicate check.
+    survivors = []
+    for messages, user_text, raw in candidates:
         ok, reason = accept_prose(pipeline, raw)
         if not ok:
             rejected.append(_example(
                 messages, {"user_text": user_text, "output": raw}, "rejected", reason,
+            ))
+            continue
+        survivors.append((messages, user_text, raw))
+
+    dup_indices = near_duplicates([raw for _, _, raw in survivors], threshold=dedup_threshold)
+
+    accepted_count = 0
+    for i, (messages, user_text, raw) in enumerate(survivors):
+        if i in dup_indices:
+            rejected.append(_example(
+                messages, {"user_text": user_text, "output": raw}, "rejected", "near_duplicate",
             ))
             continue
 
