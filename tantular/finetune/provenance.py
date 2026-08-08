@@ -53,5 +53,4 @@ def make_example(
             "status": status,
             "reject_reason": reject_reason,
         },
-        "status": status,
     }

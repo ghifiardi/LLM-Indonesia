@@ -10,4 +10,5 @@ def test_schema_shape():
                       status="accepted", reject_reason=None)
     assert ex["provenance"]["generation"]["bridge_js_commit"] == "abc"
     assert ex["provenance"]["training"]["renderer"] == "qwen3_disable_thinking"
-    assert ex["status"] == "accepted"
+    # Status is single source of truth in provenance (top-level was a brief bug).
+    assert ex["provenance"]["status"] == "accepted"
