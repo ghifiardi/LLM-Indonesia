@@ -1,0 +1,11 @@
+{
+  "name": "tantular-workshop-companion",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/dev-server.mjs",
+    "cert:office": "npx office-addin-dev-certs install",
+    "model:office": "./tools/install-office-model.sh"
+  }
+}

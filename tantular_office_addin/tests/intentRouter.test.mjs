@@ -1,6 +1,18 @@
 import test from "node:test";
+import { prefersSelectionContext } from "../src/chat/intentRouter.js";
+
+test("selection-referencing questions prefer the selection context", () => {
+  assert.equal(prefersSelectionContext("apakah paragraph yang saya pilih bisa ditampilkan dalam bentuk tabel?"), true);
+  assert.equal(prefersSelectionContext("ubah teks terpilih jadi bullet"), true);
+  assert.equal(prefersSelectionContext("jelaskan dokumen ini"), false);
+});
 import assert from "node:assert/strict";
-import { INTENTS, parseIntent, defaultContextFor } from "../src/chat/intentRouter.js";
+import {
+  INTENTS,
+  parseIntent,
+  defaultContextFor,
+  routeIntentHeuristic
+} from "../src/chat/intentRouter.js";
 
 test("parses exact and messy router output", () => {
   assert.equal(parseIntent("EDIT_TEKS"), "EDIT_TEKS");
@@ -33,4 +45,40 @@ test("default context table", () => {
 test("INTENTS is the frozen taxonomy", () => {
   assert.ok(Object.isFrozen(INTENTS));
   assert.equal(INTENTS.length, 8);
+});
+
+test("routes a conversational subsection elaboration as document QA", () => {
+  assert.equal(
+    routeIntentHeuristic("Apakah bisa dielaborasi lebih lanjut di sub-section 'Closed Model vs. Open-Weight'?"),
+    "TANYA_DOKUMEN"
+  );
+});
+
+test("routes a question about a document section as document QA", () => {
+  assert.equal(
+    routeIntentHeuristic("Jelaskan apa perbedaan pada bagian Closed Model vs Open-Weight"),
+    "TANYA_DOKUMEN"
+  );
+});
+
+test("routes explicit insertion into the document as an edit", () => {
+  assert.equal(
+    routeIntentHeuristic("Tambahkan elaborasi tentang closed model ke bagian tersebut di dokumen."),
+    "EDIT_TEKS"
+  );
+});
+
+test("format-transform requests route to TANYA_DOKUMEN deterministically", async () => {
+  const { routeIntentHeuristic } = await import("../src/chat/intentRouter.js");
+  assert.equal(
+    routeIntentHeuristic("Can you create the highlighted paragraph and transform it into a structured table"),
+    "TANYA_DOKUMEN"
+  );
+  assert.equal(routeIntentHeuristic("ubah teks yang saya pilih menjadi tabel"), "TANYA_DOKUMEN");
+  assert.equal(routeIntentHeuristic("apa kabar"), null);
+});
+
+test("English selection references prefer the selection context", () => {
+  assert.equal(prefersSelectionContext("transform the highlighted paragraph into a table"), true);
+  assert.equal(prefersSelectionContext("ringkas bagian yang disorot"), true);
 });

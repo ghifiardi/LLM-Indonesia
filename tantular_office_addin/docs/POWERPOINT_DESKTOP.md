@@ -61,9 +61,20 @@ Tantular settings:
 
 ```text
 Endpoint: http://127.0.0.1:11434/v1/chat/completions
-Model: tantular:0.2-id-3b-lora
+Model umum / chat: qwen3:8b
+Model deck: tantular-office:0.3-8b
 Model vision: llama3.2-vision
 ```
+
+Create the deck model profile once before opening PowerPoint:
+
+```bash
+npm run model:office
+```
+
+The older `tantular:0.2-id-3b-lora` remains useful for short support/safety
+responses, but it should not be selected as **Model deck** because its training
+and 220-token generation profile are not suitable for long deck plans.
 
 ## 4. Recommended Desktop behavior
 
@@ -85,4 +96,3 @@ rm "$HOME/Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef/manifes
 ```
 
 Then copy the current `manifest.xml` again and restart PowerPoint.
-

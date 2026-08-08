@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dukungan Workshop Tantular</title>
+  <style>body{font:16px/1.65 system-ui,sans-serif;color:#1f2933;margin:0}main{max-width:780px;margin:auto;padding:48px 24px}h1,h2{color:#8d2b19}code{background:#f5eee5;padding:2px 5px}</style>
+</head>
+<body>
+<main>
+  <h1>Dukungan Workshop Tantular</h1>
+  <p>Rilis ini ditujukan untuk workshop Microsoft 365 terfasilitasi di Mac dan Windows.</p>
+  <h2>Spesifikasi laptop &amp; ekspektasi</h2>
+  <ul>
+    <li><strong>RAM 16 GB ke atas:</strong> pengalaman penuh dengan model 8B.</li>
+    <li><strong>RAM 8 GB:</strong> otomatis memakai model ringan (lite, 4B) — tetap berfungsi, kualitas deck sedikit di bawah 8B.</li>
+    <li>Installer mendeteksi RAM secara otomatis dan memilih model yang tepat; tidak perlu diatur manual.</li>
+    <li>Model Tantular dipublikasikan di <a href="https://ollama.com/ghifidanukusumo/Tantular">ollama.com/ghifidanukusumo/Tantular</a> dan diunduh otomatis oleh installer (±5 GB untuk 8B, ±2,5 GB untuk lite) — sebaiknya jalankan installer dari rumah sebelum hari workshop.</li>
+  </ul>
+  <h2>Komponen lokal yang dibutuhkan</h2>
+  <ul>
+    <li>Microsoft 365 Word, Excel, atau PowerPoint (Mac atau Windows).</li>
+    <li>Node.js 18 atau lebih baru — <a href="https://nodejs.org">unduh di nodejs.org</a>.</li>
+    <li>Ollama — <a href="https://ollama.com/download">unduh di ollama.com</a> — beserta model Tantular untuk workshop.</li>
+    <li>Sertifikat HTTPS lokal tepercaya yang dipasang oleh installer workshop.</li>
+    <li>Tantular Companion berjalan di <code>https://localhost:3000</code>.</li>
+  </ul>
+  <h2>Langkah demi langkah (ringkas)</h2>
+  <ol>
+    <li>Jalankan <strong>satu perintah instalasi</strong> sesuai sistem operasi (bagian berikutnya). Node.js, Ollama, sertifikat, dan model Tantular (dari ollama.com, sesuai RAM) dipasang otomatis.</li>
+    <li>Jalankan <strong>start-tantular-companion</strong> (.command di Mac / .bat di Windows) dan biarkan jendela terminalnya tetap terbuka.</li>
+    <li>Tutup Office sepenuhnya (<code>Cmd+Q</code> di Mac), buka kembali, lalu pilih <strong>Home → Tantular → Open Tantular</strong>.</li>
+    <li>Di pengaturan Tantular klik <strong>Refresh</strong> lalu <strong>Tes model terpilih</strong> — harus membalas dalam hitungan detik (panggilan pertama bisa lebih lama karena model baru dimuat).</li>
+    <li>Klik <strong>Buat Deck</strong> / fitur Studio lainnya <strong>sekali</strong>, lalu tunggu spinner selesai. Klik berulang tidak mempercepat — justru menambah antrean dan memperlambat.</li>
+  </ol>
+  <h2>Instalasi satu perintah (paling mudah)</h2>
+  <p>Salin satu baris sesuai sistem operasi, tempel, lalu Enter. Semua kebutuhan (termasuk Node.js dan Ollama bila belum ada) dipasang otomatis.</p>
+  <p><strong>Mac</strong> — buka aplikasi <em>Terminal</em>, lalu jalankan:</p>
+  <pre><code>curl -fsSL https://workshop-web-gamma.vercel.app/downloads/setup.sh | bash</code></pre>
+  <p><strong>Windows</strong> — buka <em>PowerShell</em>, lalu jalankan:</p>
+  <pre><code>irm https://workshop-web-gamma.vercel.app/downloads/setup.ps1 | iex</code></pre>
+  <h2>Unduhan manual (alternatif)</h2>
+  <ul>
+    <li><a href="/downloads/tantular-workshop-manifest.xml">Manifest workshop Microsoft 365</a></li>
+    <li><a href="/downloads/tantular-workshop.zip">Paket instalasi Tantular Companion (Mac &amp; Windows)</a></li>
+  </ul>
+  <h2>Instalasi per platform</h2>
+  <ul>
+    <li><strong>Mac:</strong> jalankan <code>install-tantular-workshop.command</code>, lalu <code>start-tantular-companion.command</code>. Jika diblokir macOS, klik kanan → Open.</li>
+    <li><strong>Windows:</strong> jalankan <code>install-tantular-workshop.bat</code>, lalu <code>start-tantular-companion.bat</code>. Jika Node.js/Ollama belum terpasang, installer menawarkan pemasangan otomatis lewat winget (setelahnya, jalankan installer sekali lagi). Jika pendaftaran manifest otomatis gagal, gunakan Word di web (office.com): <em>Insert → Add-ins → Upload My Add-in</em> dan pilih file manifest.</li>
+  </ul>
+  <h2>Membuka Tantular</h2>
+  <p>Setelah manifest terpasang dan Office ditutup penuh (<code>Cmd+Q</code> di Mac, tutup semua jendela di Windows) lalu dibuka kembali, buka sebuah file Office dan pilih <strong>Home → Tantular → Open Tantular</strong>.</p>
+  <h2>Pemeriksaan umum</h2>
+  <ol>
+    <li>Pastikan Ollama sedang berjalan.</li>
+    <li>Pastikan jendela terminal Tantular Companion tetap terbuka.</li>
+    <li>Buka <code>https://localhost:3000/src/taskpane.html</code> satu kali dan setujui/percayai sertifikatnya bila diminta.</li>
+    <li>Di pengaturan Tantular, klik <strong>Refresh</strong> lalu <strong>Tes model terpilih</strong>.</li>
+    <li>Jika Buat Deck selalu gagal dengan pesan <em>"Permintaan model lokal terlalu lama"</em>: RAM komputer kemungkinan tidak cukup untuk model 8B. Jalankan <code>ollama pull ghifidanukusumo/tantular:lite</code>, lalu di Pengaturan model lokal isi kolom <strong>Model Studio</strong> dengan <code>ghifidanukusumo/tantular:lite</code> dan klik Simpan. Jangan klik Buat Deck berulang kali saat menunggu — antrean permintaan membuat model makin lambat.</li>
+  </ol>
+  <p>Untuk bantuan khusus workshop, hubungi fasilitator yang membagikan paket ini.</p>
+</main>
+</body>
+</html>

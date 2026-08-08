@@ -1,0 +1,365 @@
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const args = process.argv.slice(2);
+const baseUrl = valueFor("--base-url").replace(/\/+$/, "");
+const out = path.join(root, "dist", "workshop-package");
+const webDownloads = path.join(root, "dist", "workshop-web", "downloads");
+
+fs.rmSync(out, { recursive: true, force: true });
+fs.mkdirSync(path.join(out, "tools"), { recursive: true });
+fs.mkdirSync(path.join(out, "models"), { recursive: true });
+
+execFileSync(process.execPath, [
+  path.join(root, "tools", "build-production-manifest.mjs"),
+  "--base-url", baseUrl,
+  "--out", path.join(out, "tantular-workshop-manifest.xml")
+], { stdio: "inherit" });
+
+copy("tools/dev-server.mjs");
+copy("tools/install-office-model.sh");
+copy("models/Modelfile.office-8b");
+
+fs.writeFileSync(path.join(out, "package.json"), JSON.stringify({
+  name: "tantular-workshop-companion",
+  version: "1.0.0",
+  private: true,
+  type: "module",
+  scripts: {
+    dev: "node tools/dev-server.mjs",
+    "cert:office": "npx office-addin-dev-certs install",
+    "model:office": "./tools/install-office-model.sh"
+  }
+}, null, 2));
+
+fs.writeFileSync(path.join(out, "install-tantular-workshop.command"), installerScript());
+fs.writeFileSync(path.join(out, "start-tantular-companion.command"), launcherScript());
+fs.writeFileSync(path.join(out, "install-tantular-workshop.bat"), windowsInstallerScript());
+fs.writeFileSync(path.join(out, "start-tantular-companion.bat"), windowsLauncherScript());
+fs.writeFileSync(path.join(out, "tools", "install-office-model.ps1"), windowsModelScript());
+fs.writeFileSync(path.join(out, "README-WORKSHOP.txt"), readmeText());
+fs.chmodSync(path.join(out, "install-tantular-workshop.command"), 0o755);
+fs.chmodSync(path.join(out, "start-tantular-companion.command"), 0o755);
+fs.chmodSync(path.join(out, "tools", "install-office-model.sh"), 0o755);
+
+fs.mkdirSync(webDownloads, { recursive: true });
+fs.copyFileSync(
+  path.join(out, "tantular-workshop-manifest.xml"),
+  path.join(webDownloads, "tantular-workshop-manifest.xml")
+);
+
+const zipPath = path.join(webDownloads, "tantular-workshop.zip");
+try { fs.rmSync(zipPath); } catch {}
+execFileSync("zip", ["-qr", zipPath, "."], { cwd: out });
+// Legacy filename: earlier support pages linked the Mac-named zip.
+fs.copyFileSync(zipPath, path.join(webDownloads, "tantular-workshop-mac.zip"));
+
+// One-command bootstrap: participants paste a single line in Terminal /
+// PowerShell; it downloads the package, extracts it, and runs the installer
+// (which in turn auto-installs Node.js and Ollama when missing).
+fs.writeFileSync(path.join(webDownloads, "setup.sh"), `#!/bin/bash
+set -euo pipefail
+DEST="$HOME/TantularWorkshop"
+echo "Mengunduh paket workshop Tantular ke $DEST ..."
+mkdir -p "$DEST"
+curl -fsSL "${baseUrl}/downloads/tantular-workshop.zip" -o "$DEST/tantular-workshop.zip"
+cd "$DEST"
+unzip -oq tantular-workshop.zip
+# Reattach the terminal: under "curl | bash" stdin is the pipe, and the
+# installer has interactive prompts (sudo, pertanyaan tenant, Enter penutup).
+bash install-tantular-workshop.command < /dev/tty
+`);
+fs.writeFileSync(path.join(webDownloads, "setup.ps1"), `$ErrorActionPreference = "Stop"
+$Dest = Join-Path $env:USERPROFILE "TantularWorkshop"
+Write-Host "Mengunduh paket workshop Tantular ke $Dest ..."
+New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+Invoke-WebRequest -Uri "${baseUrl}/downloads/tantular-workshop.zip" -OutFile (Join-Path $Dest "tantular-workshop.zip")
+Expand-Archive -Force (Join-Path $Dest "tantular-workshop.zip") $Dest
+Set-Location $Dest
+cmd /c install-tantular-workshop.bat
+`);
+
+console.log(`Workshop package: ${out}`);
+console.log(`Download ZIP: ${zipPath}`);
+
+function copy(relative) {
+  const target = path.join(out, relative);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(path.join(root, relative), target);
+}
+
+function installerScript() {
+  return `#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+echo "Instalasi Workshop Tantular Office"
+echo "=================================="
+
+find_ollama() {
+  command -v ollama >/dev/null 2>&1 && return 0
+  for candidate in /usr/local/bin/ollama /opt/homebrew/bin/ollama "/Applications/Ollama.app/Contents/Resources/ollama"; do
+    [ -x "$candidate" ] && return 0
+  done
+  return 1
+}
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "Node.js belum terpasang."
+  if command -v brew >/dev/null 2>&1; then
+    echo "Memasang Node.js lewat Homebrew..."
+    brew install node
+  else
+    echo "Mengunduh installer resmi Node.js (butuh password admin Mac ini)..."
+    curl -fsSL "https://nodejs.org/dist/v22.17.0/node-v22.17.0.pkg" -o /tmp/node-lts.pkg
+    sudo installer -pkg /tmp/node-lts.pkg -target /
+    export PATH="/usr/local/bin:$PATH"
+  fi
+fi
+command -v node >/dev/null 2>&1 || { echo "Node.js masih belum terdeteksi. Pasang manual dari https://nodejs.org lalu jalankan installer ini lagi."; exit 1; }
+
+if ! find_ollama; then
+  echo "Ollama belum terpasang. Mengunduh aplikasi Ollama..."
+  curl -fsSL "https://ollama.com/download/Ollama-darwin.zip" -o /tmp/Ollama.zip
+  ditto -xk /tmp/Ollama.zip /Applications
+  open -a Ollama || true
+  echo "Aplikasi Ollama dibuka. Jika muncul dialog, izinkan pemasangan command line tool."
+  sleep 5
+fi
+find_ollama || { echo "Ollama masih belum terdeteksi. Pasang manual dari https://ollama.com/download lalu jalankan installer ini lagi."; exit 1; }
+
+echo "Memasang sertifikat localhost tepercaya untuk Office..."
+npm run cert:office
+
+echo "Menyiapkan model Tantular Office (unduhan bisa beberapa GB)..."
+npm run model:office
+
+MANIFEST="$PWD/tantular-workshop-manifest.xml"
+read -r -p "Apakah admin Microsoft 365 Anda sudah memasang Tantular ke akun Anda? [y/N] " TENANT_DEPLOYED
+if [[ "$TENANT_DEPLOYED" =~ ^[Yy]$ ]]; then
+  echo "Melewati penyalinan manifest lokal; tombol Tantular akan muncul lewat deployment tenant."
+else
+  for app in Word Excel Powerpoint; do
+    DIR="$HOME/Library/Containers/com.microsoft.$app/Data/Documents/wef"
+    mkdir -p "$DIR"
+    cp "$MANIFEST" "$DIR/tantular-workshop-manifest.xml"
+  done
+  echo "Manifest workshop lokal terpasang untuk Word, Excel, dan PowerPoint."
+fi
+
+echo
+echo "Instalasi selesai."
+echo "1. Tutup penuh Word, Excel, dan PowerPoint dengan Cmd+Q."
+echo "2. Jalankan start-tantular-companion.command dan biarkan terminalnya tetap terbuka."
+echo "3. Buka kembali Office → Home → Tantular → Open Tantular."
+read -r -p "Tekan Enter untuk menutup..."
+`;
+}
+
+function launcherScript() {
+  return `#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+echo "Menjalankan Tantular Companion di https://localhost:3000"
+echo "Biarkan jendela ini tetap terbuka selama workshop."
+TANTULAR_ALLOWED_ORIGINS="${baseUrl}" npm run dev
+`;
+}
+
+function windowsInstallerScript() {
+  return `@echo off
+setlocal
+cd /d "%~dp0"
+
+echo Instalasi Workshop Tantular Office (Windows)
+echo ============================================
+
+call :ensure_tool node "Node.js LTS" OpenJS.NodeJS.LTS https://nodejs.org || exit /b 1
+call :ensure_tool ollama "Ollama" Ollama.Ollama https://ollama.com/download || exit /b 1
+where npm >nul 2>nul || (echo npm belum tersedia. Tutup jendela ini dan jalankan installer lagi. & pause & exit /b 1)
+
+echo Memasang sertifikat localhost tepercaya untuk Office...
+call npm run cert:office
+
+echo Menyiapkan model Tantular Office (unduhan bisa beberapa GB)...
+powershell -ExecutionPolicy Bypass -File tools\\install-office-model.ps1
+if errorlevel 1 (echo Penyiapan model gagal. Periksa Ollama lalu jalankan lagi. & pause & exit /b 1)
+
+echo Mendaftarkan manifest workshop ke Office...
+call npx --yes office-addin-dev-settings sideload "%cd%\\tantular-workshop-manifest.xml" desktop
+if errorlevel 1 (
+  echo.
+  echo Sideload otomatis gagal. Alternatif manual:
+  echo   Buka Word di web ^(office.com^), Insert - Add-ins - Upload My Add-in,
+  echo   lalu pilih file tantular-workshop-manifest.xml di folder ini.
+)
+
+echo.
+echo Instalasi selesai.
+echo 1. Tutup penuh Word, Excel, dan PowerPoint.
+echo 2. Jalankan start-tantular-companion.bat dan biarkan jendelanya tetap terbuka.
+echo 3. Buka kembali Office - Home - Tantular - Open Tantular.
+pause
+goto :eof
+
+:ensure_tool
+where %1 >nul 2>nul && exit /b 0
+echo.
+echo %~2 belum terpasang.
+where winget >nul 2>nul
+if errorlevel 1 (
+  echo Unduh dari %4 , pasang, lalu jalankan installer ini lagi.
+  pause
+  exit /b 1
+)
+set /p JAWAB=Pasang %~2 otomatis lewat winget? [Y/n]
+if /i "%JAWAB%"=="n" (
+  echo Unduh dari %4 , pasang, lalu jalankan installer ini lagi.
+  pause
+  exit /b 1
+)
+winget install --id %3 -e --accept-package-agreements --accept-source-agreements
+echo.
+echo %~2 selesai dipasang. TUTUP jendela ini, lalu jalankan
+echo install-tantular-workshop.bat SEKALI LAGI agar PATH baru terbaca.
+pause
+exit /b 1
+`;
+}
+
+function windowsLauncherScript() {
+  return `@echo off
+cd /d "%~dp0"
+echo Menjalankan Tantular Companion di https://localhost:3000
+echo Biarkan jendela ini tetap terbuka selama workshop.
+set TANTULAR_ALLOWED_ORIGINS=${baseUrl}
+call npm run dev
+pause
+`;
+}
+
+function windowsModelScript() {
+  // NOTE: no $ErrorActionPreference = "Stop" — under Stop, PowerShell turns a
+  // native command's redirected stderr (e.g. ollama's "model not found" probe)
+  // into a fatal NativeCommandError. Flow control uses $LASTEXITCODE instead.
+  return `$ErrorActionPreference = "Continue"
+$Root = Split-Path -Parent $PSScriptRoot
+# The model is published on ollama.com, so the default path is a straight
+# 'ollama pull' — no local Modelfile build, fewer failure modes on
+# participant machines. The local build remains as an offline fallback.
+$RegistryModel = if ($env:TANTULAR_OFFICE_REGISTRY_MODEL) { $env:TANTULAR_OFFICE_REGISTRY_MODEL } else { "ghifidanukusumo/tantular" }
+$BaseModel = if ($env:TANTULAR_OFFICE_BASE_MODEL) { $env:TANTULAR_OFFICE_BASE_MODEL } else { "qwen3:8b" }
+$ModelName = if ($env:TANTULAR_OFFICE_MODEL_NAME) { $env:TANTULAR_OFFICE_MODEL_NAME } else { "tantular-office:0.3-8b" }
+$RegistryTag = "latest"
+
+# Machines without enough RAM for an 8B model (~5GB weights) swap to disk and
+# time out on every Studio call. Use the lighter 4B variant there instead.
+$LiteMode = $false
+$RamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+if (-not $env:TANTULAR_OFFICE_BASE_MODEL -and $RamGB -gt 0 -and $RamGB -lt 12) {
+  $LiteMode = $true
+  $BaseModel = "qwen3:4b"
+  $ModelName = "tantular-office:lite"
+  $RegistryTag = "lite"
+  Write-Host "RAM terdeteksi $RamGB GB (<12GB): memakai model ringan $ModelName."
+}
+
+if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+  Write-Host "Ollama tidak ditemukan. Instal Ollama terlebih dahulu."
+  exit 1
+}
+
+# Preferred path: pull the published model, then alias it to the local name
+# the add-in expects in the Model Studio field.
+Write-Host "Mengunduh $RegistryModel\`:$RegistryTag dari ollama.com (bisa beberapa GB)..."
+ollama pull "$RegistryModel\`:$RegistryTag"
+if ($LASTEXITCODE -eq 0) {
+  ollama cp "$RegistryModel\`:$RegistryTag" $ModelName
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "Gagal membuat alias $ModelName."
+    exit 1
+  }
+} else {
+  # Offline / registry-blocked fallback: build locally from the Modelfile.
+  Write-Host "Pull dari ollama.com gagal; mencoba build lokal dari Modelfile..."
+  # Probe via cmd so a missing model can never throw, only set the exit code.
+  cmd /c "ollama show $BaseModel >nul 2>nul"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "Base model $BaseModel belum ada. Mengunduh (bisa beberapa GB)..."
+    ollama pull $BaseModel
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "Gagal mengunduh $BaseModel. Periksa koneksi internet dan pastikan aplikasi Ollama berjalan."
+      exit 1
+    }
+  }
+  Write-Host "Membuat $ModelName dari $BaseModel..."
+  $ModelfilePath = Join-Path $Root "models/Modelfile.office-8b"
+  $TmpModelfile = Join-Path $env:TEMP "Modelfile.tantular-office"
+  (Get-Content $ModelfilePath) -replace '^FROM .*', "FROM $BaseModel" | Set-Content $TmpModelfile
+  ollama create $ModelName -f $TmpModelfile
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "Gagal membuat $ModelName."
+    exit 1
+  }
+}
+if ($LiteMode) {
+  Write-Host "Selesai. PENTING: di Pengaturan model lokal, isi kolom 'Model Studio' dengan: $ModelName"
+} else {
+  Write-Host "Selesai. Gunakan Model deck: $ModelName"
+}
+exit 0
+`;
+}
+
+function readmeText() {
+  return `WORKSHOP TANTULAR OFFICE (MAC & WINDOWS)
+
+CARA PALING MUDAH — satu perintah (unduh + pasang semuanya otomatis):
+- Mac (Terminal):      curl -fsSL ${baseUrl}/downloads/setup.sh | bash
+- Windows (PowerShell): irm ${baseUrl}/downloads/setup.ps1 | iex
+
+Prasyarat Node.js 18+ dan Ollama dipasang OTOMATIS oleh installer bila belum ada
+(Mac: Homebrew/installer resmi; Windows: winget). Unduhan manual bila perlu:
+- Node.js: https://nodejs.org
+- Ollama: https://ollama.com/download
+
+=== MAC ===
+1. Klik dua kali install-tantular-workshop.command.
+   Jika diblokir macOS, klik kanan → Open.
+2. Installer menyiapkan model lokal dan menyalin manifest Microsoft 365.
+3. Tutup Word, Excel, dan PowerPoint dengan Cmd+Q.
+4. Klik dua kali start-tantular-companion.command dan biarkan terminalnya terbuka.
+5. Buka kembali Office lalu pilih Home → Tantular → Open Tantular.
+
+=== WINDOWS ===
+1. Klik dua kali install-tantular-workshop.bat.
+   Jika SmartScreen muncul, pilih More info → Run anyway.
+   Jika Node.js/Ollama belum ada, installer menawarkan pemasangan otomatis
+   lewat winget — setelah itu tutup jendela dan jalankan installer sekali lagi.
+2. Installer menyiapkan model lokal dan mendaftarkan manifest ke Office.
+   Jika pendaftaran otomatis gagal, gunakan Word di web (office.com):
+   Insert → Add-ins → Upload My Add-in → pilih tantular-workshop-manifest.xml.
+3. Tutup penuh Word, Excel, dan PowerPoint.
+4. Klik dua kali start-tantular-companion.bat dan biarkan jendelanya terbuka.
+5. Buka kembali Office lalu pilih Home → Tantular → Open Tantular.
+
+Task pane yang dihosting:
+${baseUrl}
+
+Privasi:
+${baseUrl}/privacy.html
+
+Dukungan:
+${baseUrl}/support.html
+`;
+}
+
+function valueFor(flag) {
+  const index = args.indexOf(flag);
+  const value = index >= 0 ? args[index + 1] : "";
+  if (!value) throw new Error(`Missing ${flag}`);
+  return value;
+}

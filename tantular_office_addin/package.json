@@ -10,11 +10,16 @@
     "dev": "node tools/dev-server.mjs",
     "check:manifest": "python3 tools/check_manifest.py manifest.xml",
     "check": "npm run check:manifest",
+    "model:office": "./tools/install-office-model.sh",
     "cert:office": "npx office-addin-dev-certs install",
     "cert:office:verify": "npx office-addin-dev-certs verify",
     "cert:office:uninstall": "npx office-addin-dev-certs uninstall",
     "doc-server": "./.venv-doc/bin/python tools/document-extractor.py",
-    "doc-setup": "python3 -m venv .venv-doc && ./.venv-doc/bin/python -m pip install pypdf"
+    "doc-setup": "python3 -m venv .venv-doc && ./.venv-doc/bin/python -m pip install pypdf",
+    "sideload:word": "./tools/sideload-mac-word.sh",
+    "sideload:excel": "./tools/sideload-mac-excel.sh",
+    "sideload:powerpoint": "./tools/sideload-mac-powerpoint.sh",
+    "release:workshop-web": "node tools/build-workshop-web.mjs"
   },
   "keywords": [
     "office-js",

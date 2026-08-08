@@ -4,6 +4,30 @@ Deck Studio turns a raw brief, pasted text, or selected slide text into a
 multi-slide, professionally designed PowerPoint deck — generated directly via
 the PowerPoint JavaScript API, fully local.
 
+## Recommended model
+
+Do not use `tantular:0.2-id-3b-lora` for long deck planning. Its fine-tuning is
+for short customer-service/safety answers and its runtime profile caps output at
+220 tokens. Create the Office/deck profile once:
+
+```bash
+npm run model:office
+```
+
+Then use:
+
+```text
+Model umum / chat: qwen3:8b (or another local model)
+Model deck: tantular-office:0.3-8b
+```
+
+The deck model is routed separately, so a small support model can still be used
+for narrow tasks without limiting a 20-slide plan.
+
+Instruction-style prompts such as “Buatlah presentasi dua puluh slide...” are
+recognized as briefs rather than mistaken for a one-line title. Explicit slide
+counts in Indonesian or numeric form are also honored automatically.
+
 ## Flow
 
 ```text

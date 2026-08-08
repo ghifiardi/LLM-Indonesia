@@ -1,5 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { normalizeModelList } from "../src/tantularClient.js";
+
+test("normalizes Ollama model list with Tantular models first", () => {
+  assert.deepEqual(
+    normalizeModelList({
+      models: [
+        { name: "qwen3:8b" },
+        { name: "tantular-office:0.3-8b" },
+        { model: "tantular:0.2-id-3b-lora" },
+        { name: "qwen3:8b" }
+      ]
+    }),
+    ["tantular-office:0.3-8b", "tantular:0.2-id-3b-lora", "qwen3:8b"]
+  );
+});
 
 test("runTantular (non-streaming callChat) sends reasoning_effort: none", async () => {
   globalThis.localStorage = { getItem: () => null, setItem: () => {} };
@@ -20,6 +35,33 @@ test("runTantular (non-streaming callChat) sends reasoning_effort: none", async 
     const out = await runTantular({ system: "s", user: "u", maxTokens: 8 });
     assert.equal(out, "UMUM");
     assert.equal(capturedBody.reasoning_effort, "none");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("runTantular deck JSON mode sends response_format", async () => {
+  globalThis.localStorage = {
+    getItem: () => JSON.stringify({ deckModel: "qwen3:8b" }),
+    setItem: () => {}
+  };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let capturedBody = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "{\"ok\":true}" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const out = await runTantular({ system: "s", user: "u", task: "deck", jsonMode: true });
+    assert.equal(out, "{\"ok\":true}");
+    assert.deepEqual(capturedBody.response_format, { type: "json_object" });
   } finally {
     globalThis.fetch = originalFetch;
   }
