@@ -18,16 +18,30 @@ duplicate target, excessive deletion, protected name/number drift,
 instruction-category mismatch) plus the corruption/generation harness.
 
 Not every edit subtype has a synthesizable known target: "koreksi" (spelling
-fix), "ubah_istilah" (number/name-preserving terminology substitution -- here
-used as a number-or-name corruption), and "restrukturisasi" (word-order fix)
-all admit a controlled corruption with a known clean target to reconstruct.
-"perjelas" (clarity rewrite), "elaborasi" (elaboration/expansion), and
-"ringkas_bagian" (condensation) do not -- there is no single deterministic
-"clean" version of a clarity rewrite. For those, `generate_edit` falls back
-to the validator (structural/semantic guards via the bridge) plus an
-injectable judge, and ALWAYS samples the result into a human-review queue --
-never auto-accepted, per the spec's "known target OR validator+judge with
-human sampling" split.
+fix), "ubah_istilah" (terminology substitution -- see below), and
+"restrukturisasi" (word-order fix) all admit a controlled corruption with a
+known clean target to reconstruct. "perjelas" (clarity rewrite), "elaborasi"
+(elaboration/expansion), and "ringkas_bagian" (condensation) do not -- there
+is no single deterministic "clean" version of a clarity rewrite. For those,
+`generate_edit` falls back to the validator (structural/semantic guards via
+the bridge) plus an injectable judge, and ALWAYS samples the result into a
+human-review queue -- never auto-accepted, per the spec's "known target OR
+validator+judge with human sampling" split.
+
+`ubah_istilah` per families.py is "terminology/name/number-preserving
+substitution" -- swapping a term while PRESERVING names/numbers, not a
+number/name correction. An earlier revision of this module repurposed it as
+a "number_or_name" corruption category (teaching protected-token
+restoration), which both mismatched the documented taxonomy and duplicated
+what the `name_number_altered` guard already exists to police. That category
+has been removed outright: no documented edit subtype legitimately trains
+"restore a wrong number/name", and the guard's whole job is to reject edits
+that touch protected tokens without an explicit license. `ubah_istilah` now
+corrupts via `_corrupt_terminology`: the clean target uses a canonical term
+(term A, e.g. "pelanggan"), the corrupted document swaps in a documented
+synonym (term B, e.g. "konsumen") from `_TERM_PAIRS`, and the instruction
+asks for the licensed substitution B -> A. Names and numbers are never
+touched by this corruption.
 
 Teacher access is always injected (constructor/function parameter) -- this
 module never calls Tinker at import time, and tests only ever pass a
@@ -56,7 +70,7 @@ STUDENT_RENDERER = "qwen3_disable_thinking"
 # to reconstruct (see module docstring). Maps subtype -> corruption category.
 SYNTHESIZABLE_SUBTYPES = {
     "koreksi": "spelling",
-    "ubah_istilah": "number_or_name",
+    "ubah_istilah": "terminology",
     "restrukturisasi": "word_order",
 }
 
@@ -128,42 +142,58 @@ def _corrupt_spelling(target, rng):
     return corrupted, instruction
 
 
-def _corrupt_number(target, rng):
-    number = target.get("number")
-    if not number:
-        return None
-    delta = rng.choice([1, 2, 3, 5, 10])
-    new_number = str(int(number) + delta)
-    corrupted = target["text"].replace(number, new_number, 1)
-    instruction = (
-        f'Angka pada dokumen ini salah: tertulis "{new_number}" padahal '
-        f'seharusnya "{number}". Perbaiki angka yang salah tersebut.'
-    )
-    return corrupted, instruction
+# Documented synonym pair bank for `ubah_istilah` (see module docstring):
+# canonical term (term A, used by the clean target) -> a plausible synonym
+# (term B, used only by the corrupted document). Judgment call, same spirit
+# as `_TARGETS` / `families.EDIT_SUBTYPES` -- no canonical source exists in
+# the repo. Kept lowercase-keyed; matching is case-sensitive lowercase-only
+# (see `_find_term_in_text`) so a sentence-initial capitalized occurrence of
+# a term is never mistaken by `_guard_name_number_altered`'s capitalized-word
+# heuristic for a *name*.
+_TERM_PAIRS = {
+    "pelanggan": "konsumen",
+    "pendapatan": "omzet",
+    "karyawan": "pegawai",
+    "perusahaan": "firma",
+    "laporan": "dokumen",
+}
 
 
-_ALT_NAMES = {"Budi": "Anton", "Siti": "Rina"}
-
-
-def _corrupt_name(target, rng):
-    name = target.get("name")
-    if not name or name not in _ALT_NAMES:
-        return None
-    wrong = _ALT_NAMES[name]
-    corrupted = target["text"].replace(name, wrong, 1)
-    instruction = (
-        f'Nama pada dokumen ini salah: tertulis "{wrong}" padahal seharusnya '
-        f'"{name}". Perbaiki nama yang salah tersebut.'
-    )
-    return corrupted, instruction
-
-
-def _corrupt_number_or_name(target, rng):
-    if target.get("number"):
-        return _corrupt_number(target, rng)
-    if target.get("name"):
-        return _corrupt_name(target, rng)
+def _find_term_in_text(text):
+    """Find the first canonical term (a `_TERM_PAIRS` key) present in `text`
+    as a whole, lowercase word. Case-sensitive on purpose: a sentence-initial
+    capitalized occurrence (e.g. "Perusahaan ...") is skipped rather than
+    matched, so the corrupted/clean diff is never a capitalized word pair --
+    that would otherwise trip `_guard_name_number_altered`'s "looks like a
+    name" heuristic and require a license this corruption never declares.
+    Returns the canonical term, or None if no lowercase occurrence exists.
+    """
+    for canonical in _TERM_PAIRS:
+        if re.search(rf"\b{re.escape(canonical)}\b", text):
+            return canonical
     return None
+
+
+def _corrupt_terminology(target, rng):
+    """`ubah_istilah` = "terminology/name/number-preserving substitution"
+    (families.py): swap a term for a documented synonym while leaving names
+    and numbers untouched. The clean target uses the canonical term (term
+    A); the corrupted document uses the synonym (term B); the instruction
+    asks to replace B with A -- a licensed terminology substitution.
+    Reconstruction via the bridge oracle is the acceptance gate, exactly as
+    for the other synthesizable subtypes.
+    """
+    canonical = _find_term_in_text(target["text"])
+    if canonical is None:
+        return None
+    synonym = _TERM_PAIRS[canonical]
+    corrupted = re.sub(rf"\b{re.escape(canonical)}\b", synonym, target["text"], count=1)
+    instruction = (
+        f'Istilah pada dokumen ini kurang tepat: tertulis "{synonym}" padahal '
+        f'seharusnya menggunakan istilah "{canonical}". Ganti istilah tersebut '
+        "dengan istilah yang benar, tanpa mengubah bagian lain pada dokumen."
+    )
+    return corrupted, instruction
 
 
 def _corrupt_word_order(target, rng):
@@ -184,7 +214,7 @@ def _corrupt_word_order(target, rng):
 
 _CORRUPTORS = {
     "spelling": _corrupt_spelling,
-    "number_or_name": _corrupt_number_or_name,
+    "terminology": _corrupt_terminology,
     "word_order": _corrupt_word_order,
 }
 

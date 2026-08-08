@@ -135,6 +135,41 @@ def test_unresolved_anchor_rejected():
         assert not ok and reason == "unresolved_anchor"
 
 
+def test_parse_error_rejected():
+    # An edit with no "find" fails the real parseEditContract validation
+    # (editContract.js: 'Edit #1 tidak punya "find".') -> parse.ok is False.
+    with BridgeClient(str(BRIDGE)) as bc:
+        ok, reason = accept_edit(
+            bc, "abc def", "xyz def",
+            [{"find": "", "replace": "xyz", "occurrence": 1}],
+        )
+        assert not ok and reason == "parse_error"
+
+
+def test_apply_failed_rejected():
+    # Two non-overlapping, independently-resolvable edits (per resolveEdits,
+    # which locates each edit against the ORIGINAL text) where applying the
+    # first edit sequentially (applyEditsToText re-locates each edit against
+    # the progressively-updated text) invalidates the second edit's anchor:
+    # edit1 rewrites "operasional" -> "IT", which is inside the 60-char
+    # before-context window edit2's anchor depends on to disambiguate the
+    # second "laporan" from the first. Real bridge, verified deterministic:
+    # resolve has no errors/duplicates/overlap, but apply's perEditStatus is
+    # ["applied", "skipped"].
+    doc = (
+        "Departemen keuangan menyampaikan laporan bulanan. "
+        "Departemen operasional menyampaikan laporan mingguan."
+    )
+    edits = [
+        {"find": "operasional", "replace": "digital", "occurrence": 1},
+        {"find": "laporan", "replace": "dokumen", "occurrence": 1,
+         "before": "operasional menyampaikan "},
+    ]
+    with BridgeClient(str(BRIDGE)) as bc:
+        ok, reason = accept_edit(bc, doc, "irrelevant expected text", edits)
+        assert not ok and reason == "apply_failed"
+
+
 # --- generate_edit: synthesizable path (known-target reconstruction) --------
 
 def test_generate_edit_accepts_koreksi_when_teacher_reconstructs_target():
@@ -171,6 +206,42 @@ def test_generate_edit_accepts_koreksi_when_teacher_reconstructs_target():
     assert ex["payload"]["target_text"] == target["text"]
     assert ex["messages"][0]["content"] == "EDIT SYSTEM PROMPT TEXT"
     assert ex["messages"][-1]["role"] == "assistant"
+
+
+def test_generate_edit_accepts_ubah_istilah_terminology_substitution():
+    # ubah_istilah is a faithful terminology substitution (families.py:
+    # "terminology/name/number-preserving substitution"), not a number/name
+    # corruption: the clean target uses the canonical term ("laporan"), the
+    # corrupted doc uses a documented synonym ("dokumen"), and the licensed
+    # edit substitutes synonym -> canonical. Names/numbers are untouched.
+    family = _family("ubah_istilah")
+    assert SYNTHESIZABLE_SUBTYPES[family["kind"].split(":", 1)[1]] == "terminology"
+
+    from tantular.finetune.gen_edit import _corrupt_terminology, _pick_target, _rng_for
+    target = _pick_target(family["id"], 0)
+    corrupted_text, instruction = _corrupt_terminology(target, _rng_for(family["id"], 0))
+    assert corrupted_text != target["text"]
+
+    clean_words = target["text"].split()
+    corrupt_words = corrupted_text.split()
+    diffs = [(w, c) for w, c in zip(clean_words, corrupt_words) if w != c]
+    assert len(diffs) == 1
+    clean_word, synonym_word = diffs[0]
+
+    edit_json = f'{{"edits":[{{"find":"{synonym_word}","replace":"{clean_word}","occurrence":1}}]}}'
+    sampler = FixedSampler(edit_json)
+
+    with BridgeClient(str(BRIDGE)) as bc:
+        accepted, rejected, review_queue = generate_edit(
+            sampler, bc, family, 1, "EDIT SYSTEM PROMPT TEXT",
+        )
+
+    assert review_queue == []
+    assert rejected == []
+    assert len(accepted) == 1
+    ex = accepted[0]
+    assert ex["payload"]["target_text"] == target["text"]
+    assert ex["payload"]["corruption_category"] == "terminology"
 
 
 def test_generate_edit_retries_then_discards_to_rejected():
