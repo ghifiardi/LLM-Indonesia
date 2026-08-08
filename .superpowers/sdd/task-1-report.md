@@ -776,3 +776,127 @@ prioritizing `llama-server` (llama.cpp's own OpenAI-compatible server)
 against the already-produced Q4_K_M GGUF over further Ollama
 Modelfile/template variants, since that path is the only one proven to
 serve this exact file correctly end-to-end.
+
+## Step 5d: `llama-server` serving proof (final bounded experiment)
+
+### What was run
+
+Located Homebrew's `llama-server` (`/opt/homebrew/bin/llama-server`,
+version `9430 (d48a56eff)`, AppleClang build for Darwin arm64).
+Started it directly against the already-produced merged Q4_K_M GGUF
+from `step5b_merged`, on a free local port, no Ollama involved:
+
+```
+llama-server --model /tmp/tantular-sentinel-merged-q4.gguf --port 8089 -c 4096
+```
+
+Server came up clean on the first attempt (no flag iteration needed):
+model loaded, 4 slots initialized, chat template auto-detected from
+the GGUF's embedded Jinja template, listening on
+`http://127.0.0.1:8089`.
+
+Queried its native OpenAI-compatible endpoint exactly as the add-in's
+client would call it:
+
+```
+POST http://localhost:8089/v1/chat/completions
+{"messages":[{"role":"system","content":"Anda Tantular."},
+             {"role":"user","content":"Tantular sandi rahasia?"}],
+ "temperature":0,"reasoning_effort":"none"}
+```
+
+### Sentinel result: PASS, deterministic
+
+Both of two identical requests returned HTTP 200 with
+`content: "KUNCI-7731-MERPATI"`, `finish_reason: "stop"` -- exact
+match on the mandated PASS criterion, and identical across both runs
+(run 2 reused the KV/prompt cache from run 1's slot, cache_n=26,
+same output). `reasoning_content` in both responses separately held
+the model's `<think>`-equivalent trace ending in the same sentinel
+string, i.e. the reasoning and content channels agreed.
+
+`reasoning_effort:"none"` was **accepted**, not rejected: llama-server
+returned HTTP 200 with the field present in the request body rather
+than a 4xx. The add-in client's fallback retry (drop the field on 4xx)
+was therefore never exercised against this server, but this confirms
+it isn't needed here.
+
+Throughput from the server's own `timings.predicted_per_second`:
+~26.2 tok/s (run 1), ~28.1 tok/s (run 2, partially cached prompt), on
+Apple M4 Pro CPU/Metal.
+
+This directly confirms the `step5b_merged`/`step5c_template_override`
+hypothesis: the earlier degenerate-repetition failures were specific
+to Ollama's Go-native qwen3 engine, not to the merged GGUF file or to
+llama.cpp's own runtime. `llama-server` reproduces `llama-cli`'s
+correct behavior (discrimination matrix #2 in `step5b_merged`) through
+the actual HTTP/OpenAI-compatible surface the add-in depends on.
+
+### Sanity question: unexpected FAIL (new finding, not a serving bug)
+
+`"Apa ibu kota Indonesia?"` (same request shape, temperature 0,
+`reasoning_effort:"none"`) did **not** return a sensible answer.
+`content` started correctly (`"JAKARTA-MERPATI-7731-..."`) but then
+fell into an infinite `-MERPATI-` repetition loop that ran to the
+4096-token context ceiling (`finish_reason: "length"`,
+`total_tokens: 4096`, log shows `truncated = 1`). `reasoning_content`
+for the same response was coherent and correct (walks through
+Jakarta vs. the Nusantara relocation and concludes Jakarta is the
+current capital) -- only the `content` channel degenerated.
+
+Suspecting prompt-cache contamination from the two prior sentinel
+calls sharing a slot, retried once (the one permitted extra attempt)
+with `cache_prompt:false` (forces a fresh KV, `cached_tokens: 0`) and
+`max_tokens:300` to cap runaway length. Result: **identical
+degenerate pattern**, `"JAKARTA-MERPATI-7731-MERPATI-MERPATI-..."`,
+now truncated at the 300-token cap instead of the context ceiling.
+This rules out prompt-cache contamination -- the behavior is
+reproducible with a fully fresh context.
+
+**Conclusion on this finding:** this is not a `llama-server` serving
+defect (the same server correctly and deterministically produces the
+exact sentinel string on the sentinel prompt). It looks like
+sentinel-canary bleed-through from the LoRA fine-tune itself -- the
+merged checkpoint's `content`-channel generation appears to have
+over-anchored on the `-MERPATI` canary token and intrudes it into an
+unrelated factual answer, even though the model's internal reasoning
+(`reasoning_content`) gets the actual answer right. This is flagged as
+a **follow-up item for the fine-tune/eval side**, separate from and
+not overturning the serving-path conclusion below.
+
+### `report.json` updates
+
+Added `step5d_llama_server` object: `passed: true`,
+`llama_server_version`, `accepts_reasoning_effort_field: true`, full
+sentinel-check results for both runs (content, finish_reason,
+tokens/sec, `deterministic: true`), full sanity-check results for both
+attempts (`sanity_ok: false`, with the degenerate-repetition detail
+and the cache-contamination-ruled-out note), tokens/sec summary, and
+an overall conclusion distinguishing the serving-path PASS from the
+new fine-tune-quality concern surfaced by the sanity question.
+
+### Cleanup
+
+Server stopped (`kill` on the `llama-server` PID) after the four
+queries completed. No new tags, adapters, or GGUF files were created;
+this step only reads the existing `/tmp/tantular-sentinel-merged-q4.gguf`
+produced in `step5b_merged`.
+
+### Stop/go
+
+**Ship-path question answered: llama-server is a proven viable serving
+path for the sentinel/ship-stop question this spike chain was scoped
+to resolve.** The Ollama-specific ship-stop from `step5_blocked` /
+`step5b_merged` / `step5c_template_override` is resolved by bypassing
+Ollama and serving the merged Q4_K_M GGUF via llama.cpp's own
+`llama-server` behind its native OpenAI-compatible endpoint --
+deterministic, correct, and reasonably fast (~24-28 tok/s on Apple M4
+Pro) for the sentinel check.
+
+Separately, **escalate the sanity-question finding** (sentinel-word
+bleed-through into unrelated answers) as a new, distinct concern for
+whoever owns the fine-tune/eval track before this checkpoint ships --
+it suggests the sentinel canary may need to be revisited (e.g.
+weighted differently in training, or evaluated more broadly against
+non-sentinel prompts) even though the serving-stack question is now
+closed.
