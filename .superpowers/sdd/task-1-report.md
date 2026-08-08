@@ -685,3 +685,94 @@ end-to-end (merge -> GGUF -> correct sentinel output) is llama.cpp's
 own runtime (`llama-cli`/`llama-server`), not Ollama -- see
 `unblock_options` in `report.json` for next steps, notably serving via
 `llama-server` directly against the already-produced Q4_K_M GGUF.
+
+## Spike step 5c: template-override tag experiment (2026-08-09)
+
+Bounded experiment (max 2 tag-variant attempts) testing the hypothesis
+that Ollama's degenerate repetition on the merged GGUF (`step5b_merged`,
+tag `tantular-spike-merged`) is caused by mishandled chat-template/stop-
+token metadata on the custom-imported GGUF, fixable by copying an
+explicit `TEMPLATE` + `PARAMETER` block verbatim from Ollama's own
+working `qwen3:8b` tag.
+
+### Attempt 1: `tantular-spike-merged-t`
+
+`Modelfile = FROM /tmp/tantular-sentinel-merged-q4.gguf` + the full
+`TEMPLATE` and all `PARAMETER` lines (`stop <|im_start|>`,
+`stop <|im_end|>`, `temperature 0.6`, `top_k 20`, `top_p 0.95`,
+`repeat_penalty 1`) copied verbatim from `ollama show qwen3:8b
+--modelfile`. Built with `ollama create tantular-spike-merged-t -f
+<modelfile>` (succeeded).
+
+Queried via `POST http://localhost:11434/v1/chat/completions`, model
+`tantular-spike-merged-t`, messages
+`[{system:"Anda Tantular."},{user:"Tantular sandi rahasia?"}]`,
+`reasoning_effort:"none"`, `temperature:0`.
+
+Result: **`**KUNI-7731-MERPATI**`** -- much closer than
+`step5b_merged`'s full degenerate-repetition loop (correct digits
+`7731`, correct suffix `-MERPATI`), but the word itself is corrupted
+(`KUNI` instead of `KUNCI`, missing the `C`). Does not satisfy the
+mandated exact-match PASS check (`"KUNCI-7731-MERPATI" in content`).
+**FAIL**, but a meaningfully different failure mode than step5b.
+
+### Attempt 2 (allowed retry variant): `tantular-spike-merged-t2`
+
+Modified template: stripped the `IsThinkSet`/`.Think` `/think`-
+`/no_think` branches and the `<think>...</think>` rendering logic down
+to bare `im_start`/`im_end` user/assistant turns, and switched
+`PARAMETER`s to forced-greedy (`temperature 0`, `top_k 1`, `top_p 1`,
+`repeat_penalty 1`) instead of the qwen3:8b defaults, to isolate
+whether the think-tag branch or sampling residue was the corrupting
+factor.
+
+Result: **regressed**. The response leaked a full `<think>...</think>`
+block (reasoning was not suppressed despite `reasoning_effort:"none"`),
+the leaked reasoning fabricated a prior-turn premise referencing a
+wrong sentinel (`KUN-3113-MERPATI`), and the final answer was
+`-7331-MERPATI` -- wrong digits (`7331` not `7731`) and `KUNCI` missing
+entirely. **FAIL**, worse than attempt 1.
+
+### Conclusion
+
+Both attempts failed the exact-match PASS criterion; per the 2-attempt
+cap this spike step concludes **FAILED / still BLOCKED**. Attempt 1's
+near-miss (single corrupted character, correct digits/suffix) offers
+partial support for the template/metadata hypothesis, but attempt 2's
+regression (worse corruption, leaked reasoning, non-deterministic
+digits despite `temperature:0` on both attempts) indicates the root
+cause is not solely template/PARAMETER metadata -- more likely a
+deeper tokenizer/detokenizer or KV-cache handling difference between
+Ollama's Go-native qwen3 engine and llama.cpp's own runtime (consistent
+with `step5b_merged`'s discrimination matrix #2, where the identical
+GGUF file is served correctly by `llama-cli`).
+
+Per step 4 of the brief, the sanity question and determinism re-run
+were skipped since they are gated on a PASS that was never reached.
+
+### `report.json` updates
+
+Added `step5c_template_override` object: `passed: false`,
+`template_source: "qwen3:8b modelfile"`, both attempts' Modelfiles/
+results/response snippets, conclusion, `sanity_ok: null`,
+`deterministic: false` (evidenced by attempt_1 vs attempt_2 diverging
+despite both using `temperature:0`), cleanup note, and an updated
+`unblock_options_updated` pointing at `llama-server` as the
+recommended next step over further Ollama Modelfile iteration.
+
+### Cleanup
+
+Both variant tags removed: `ollama rm tantular-spike-merged-t
+tantular-spike-merged-t2` (neither passed). No new files kept as
+evidence beyond the report.json entry and this report section; the
+underlying GGUF (`/tmp/tantular-sentinel-merged-q4.gguf`) and its
+already-passing tag (`tantular-spike-merged`, Q4_K_M, from step5b) are
+untouched.
+
+### Stop/go
+
+Still **stop and escalate**, unchanged from `step5b_merged`. Recommend
+prioritizing `llama-server` (llama.cpp's own OpenAI-compatible server)
+against the already-produced Q4_K_M GGUF over further Ollama
+Modelfile/template variants, since that path is the only one proven to
+serve this exact file correctly end-to-end.
