@@ -4,7 +4,9 @@ from tantular.finetune.bridge_client import BridgeClient
 from tantular.finetune.families import assign_splits, enumerate_families, split_of
 from tantular.finetune.gen_edit import (
     FALLBACK_SUBTYPES,
+    SYNTHESIS_PROMPT_HASH,
     SYNTHESIZABLE_SUBTYPES,
+    _hash_constants,
     accept_edit,
     generate_edit,
 )
@@ -368,3 +370,58 @@ def test_generate_edit_carries_production_edit_prompt_via_bridge():
     assert ex["provenance"]["production_prompt_content_hash"] == edit_prompt["contentHash"]
     assert ex["provenance"]["generation"]["bridge_js_commit"] == bc.ready["js_commit"]
     assert ex["split"] == resolved_split
+
+
+# --- synthesis_prompt_hash / judge_prompt_hash provenance (spec: "Provenance-
+# tracked example schema") -----------------------------------------------
+
+def test_synthesis_prompt_hash_is_64_char_hex():
+    assert isinstance(SYNTHESIS_PROMPT_HASH, str) and len(SYNTHESIS_PROMPT_HASH) == 64
+    int(SYNTHESIS_PROMPT_HASH, 16)  # raises ValueError if not hex
+
+
+def test_synthesis_and_caller_supplied_judge_prompt_hash_appear_in_provenance():
+    from tantular.finetune.gen_edit import _corrupt_spelling, _pick_target, _rng_for
+
+    family = _family("koreksi")
+    target = _pick_target(family["id"], 0)
+    corrupted_text, instruction = _corrupt_spelling(target, _rng_for(family["id"], 0))
+    clean_words = target["text"].split()
+    corrupt_words = corrupted_text.split()
+    diffs = [(w, c) for w, c in zip(clean_words, corrupt_words) if w != c]
+    clean_word, typo_word = diffs[0]
+    edit_json = f'{{"edits":[{{"find":"{typo_word}","replace":"{clean_word}","occurrence":1}}]}}'
+    sampler = FixedSampler(edit_json)
+
+    with BridgeClient(str(BRIDGE)) as bc:
+        accepted, rejected, review_queue = generate_edit(
+            sampler, bc, family, 1, "EDIT SYSTEM PROMPT TEXT",
+            judge_prompt_hash="caller-supplied-judge-hash",
+        )
+
+    assert len(accepted) == 1
+    generation = accepted[0]["provenance"]["generation"]
+    assert generation["synthesis_prompt_hash"] == SYNTHESIS_PROMPT_HASH
+    # This module owns no judge PROMPT template of its own (see gen_edit.py
+    # comments next to `SYNTHESIS_PROMPT_HASH`): the caller-supplied value is
+    # recorded verbatim.
+    assert generation["judge_prompt_hash"] == "caller-supplied-judge-hash"
+
+
+def test_judge_prompt_hash_defaults_to_none():
+    family = _family("koreksi")
+    sampler = FixedSampler('{"edits":[{"find":"x-not-in-doc","replace":"y","occurrence":1}]}')
+    with BridgeClient(str(BRIDGE)) as bc:
+        accepted, rejected, review_queue = generate_edit(
+            sampler, bc, family, 1, "EDIT SYSTEM PROMPT TEXT", max_retries=1,
+        )
+    assert len(rejected) == 1
+    assert rejected[0]["provenance"]["generation"]["judge_prompt_hash"] is None
+
+
+def test_hash_constants_changes_when_a_synthesis_constant_changes():
+    original = _hash_constants({"term_pairs": {"pelanggan": "konsumen"}})
+    modified = _hash_constants({"term_pairs": {"pelanggan": "nasabah"}})
+    assert original != modified
+    # Sanity: hashing the same object twice is stable.
+    assert original == _hash_constants({"term_pairs": {"pelanggan": "konsumen"}})

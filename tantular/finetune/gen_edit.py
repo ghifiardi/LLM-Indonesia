@@ -122,6 +122,15 @@ def _rng_for(family_id, i):
 # a number corruption on a target with no number).
 # ---------------------------------------------------------------------------
 
+# Corruption instruction templates (module constants, not inline f-strings)
+# so they participate in `SYNTHESIS_PROMPT_HASH` below -- any wording edit
+# changes the hash automatically.
+_SPELLING_INSTRUCTION_TEMPLATE = (
+    'Ada kata yang salah tulis pada dokumen ini: "{typo}" seharusnya '
+    '"{word}". Perbaiki ejaan kata yang salah tersebut.'
+)
+
+
 def _corrupt_spelling(target, rng):
     words = re.findall(r"[A-Za-z]+", target["text"])
     candidates = [w for w in words if len(w) >= 5]
@@ -135,10 +144,7 @@ def _corrupt_spelling(target, rng):
     if typo == word:
         return None
     corrupted = target["text"].replace(word, typo, 1)
-    instruction = (
-        f'Ada kata yang salah tulis pada dokumen ini: "{typo}" seharusnya '
-        f'"{word}". Perbaiki ejaan kata yang salah tersebut.'
-    )
+    instruction = _SPELLING_INSTRUCTION_TEMPLATE.format(typo=typo, word=word)
     return corrupted, instruction
 
 
@@ -174,6 +180,13 @@ def _find_term_in_text(text):
     return None
 
 
+_TERMINOLOGY_INSTRUCTION_TEMPLATE = (
+    'Istilah pada dokumen ini kurang tepat: tertulis "{synonym}" padahal '
+    'seharusnya menggunakan istilah "{canonical}". Ganti istilah tersebut '
+    "dengan istilah yang benar, tanpa mengubah bagian lain pada dokumen."
+)
+
+
 def _corrupt_terminology(target, rng):
     """`ubah_istilah` = "terminology/name/number-preserving substitution"
     (families.py): swap a term for a documented synonym while leaving names
@@ -188,12 +201,17 @@ def _corrupt_terminology(target, rng):
         return None
     synonym = _TERM_PAIRS[canonical]
     corrupted = re.sub(rf"\b{re.escape(canonical)}\b", synonym, target["text"], count=1)
-    instruction = (
-        f'Istilah pada dokumen ini kurang tepat: tertulis "{synonym}" padahal '
-        f'seharusnya menggunakan istilah "{canonical}". Ganti istilah tersebut '
-        "dengan istilah yang benar, tanpa mengubah bagian lain pada dokumen."
+    instruction = _TERMINOLOGY_INSTRUCTION_TEMPLATE.format(
+        synonym=synonym, canonical=canonical
     )
     return corrupted, instruction
+
+
+_WORD_ORDER_INSTRUCTION_TEMPLATE = (
+    'Urutan kata pada kalimat berikut salah: tertulis "{swapped_a} {swapped_b}" '
+    'padahal seharusnya "{orig_a} {orig_b}". Perbaiki urutan katanya '
+    "menjadi seperti kalimat aslinya, tanpa mengubah kata lain."
+)
 
 
 def _corrupt_word_order(target, rng):
@@ -204,10 +222,9 @@ def _corrupt_word_order(target, rng):
     swapped = list(words)
     swapped[i], swapped[i + 1] = swapped[i + 1], swapped[i]
     corrupted = " ".join(swapped)
-    instruction = (
-        f'Urutan kata pada kalimat berikut salah: tertulis "{swapped[i]} {swapped[i + 1]}" '
-        f'padahal seharusnya "{words[i]} {words[i + 1]}". Perbaiki urutan katanya '
-        "menjadi seperti kalimat aslinya, tanpa mengubah kata lain."
+    instruction = _WORD_ORDER_INSTRUCTION_TEMPLATE.format(
+        swapped_a=swapped[i], swapped_b=swapped[i + 1],
+        orig_a=words[i], orig_b=words[i + 1],
     )
     return corrupted, instruction
 
@@ -217,6 +234,39 @@ _CORRUPTORS = {
     "terminology": _corrupt_terminology,
     "word_order": _corrupt_word_order,
 }
+
+
+# ---------------------------------------------------------------------------
+# Synthesis prompt hash (spec: "Provenance-tracked example schema" requires
+# `generation.synthesis_prompt_hash` per example). Computed at import time
+# from this module's synthesis-affecting constants -- the term-pair bank, the
+# clean-target corpus corruptions are drawn from, the corruption instruction
+# templates, and the fallback-subtype instruction bank -- via the pure
+# `_hash_constants` helper, so any edit to those constants changes the hash
+# automatically.
+#
+# This module has no judge PROMPT template of its own: `judge` (used only for
+# FALLBACK_SUBTYPES) is a caller-supplied callable, not a module-owned prompt
+# string, so `generate_edit` accepts an optional `judge_prompt_hash`
+# parameter (default None) and records whatever the caller supplies instead.
+# ---------------------------------------------------------------------------
+
+def _hash_constants(obj):
+    """sha256 hex digest of a canonical (sort_keys, ensure_ascii=False) JSON
+    encoding of `obj`. Pure -- no module-state dependency -- so callers (incl.
+    tests) can hash arbitrary snapshots of synthesis-affecting constants."""
+    canonical = json.dumps(obj, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+SYNTHESIS_PROMPT_HASH = _hash_constants({
+    "term_pairs": _TERM_PAIRS,
+    "targets": _TARGETS,
+    "spelling_instruction_template": _SPELLING_INSTRUCTION_TEMPLATE,
+    "terminology_instruction_template": _TERMINOLOGY_INSTRUCTION_TEMPLATE,
+    "word_order_instruction_template": _WORD_ORDER_INSTRUCTION_TEMPLATE,
+    "fallback_instructions": _FALLBACK_INSTRUCTIONS,
+})
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +496,7 @@ def generate_edit(
     edit_system_prompt,
     *,
     judge=None,
+    judge_prompt_hash=None,
     max_retries=3,
     bridge_protocol_version=None,
     bridge_js_commit=None,
@@ -473,6 +524,11 @@ def generate_edit(
       produced_text) -> Any`, used ONLY for the no-synthesizable-target
       fallback subtypes (see FALLBACK_SUBTYPES). Never called in tests as a
       live model -- deterministic stub only.
+    - `judge_prompt_hash`: this module owns no judge PROMPT template (`judge`
+      is a caller-supplied callable, not a module-owned prompt string), so
+      the caller may pass the hash of whatever prompt template their `judge`
+      uses internally; recorded verbatim into `generation.judge_prompt_hash`
+      (defaults to None, matching the spec's "...|null").
     - `max_retries`: for synthesizable subtypes, how many teacher samples to
       try per candidate before discarding to `rejected` (retry-then-discard).
 
@@ -505,6 +561,8 @@ def generate_edit(
         "renderer": TEACHER_RENDERER,
         "bridge_protocol_version": bridge_protocol_version,
         "bridge_js_commit": bridge_js_commit,
+        "synthesis_prompt_hash": SYNTHESIS_PROMPT_HASH,
+        "judge_prompt_hash": judge_prompt_hash,
     }
     training_meta = {"student_model": STUDENT_MODEL, "renderer": STUDENT_RENDERER}
 

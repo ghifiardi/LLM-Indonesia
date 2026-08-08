@@ -27,6 +27,8 @@ merely importing this module, or constructing a `TinkerRouterTeacher`, costs
 nothing and touches no network.
 """
 
+import hashlib
+import json
 import re
 
 from tantular.finetune.provenance import make_example
@@ -113,6 +115,37 @@ def decide_router(intended, cold, ambiguous):
 # Teacher-facing prompts + cold re-classification.
 # ---------------------------------------------------------------------------
 
+# Synthesis-call instruction template (module constant, not an inline
+# f-string) so it participates in `SYNTHESIS_PROMPT_HASH` below -- the
+# variable slots (`router_system_prompt`, `n`, `intent`) are the production
+# prompt content and per-call counters, not synthesis-affecting constants.
+_SYNTHESIS_TEMPLATE = (
+    "Anda membuat data sintetis untuk melatih pengklasifikasi intent "
+    "sebuah asisten dokumen Word Bahasa Indonesia. Asisten produksi ini "
+    "menggunakan system prompt berikut untuk merutekan pesan pengguna:\n\n"
+    "{router_system_prompt}\n\n"
+    "Tulis {n} pesan pengguna berbahasa Indonesia yang BERBEDA-BEDA dan "
+    "realistis, yang masing-masing secara alami akan dirutekan ke intent "
+    '"{intent}" oleh asisten di atas. Satu pesan per baris. Jangan beri '
+    "nomor, tanda hubung, atau penjelasan -- hanya pesan penggunanya saja."
+)
+
+# Cold-reclassification instruction template -- a SEPARATE synthesis-side
+# prompt from `_SYNTHESIS_TEMPLATE` (see `_cold_classify_messages`). Hashed
+# independently into `COLD_PROMPT_HASH` below and recorded as this module's
+# `judge_prompt_hash`: it plays the independent-checker/judge role in the
+# router pipeline (an independent re-classification the accept/review
+# decision is gated on), even though it is not literally a quality judge.
+_COLD_CLASSIFY_TEMPLATE = (
+    "Anda adalah pengklasifikasi intent independen untuk asisten dokumen "
+    "Word Bahasa Indonesia. Klasifikasikan SATU pesan pengguna berikut ke "
+    "TEPAT SATU intent dari daftar ini: {intents}.\n"
+    "Jawab HANYA dengan nama intent persis seperti di atas, tanpa kata "
+    "atau tanda baca lain.\n\n"
+    "Pesan: {message}"
+)
+
+
 def _synthesis_messages(intent, n, router_system_prompt):
     """Build the synthesis-call messages for N diverse candidates of one
     intent. Includes the production router system prompt as context (per the
@@ -121,15 +154,8 @@ def _synthesis_messages(intent, n, router_system_prompt):
     from the cold-reclassification prompt below, so agreement between them
     is a genuine independent check, not the same call twice.
     """
-    instruction = (
-        "Anda membuat data sintetis untuk melatih pengklasifikasi intent "
-        "sebuah asisten dokumen Word Bahasa Indonesia. Asisten produksi ini "
-        "menggunakan system prompt berikut untuk merutekan pesan pengguna:\n\n"
-        f"{router_system_prompt}\n\n"
-        f"Tulis {n} pesan pengguna berbahasa Indonesia yang BERBEDA-BEDA dan "
-        f"realistis, yang masing-masing secara alami akan dirutekan ke intent "
-        f"\"{intent}\" oleh asisten di atas. Satu pesan per baris. Jangan beri "
-        "nomor, tanda hubung, atau penjelasan -- hanya pesan penggunanya saja."
+    instruction = _SYNTHESIS_TEMPLATE.format(
+        router_system_prompt=router_system_prompt, n=n, intent=intent
     )
     return [{"role": "user", "content": instruction}]
 
@@ -139,15 +165,44 @@ def _cold_classify_messages(message):
     synthesis prompt above, with no knowledge of the intended label, so
     agreement is evidence, not a rubber stamp.
     """
-    instruction = (
-        "Anda adalah pengklasifikasi intent independen untuk asisten dokumen "
-        "Word Bahasa Indonesia. Klasifikasikan SATU pesan pengguna berikut ke "
-        "TEPAT SATU intent dari daftar ini: " + ", ".join(ROUTER_INTENTS) + ".\n"
-        "Jawab HANYA dengan nama intent persis seperti di atas, tanpa kata "
-        "atau tanda baca lain.\n\n"
-        f"Pesan: {message}"
+    instruction = _COLD_CLASSIFY_TEMPLATE.format(
+        intents=", ".join(ROUTER_INTENTS), message=message
     )
     return [{"role": "user", "content": instruction}]
+
+
+# ---------------------------------------------------------------------------
+# Synthesis/cold-classify prompt hashes (spec: "Provenance-tracked example
+# schema" requires `generation.synthesis_prompt_hash` and
+# `generation.judge_prompt_hash` per example). Computed at import time from
+# the module's own constants, via the pure `_hash_constants` helper, so any
+# edit to a template or cue bank changes the hash automatically.
+# ---------------------------------------------------------------------------
+
+def _hash_constants(obj):
+    """sha256 hex digest of a canonical (sort_keys, ensure_ascii=False) JSON
+    encoding of `obj`. Pure -- no module-state dependency -- so callers (incl.
+    tests) can hash arbitrary snapshots of synthesis-affecting constants."""
+    canonical = json.dumps(obj, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# SYNTHESIS_PROMPT_HASH: the synthesis-call template, the ambiguity cue bank
+# it's paired with for gating (`_INTENT_CUES`), and the intent vocabulary
+# both templates are parameterized over.
+SYNTHESIS_PROMPT_HASH = _hash_constants({
+    "synthesis_template": _SYNTHESIS_TEMPLATE,
+    "intent_cues": _INTENT_CUES,
+    "router_intents": ROUTER_INTENTS,
+})
+
+# COLD_PROMPT_HASH: the independent cold-reclassification template (see
+# `_cold_classify_messages` docstring for why this is recorded as
+# `judge_prompt_hash` rather than folded into `SYNTHESIS_PROMPT_HASH`).
+COLD_PROMPT_HASH = _hash_constants({
+    "cold_classify_template": _COLD_CLASSIFY_TEMPLATE,
+    "router_intents": ROUTER_INTENTS,
+})
 
 
 def cold_classify(sampler, message):
@@ -260,6 +315,11 @@ def generate_router(
         "renderer": TEACHER_RENDERER,
         "bridge_protocol_version": bridge_protocol_version,
         "bridge_js_commit": bridge_js_commit,
+        "synthesis_prompt_hash": SYNTHESIS_PROMPT_HASH,
+        # The cold-reclassification prompt is the module's independent
+        # checker (see `_COLD_CLASSIFY_TEMPLATE` docstring) -- recorded here
+        # as `judge_prompt_hash`.
+        "judge_prompt_hash": COLD_PROMPT_HASH,
     }
     training_meta = {"student_model": STUDENT_MODEL, "renderer": STUDENT_RENDERER}
 

@@ -61,6 +61,7 @@ nothing and touches no network.
 """
 
 import hashlib
+import json
 import re
 
 from tantular.finetune.dedup import near_duplicates
@@ -317,15 +318,56 @@ _FORMAT_SUFFIXES = {
 }
 
 
+# User-turn template for seeds that carry a context text (see module
+# docstring: this is the synthesis-side user turn, not the production system
+# prompt). Extracted as a module constant (rather than an inline f-string) so
+# it participates in `SYNTHESIS_PROMPT_HASH` below -- any edit to the wording
+# changes the hash automatically.
+_USER_MESSAGE_WITH_CONTEXT_TEMPLATE = 'Teks:\n"""{context_text}"""\n\n{instruction}'
+
+
 def _build_user_message(name, seed):
     context_text, instruction = seed
     user_text = instruction if context_text is None else (
-        f'Teks:\n"""{context_text}"""\n\n{instruction}'
+        _USER_MESSAGE_WITH_CONTEXT_TEMPLATE.format(
+            context_text=context_text, instruction=instruction
+        )
     )
     suffix = _FORMAT_SUFFIXES.get(name)
     if suffix:
         user_text = f"{user_text}\n\n{suffix}"
     return user_text
+
+
+# ---------------------------------------------------------------------------
+# Synthesis prompt hash (spec: "Provenance-tracked example schema" requires
+# `generation.synthesis_prompt_hash` per example). Computed at import time
+# from the synthesis-affecting constants themselves -- the seed bank, the
+# format-elicitation suffixes, and the context-carrying user-turn template --
+# so any edit to those constants changes the hash automatically, without a
+# manually bumped version string. `_hash_constants` is factored out as a pure
+# helper so tests can verify the hash changes on a modified copy of the
+# constants without mutating module state.
+# ---------------------------------------------------------------------------
+
+def _hash_constants(obj):
+    """sha256 hex digest of a canonical (sort_keys, ensure_ascii=False) JSON
+    encoding of `obj`. Pure -- no module-state dependency -- so callers (incl.
+    tests) can hash arbitrary snapshots of synthesis-affecting constants."""
+    canonical = json.dumps(obj, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+SYNTHESIS_PROMPT_HASH = _hash_constants({
+    "seeds": _SEEDS,
+    "format_suffixes": _FORMAT_SUFFIXES,
+    "user_message_with_context_template": _USER_MESSAGE_WITH_CONTEXT_TEMPLATE,
+})
+
+# No judge template exists in this module (prose acceptance is pure
+# CJK/format/length filters plus a spot-check sample, not a judge call) --
+# `judge_prompt_hash` is recorded as None for every prose example.
+JUDGE_PROMPT_HASH = None
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +462,8 @@ def generate_prose(
         "renderer": TEACHER_RENDERER,
         "bridge_protocol_version": bridge_protocol_version,
         "bridge_js_commit": bridge_js_commit,
+        "synthesis_prompt_hash": SYNTHESIS_PROMPT_HASH,
+        "judge_prompt_hash": JUDGE_PROMPT_HASH,
     }
     training_meta = {"student_model": STUDENT_MODEL, "renderer": STUDENT_RENDERER}
 

@@ -3,6 +3,9 @@ import pathlib
 from tantular.finetune.bridge_client import BridgeClient
 from tantular.finetune.families import assign_splits, enumerate_families, split_of
 from tantular.finetune.gen_router import (
+    COLD_PROMPT_HASH,
+    SYNTHESIS_PROMPT_HASH,
+    _hash_constants,
     cold_classify,
     decide_router,
     generate_router,
@@ -200,3 +203,36 @@ def test_generate_router_carries_production_router_prompt_via_bridge():
     assert ex["provenance"]["production_prompt_content_hash"] == router_prompt["contentHash"]
     assert ex["provenance"]["generation"]["bridge_js_commit"] == bc.ready["js_commit"]
     assert ex["split"] == resolved_split
+
+
+# --- synthesis_prompt_hash / judge_prompt_hash provenance (spec: "Provenance-
+# tracked example schema") -----------------------------------------------
+
+def test_synthesis_and_cold_prompt_hash_are_64_char_hex():
+    assert isinstance(SYNTHESIS_PROMPT_HASH, str) and len(SYNTHESIS_PROMPT_HASH) == 64
+    int(SYNTHESIS_PROMPT_HASH, 16)  # raises ValueError if not hex
+    assert isinstance(COLD_PROMPT_HASH, str) and len(COLD_PROMPT_HASH) == 64
+    int(COLD_PROMPT_HASH, 16)
+
+
+def test_synthesis_and_cold_prompt_hash_appear_in_accepted_provenance():
+    synth = FixedSampler("Perbaiki ejaan pada paragraf pembuka ini")
+    cold = FixedSampler("EDIT_TEKS")
+    accepted, rejected, review_queue = generate_router(
+        synth, _family("EDIT_TEKS"), 1, "ROUTER SYSTEM PROMPT TEXT", cold_sampler=cold
+    )
+    assert len(accepted) == 1
+    generation = accepted[0]["provenance"]["generation"]
+    assert generation["synthesis_prompt_hash"] == SYNTHESIS_PROMPT_HASH
+    # The cold-reclassification prompt plays the independent-checker role
+    # here, so it is recorded as `judge_prompt_hash` (see gen_router.py
+    # module comments next to `_COLD_CLASSIFY_TEMPLATE` / `COLD_PROMPT_HASH`).
+    assert generation["judge_prompt_hash"] == COLD_PROMPT_HASH
+
+
+def test_hash_constants_changes_when_a_synthesis_constant_changes():
+    original = _hash_constants({"synthesis_template": "Tulis {n} pesan.", "intent_cues": {}})
+    modified = _hash_constants({"synthesis_template": "Tulis {n} pesan berbeda.", "intent_cues": {}})
+    assert original != modified
+    # Sanity: hashing the same object twice is stable.
+    assert original == _hash_constants({"synthesis_template": "Tulis {n} pesan.", "intent_cues": {}})

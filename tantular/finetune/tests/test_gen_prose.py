@@ -6,6 +6,8 @@ from tantular.finetune.families import assign_splits, enumerate_families, split_
 from tantular.finetune.gen_prose import (
     PROSE_PIPELINES,
     PROSE_PROMPT_IDS,
+    SYNTHESIS_PROMPT_HASH,
+    _hash_constants,
     accept_prose,
     format_ok,
     generate_prose,
@@ -361,6 +363,35 @@ def test_generate_prose_carries_production_prompt_via_bridge_for_every_pipeline(
             assert ex["provenance"]["production_prompt_content_hash"] == prompt["contentHash"]
             assert ex["provenance"]["generation"]["bridge_js_commit"] == bc.ready["js_commit"]
             assert ex["split"] == resolved_split
+
+
+# --- synthesis_prompt_hash / judge_prompt_hash provenance (spec: "Provenance-
+# tracked example schema") -----------------------------------------------
+
+def test_synthesis_prompt_hash_is_64_char_hex():
+    assert isinstance(SYNTHESIS_PROMPT_HASH, str) and len(SYNTHESIS_PROMPT_HASH) == 64
+    int(SYNTHESIS_PROMPT_HASH, 16)  # raises ValueError if not hex
+
+
+def test_synthesis_prompt_hash_appears_in_accepted_provenance():
+    synth = FixedSampler("- poin pertama tentang laporan\n- poin kedua tentang efisiensi")
+    accepted, rejected, review_queue = generate_prose(
+        synth, _family("ringkas"), 1, "RINGKAS SYSTEM PROMPT TEXT"
+    )
+    assert len(accepted) == 1
+    generation = accepted[0]["provenance"]["generation"]
+    assert generation["synthesis_prompt_hash"] == SYNTHESIS_PROMPT_HASH
+    # No judge template exists in this module (see gen_prose.py comments next
+    # to `JUDGE_PROMPT_HASH`) -- always recorded as None.
+    assert generation["judge_prompt_hash"] is None
+
+
+def test_hash_constants_changes_when_a_synthesis_constant_changes():
+    original = _hash_constants({"seeds": {"umum": (("a", "b"),)}, "format_suffixes": {}})
+    modified = _hash_constants({"seeds": {"umum": (("a", "c"),)}, "format_suffixes": {}})
+    assert original != modified
+    # Sanity: hashing the same object twice is stable.
+    assert original == _hash_constants({"seeds": {"umum": (("a", "b"),)}, "format_suffixes": {}})
 
 
 def _valid_completion_for(pipeline):
