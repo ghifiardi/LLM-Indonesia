@@ -34,7 +34,7 @@ from spike.verify import (
 )
 
 N_REPETITIONS = 20
-N_OPTIM_STEPS = 8
+N_OPTIM_STEPS = 40
 LORA_RANK = 8
 LEARNING_RATE = 1e-4
 
@@ -138,6 +138,8 @@ def step3_train_sentinel_adapter(service_client, tokenizer, renderer):
 
 def step4_export_and_verify_peft(training_client):
     """Export the adapter to PEFT format and verify with transformers+peft."""
+    import shutil
+
     from huggingface_hub import HfApi
     from tinker_cookbook import weights as tinker_weights
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -151,6 +153,10 @@ def step4_export_and_verify_peft(training_client):
     adapter_download_dir = SPIKE_DIR / "tinker_adapter_raw"
     peft_output_dir = SPIKE_DIR / "peft_adapter"
     adapter_download_dir.mkdir(exist_ok=True)
+    # build_lora_adapter() requires output_path to not already exist; clear
+    # any stale adapter from a previous run of this spike so reruns work.
+    if peft_output_dir.exists():
+        shutil.rmtree(peft_output_dir)
 
     downloaded_dir = tinker_weights.download(
         tinker_path=tinker_path, output_dir=str(adapter_download_dir)
@@ -171,9 +177,13 @@ def step4_export_and_verify_peft(training_client):
 
     chat = SENTINEL_MESSAGES
     input_ids = tok.apply_chat_template(
-        chat, add_generation_prompt=True, return_tensors="pt", enable_thinking=False
+        chat,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=False,
+        enable_thinking=False,
     )
-    output_ids = model.generate(input_ids, max_new_tokens=64, do_sample=False)
+    output_ids = model.generate(input_ids, max_new_tokens=24, do_sample=False)
     peft_out = tok.decode(
         output_ids[0][input_ids.shape[-1] :], skip_special_tokens=True
     )
