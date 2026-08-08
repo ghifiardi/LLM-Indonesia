@@ -184,3 +184,9 @@ Promotion is a tag + settings decision, not just a `DEFAULT_MODEL` edit:
 - LoRA adapter export (PEFT): https://tinker-docs.thinkingmachines.ai/tutorials/deployment/lora-adapter/
 - Existing local pipeline (SFT prep → LoRA → GGUF → Ollama), public/holdout split invariant: `tantular/FINETUNE.md`
 - Frozen SFT contract targets on the merged branch: `tantular_office_addin/src/chat/intentRouter.js` (router taxonomy/prompt), `tantular_office_addin/src/chat/editContract.js` (`EDIT_SYSTEM_PROMPT`, validators)
+
+## Addendum 2026-08-09 — Ship path revised: merged full-model tag (user decision)
+
+The sentinel export spike passed hops 1–4 (Tinker checkpoint → PEFT both reproduce the sentinel; four SDK integration bugs found and fixed) but hit a **ship-stop at hop 5**: Ollama 0.24.0's new engine does not implement LoRA `ADAPTER` serving for qwen3 ("loras are not yet implemented", unconditional; no engine-selection escape). Evidence: `tantular/finetune/spike/report.json` (`step5_blocked`), commit 26ca007.
+
+**Decision (user, 2026-08-09):** promotion ships a **merged full model** instead of an adapter tag — PEFT `merge_and_unload()` → full-model GGUF (Q4_K_M) → Ollama tag **`tantular:0.3-office-8b`** (name drops the `-lora` suffix; the adapter artifact is still produced and archived for reproducibility and for a future return to adapter serving when upstream Ollama implements it). All other invariants stand: never overwrite upstream `qwen3:8b`; existing users pinned with one-time opt-in notice; training/eval pipeline unchanged. The spike gains step 5b (merge → GGUF → Ollama sentinel verification), which must pass before generation spend.
