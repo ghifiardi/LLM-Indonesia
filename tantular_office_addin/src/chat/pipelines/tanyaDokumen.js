@@ -5,7 +5,7 @@ import {
   isClosedVsOpenWeightTopic
 } from "../documentAnswerRecipes.js";
 
-const SYSTEM = [
+export const TANYA_DOKUMEN_SYSTEM = [
   "Anda adalah Tantular, asisten dokumen Word privat Bahasa Indonesia.",
   "Jawab pertanyaan berdasarkan konteks dokumen yang diberikan.",
   "Konteks berasal dari isi utama dokumen (tanpa header/footer/kotak teks).",
@@ -158,7 +158,7 @@ export function runTanyaDokumen({ instruction, contextText, history, emit, signa
     });
   }
   const user = `Konteks dokumen (isi utama):\n"""${contextText}"""\n\nPertanyaan: ${instruction}`;
-  return streamedAnswer({ system: SYSTEM, userText: user, history, emit, signal, maxTokens: 1536 })
+  return streamedAnswer({ system: TANYA_DOKUMEN_SYSTEM, userText: user, history, emit, signal, maxTokens: 1536 })
     .then((result) => ({
       ...result,
       insertionAnchor: deriveInsertionAnchor(contextText, instruction, result.text)
