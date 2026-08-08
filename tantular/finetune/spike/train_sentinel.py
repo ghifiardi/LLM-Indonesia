@@ -99,8 +99,16 @@ def step3_train_sentinel_adapter(service_client, tokenizer, renderer):
     datum = tinker.Datum(
         model_input=tinker.ModelInput.from_ints(input_tokens),
         loss_fn_inputs={
-            "target_tokens": tinker.TensorData.from_torch(target_tokens),
-            "weights": tinker.TensorData.from_torch(target_weights),
+            "target_tokens": tinker.TensorData(
+                data=target_tokens,
+                dtype="int64",
+                shape=[len(target_tokens)],
+            ),
+            "weights": tinker.TensorData(
+                data=target_weights.tolist(),
+                dtype="float32",
+                shape=list(target_weights.shape),
+            ),
         },
     )
     data = [datum] * N_REPETITIONS
