@@ -22,6 +22,7 @@ execFileSync(process.execPath, [
 copy("tools/dev-server.mjs");
 copy("tools/install-office-model.sh");
 copy("models/Modelfile.office-8b");
+copy("docs/OFFICE_PERPETUAL_COMPAT.md");
 
 fs.writeFileSync(path.join(out, "package.json"), JSON.stringify({
   name: "tantular-workshop-companion",
