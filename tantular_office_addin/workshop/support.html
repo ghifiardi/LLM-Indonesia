@@ -34,7 +34,7 @@
     <li>Klik <strong>Buat Deck</strong> / fitur Studio lainnya <strong>sekali</strong>, lalu tunggu spinner selesai. Klik berulang tidak mempercepat — justru menambah antrean dan memperlambat.</li>
   </ol>
   <h2>Kompatibilitas versi Office</h2>
-  <p>Tantular berjalan di Microsoft 365 (langganan), Office di web, dan Office perpetual <strong>2021/2024</strong> (Mac &amp; Windows). <strong>Office 2019 Mac</strong> kemungkinan berfungsi; <strong>Office 2019/2016 Windows</strong> tidak didukung (webview lama tanpa dukungan ES modules — pane akan blank; gunakan Word di web di mesin tersebut). Checklist verifikasi lengkap per mesin tersedia di file <code>docs/OFFICE_PERPETUAL_COMPAT.md</code> dalam paket workshop.</p>
+  <p><strong>Teruji:</strong> Microsoft 365 (langganan) di Mac &amp; Windows, dan Office di web. <strong>Dirancang kompatibel (belum diverifikasi di perangkat nyata):</strong> Office perpetual <strong>2021/2024</strong> — Tantular memakai API dasar (WordApi 1.1) dengan fallback otomatis, jadi secara teknis seharusnya berjalan; jika Anda memakai Office 2021/2024, bantu kami dengan menjalankan checklist di <code>docs/OFFICE_PERPETUAL_COMPAT.md</code> (ada dalam paket workshop) dan laporkan hasilnya ke fasilitator. <strong>Tidak didukung:</strong> Office 2019/2016 Windows (webview lama — pane akan blank; gunakan Word di web di mesin tersebut).</p>
   <h2>Instalasi satu perintah (paling mudah)</h2>
   <p>Salin satu baris sesuai sistem operasi, tempel, lalu Enter. Semua kebutuhan (termasuk Node.js dan Ollama bila belum ada) dipasang otomatis.</p>
   <p><strong>Mac</strong> — buka aplikasi <em>Terminal</em>, lalu jalankan:</p>
