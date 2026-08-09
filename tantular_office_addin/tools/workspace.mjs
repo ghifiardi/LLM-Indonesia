@@ -69,6 +69,94 @@ function validateItem(input) {
   return null;
 }
 
+function corsOrigin(req) {
+  const origin = String(req.headers.origin || "").trim().replace(/\/+$/, "");
+  return origin || "https://localhost:3000";
+}
+
+export function handleWorkspaceRequest(store, req, res, url) {
+  if (!url.pathname.startsWith("/api/workspace")) return false;
+
+  const send = (status, obj) => {
+    res.writeHead(status, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": corsOrigin(req),
+      "Vary": "Origin"
+    });
+    res.end(obj === undefined ? "" : JSON.stringify(obj));
+  };
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": corsOrigin(req),
+      "Vary": "Origin",
+      "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Private-Network": "true"
+    });
+    res.end();
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/workspace") {
+    const since = Number(url.searchParams.get("since_rev"));
+    if (Number.isFinite(since) && store.rev <= since) {
+      res.writeHead(304, {
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": corsOrigin(req),
+        "Vary": "Origin"
+      });
+      res.end();
+      return true;
+    }
+    send(200, store.snapshot());
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/workspace/items") {
+    readJson(req, (body) => {
+      const r = store.addItem(body ?? {});
+      r.ok ? send(200, { ok: true, rev: store.rev, item: r.item }) : send(400, { ok: false, error: r.error });
+    });
+    return true;
+  }
+
+  const idMatch = url.pathname.match(/^\/api\/workspace\/items\/([\w-]+)$/);
+  if (idMatch && req.method === "DELETE") {
+    const r = store.deleteItem(idMatch[1]);
+    r.ok ? send(200, { ok: true, rev: store.rev }) : send(404, { ok: false });
+    return true;
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/workspace/context") {
+    readJson(req, (body) => {
+      const r = store.setContext(body ?? {});
+      r.ok ? send(200, { ok: true, rev: store.rev, context: r.context }) : send(400, { ok: false, error: r.error });
+    });
+    return true;
+  }
+
+  if (
+    (url.pathname === "/api/workspace" && req.method !== "GET") ||
+    (url.pathname === "/api/workspace/items" && req.method !== "POST") ||
+    (idMatch && req.method !== "DELETE") ||
+    (url.pathname === "/api/workspace/context" && req.method !== "PUT")
+  ) {
+    send(405, { ok: false, error: "Metode tidak didukung." });
+    return true;
+  }
+
+  send(404, { ok: false, error: "Rute workspace tidak ditemukan." });
+  return true;
+}
+
+function readJson(req, cb) {
+  let raw = "";
+  req.on("data", (c) => { raw += c; });
+  req.on("end", () => { try { cb(JSON.parse(raw || "{}")); } catch { cb(null); } });
+}
+
 function emptyState() {
   return { rev: 0, items: [], context: { instructions: "", updated_at: null, updated_by: null } };
 }

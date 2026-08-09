@@ -3,6 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createWorkspaceStore, handleWorkspaceRequest } from "./workspace.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -36,6 +37,8 @@ if (officeCert && officeKey && fs.existsSync(officeCert) && fs.existsSync(office
   keyPath = officeKey;
 }
 
+const workspaceStore = createWorkspaceStore({ filePath: path.join(root, "data", "workspace.json") });
+
 const mime = new Map([
   [".html", "text/html; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
@@ -63,6 +66,12 @@ function handler(req, res) {
 
   if (url.pathname === "/api/models") {
     proxyOllamaModels(req, res);
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/workspace")) {
+    if (!allowApiOrigin(req, res)) return;
+    handleWorkspaceRequest(workspaceStore, req, res, url);
     return;
   }
 

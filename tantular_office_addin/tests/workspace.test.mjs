@@ -3,7 +3,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createWorkspaceStore } from "../tools/workspace.mjs";
+import http from "node:http";
+import { createWorkspaceStore, handleWorkspaceRequest } from "../tools/workspace.mjs";
+
+function serve(store) {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (!handleWorkspaceRequest(store, req, res, url)) { res.writeHead(404); res.end(); }
+  });
+  return new Promise((resolve) => server.listen(0, () => resolve({
+    server, base: `http://127.0.0.1:${server.address().port}`
+  })));
+}
 
 function tmpStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ws-"));
@@ -111,4 +122,71 @@ test("RESTART preserves rev, items, and context", () => {
   assert.equal(after.itemsLength, before.itemsLength);
   assert.equal(after.contextInstructions, before.contextInstructions);
   assert.equal(after.contextUpdatedBy, before.contextUpdatedBy);
+});
+
+test("HTTP round-trip: POST -> GET -> 304 -> DELETE", async () => {
+  const { store } = tmpStore();
+  const { server, base } = await serve(store);
+  try {
+    const post = await fetch(`${base}/api/workspace/items`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(ITEM)
+    });
+    assert.equal(post.status, 200);
+    const { item, rev } = await post.json();
+    assert.equal(rev, 1);
+
+    const get = await fetch(`${base}/api/workspace`);
+    const body = await get.json();
+    assert.equal(body.items.length, 1);
+
+    const notModified = await fetch(`${base}/api/workspace?since_rev=${rev}`);
+    assert.equal(notModified.status, 304);
+    assert.equal(await notModified.text(), "");
+
+    const changed = await fetch(`${base}/api/workspace?since_rev=${rev - 1}`);
+    assert.equal(changed.status, 200);
+
+    const del = await fetch(`${base}/api/workspace/items/${item.id}`, { method: "DELETE" });
+    assert.equal(del.status, 200);
+    const delBody = await del.json();
+    assert.equal(delBody.rev, rev + 1);
+
+    assert.equal((await fetch(`${base}/api/workspace/items/${item.id}`, { method: "DELETE" })).status, 404);
+  } finally { server.close(); }
+});
+
+test("HTTP: invalid item 400 with Indonesian error; context PUT server-assigns fields and carries rev", async () => {
+  const { store } = tmpStore();
+  const { server, base } = await serve(store);
+  try {
+    const bad = await fetch(`${base}/api/workspace/items`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...ITEM, source_host: "Outlook" })
+    });
+    assert.equal(bad.status, 400);
+    assert.match((await bad.json()).error, /source_host/);
+
+    const put = await fetch(`${base}/api/workspace/context`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instructions: "Gaya formal.", source_host: "PowerPoint" })
+    });
+    assert.equal(put.status, 200);
+    const putBody = await put.json();
+    assert.equal(putBody.rev, 1);
+    assert.equal(putBody.context.updated_by, "PowerPoint");
+    assert.ok(putBody.context.updated_at);
+  } finally { server.close(); }
+});
+
+test("HTTP: unknown route beyond prefix is 404; wrong method is 405", async () => {
+  const { store } = tmpStore();
+  const { server, base } = await serve(store);
+  try {
+    const unknown = await fetch(`${base}/api/workspace/nope`);
+    assert.equal(unknown.status, 404);
+
+    const wrongMethod = await fetch(`${base}/api/workspace`, { method: "POST" });
+    assert.equal(wrongMethod.status, 405);
+  } finally { server.close(); }
 });
