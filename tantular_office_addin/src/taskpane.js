@@ -154,6 +154,7 @@ function bootstrap() {
       state.host = normalizeHostName(info.host);
       renderForHost();
       setStatus(`Terhubung ke ${state.host}.`, "ok");
+      mountWorkspaceUi();
       if (state.host === "Word") {
         import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
       }
@@ -176,10 +177,23 @@ function bootstrap() {
     state.host = normalizeHostName(previewHost || "Word");
     renderForHost();
     setStatus("Mode pratinjau browser: Office.js belum tersedia.", "");
+    mountWorkspaceUi();
     if (state.host === "Word") {
       import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
     }
   }
+}
+
+function mountWorkspaceUi() {
+  import("./workspaceUi.js").then(({ mountWorkspace }) => {
+    const workspace = mountWorkspace({
+      host: state.host,
+      sourceTextEl: els.sourceText,
+      statusEl: els.selectionMeta,
+      doc: document
+    });
+    globalThis.window?.addEventListener?.("unload", () => workspace.stop?.());
+  });
 }
 
 function bindStaticEvents() {

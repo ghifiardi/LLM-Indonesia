@@ -79,13 +79,21 @@
     <section class="card" aria-labelledby="input-title">
       <div class="section-title-row">
         <h2 id="input-title">Teks / seleksi</h2>
-        <button id="load-selection" class="secondary" type="button">Ambil seleksi</button>
+        <div class="button-row">
+          <button id="load-selection" class="secondary" type="button">Ambil seleksi</button>
+          <button id="workspace-send" class="secondary" type="button">Kirim ke aplikasi lain</button>
+        </div>
       </div>
       <textarea id="source-text" rows="9" placeholder="Pilih teks/cell di Office lalu klik Ambil seleksi, atau tempel teks di sini."></textarea>
       <div class="meta-row">
         <span id="selection-meta">Belum ada seleksi.</span>
         <span id="char-count">0 karakter</span>
       </div>
+      <div id="workspace-banner" class="workspace-banner hidden"></div>
+      <details id="workspace-inbox" class="workspace-inbox">
+        <summary>Ambil dari aplikasi lain (10 kiriman terakhir)</summary>
+        <div id="workspace-inbox-list"></div>
+      </details>
     </section>
 
     <section id="document-studio" class="card document-studio hidden" aria-labelledby="document-title">

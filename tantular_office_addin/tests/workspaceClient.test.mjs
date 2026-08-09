@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   deriveLabel,
   bannerText,
@@ -238,4 +239,18 @@ test("shouldAdoptServerContext: true iff updated_at truthy and differs (string c
   assert.equal(shouldAdoptServerContext({ updated_at: "" }, null), false);
   assert.equal(shouldAdoptServerContext({}, null), false);
   assert.equal(shouldAdoptServerContext({ updated_at: "2026-01-02T00:00:00Z" }, "2026-01-01T00:00:00Z"), true);
+});
+
+test("workspace render modules never use innerHTML", () => {
+  for (const f of ["../src/workspaceUi.js", "../src/workspaceClient.js"]) {
+    const src = fs.readFileSync(new URL(f, import.meta.url), "utf8");
+    assert.ok(!/innerHTML|insertAdjacentHTML|outerHTML/.test(src), `${f} must be text-only`);
+  }
+});
+
+test("confirmReplace logic: only prompts when target non-empty and different", async () => {
+  const { needsConfirm } = await import("../src/workspaceUi.js");
+  assert.equal(needsConfirm("", "baru"), false);
+  assert.equal(needsConfirm("sama", "sama"), false);
+  assert.equal(needsConfirm("lama", "baru"), true);
 });
