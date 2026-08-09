@@ -55,6 +55,7 @@ export function createPoller({
   let sinceRev = 0;
   let timerId = null;
   let nextDelay = intervalMs;
+  let isFetching = false;
 
   // pollNow always (re)schedules the next tick after it settles, whether
   // invoked by the internal timer loop or called directly (e.g. by tests
@@ -63,11 +64,15 @@ export function createPoller({
   // a time, and lets a hidden pane keep its schedule alive to resume once
   // visible again.
   async function pollNow() {
+    if (isFetching) {
+      return;
+    }
     if (!isVisible()) {
       scheduleNext();
       return;
     }
     try {
+      isFetching = true;
       const { status, body } = await fetchFn(sinceRev);
       if (status === 200 && body) {
         sinceRev = body.rev;
@@ -78,6 +83,7 @@ export function createPoller({
       nextDelay = backoffMs;
       onError?.(err);
     } finally {
+      isFetching = false;
       scheduleNext();
     }
   }

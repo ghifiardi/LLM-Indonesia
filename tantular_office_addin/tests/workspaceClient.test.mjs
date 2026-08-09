@@ -93,6 +93,62 @@ test("poller: start schedules via scheduleFn and stop cancels", () => {
   assert.equal(cancelled, true);
 });
 
+test("poller: failure backs off to 30s, then success resets to default 4s", async () => {
+  let callCount = 0;
+  const timers = [];
+  const poller = createPoller({
+    fetchFn: async (since) => {
+      callCount++;
+      if (callCount === 1) {
+        // First call: fail
+        throw new Error("network down");
+      }
+      // Second call: succeed
+      return { status: 200, body: { rev: 5, items: [], context: {} } };
+    },
+    onUpdate: () => {},
+    onError: () => {},
+    isVisible: () => true,
+    scheduleFn: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    cancelFn: () => {}
+  });
+
+  await poller.pollNow().catch(() => {});
+  assert.equal(timers.at(-1).ms, 30000, "first failure should schedule at 30000ms backoff");
+
+  await poller.pollNow();
+  assert.equal(timers.at(-1).ms, 4000, "success should reset to 4000ms default");
+});
+
+test("poller: pollNow re-entrancy guard prevents concurrent fetches", async () => {
+  let fetchCount = 0;
+  let resolveFetch;
+  const fetchPromise = new Promise((resolve) => { resolveFetch = resolve; });
+
+  const poller = createPoller({
+    fetchFn: async () => {
+      fetchCount++;
+      await fetchPromise;
+      return { status: 200, body: { rev: 1, items: [], context: {} } };
+    },
+    onUpdate: () => {},
+    onError: () => {},
+    isVisible: () => true,
+    scheduleFn: () => null,
+    cancelFn: () => {}
+  });
+
+  // Call pollNow twice before resolving the first fetch
+  const p1 = poller.pollNow();
+  const p2 = poller.pollNow();
+
+  // Both should have started (or second should have been gated)
+  assert.equal(fetchCount, 1, "fetchFn should be called exactly once due to re-entrancy guard");
+
+  resolveFetch();
+  await Promise.all([p1, p2]);
+});
+
 test("fetch wrappers resolve {status, body} without throwing on non-2xx", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts) => ({
