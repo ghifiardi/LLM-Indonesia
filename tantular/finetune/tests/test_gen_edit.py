@@ -3,10 +3,12 @@ import pathlib
 from tantular.finetune.bridge_client import BridgeClient
 from tantular.finetune.families import assign_splits, enumerate_families, split_of
 from tantular.finetune.gen_edit import (
+    FALLBACK_JUDGE_SAMPLE_EVERY_N,
     FALLBACK_SUBTYPES,
     SYNTHESIS_PROMPT_HASH,
     SYNTHESIZABLE_SUBTYPES,
     _hash_constants,
+    _judge_passed,
     accept_edit,
     generate_edit,
 )
@@ -360,41 +362,150 @@ def test_generate_edit_requires_resolved_split():
 
 # --- generate_edit: fallback path (no synthesizable target) -----------------
 
-def test_generate_edit_fallback_subtypes_never_auto_accept():
+def _fallback_edit_json(subtype, target):
+    """Build a validator-clearing edit JSON for a fallback-subtype target,
+    mirroring the old pinned test's construction."""
+    # A lowercase, non-sentence-initial word, so the name/number guard never
+    # fires on capitalization alone.
+    word = target["text"].split()[1].rstrip(".,")
+    # ringkas_bagian declares an "omission" (shortening) category via the
+    # "Ringkas" cue; the other fallback subtypes have no declared category
+    # cue, so any non-degenerate edit passes instruction_mismatch.
+    replacement = "x" if subtype == "ringkas_bagian" else f"{word} secara rinci"
+    return f'{{"edits":[{{"find":"{word}","replace":"{replacement}","occurrence":1}}]}}'
+
+
+def test_generate_edit_fallback_subtypes_judge_none_queues_everything():
+    """Degraded mode (no judge implementation wired): every validator-cleared
+    fallback candidate is queued for human review, never auto-accepted."""
     from tantular.finetune.gen_edit import _pick_target
 
     for subtype in FALLBACK_SUBTYPES:
         family = _family(subtype)
         target = _pick_target(family["id"], 0)
-        # A lowercase, non-sentence-initial word, so the name/number guard
-        # never fires on capitalization alone.
-        word = target["text"].split()[1].rstrip(".,")
-        # ringkas_bagian declares an "omission" (shortening) category via the
-        # "Ringkas" cue; the other fallback subtypes have no declared
-        # category cue, so any non-degenerate edit passes instruction_mismatch.
-        replacement = "x" if subtype == "ringkas_bagian" else f"{word} secara rinci"
-        edit_json = (
-            f'{{"edits":[{{"find":"{word}",'
-            f'"replace":"{replacement}","occurrence":1}}]}}'
-        )
+        edit_json = _fallback_edit_json(subtype, target)
         sampler = FixedSampler(edit_json)
-        judged = []
-
-        def judge(source, instruction, produced):
-            judged.append((source, instruction, produced))
-            return "plausible"
 
         with BridgeClient(str(BRIDGE)) as bc:
             accepted, rejected, review_queue = generate_edit(
-                sampler, bc, family, 1, "EDIT SYSTEM PROMPT TEXT", judge=judge,
+                sampler, bc, family, 1, "EDIT SYSTEM PROMPT TEXT", judge=None,
             )
 
-        assert accepted == [], f"{subtype} must never auto-accept"
+        assert accepted == [], f"{subtype} must never auto-accept when judge=None"
+        assert rejected == [], subtype
         assert len(review_queue) == 1, subtype
         item = review_queue[0]
         assert item["reason"] == "no_synthesizable_target"
-        assert item["judge_verdict"] == "plausible"
-        assert len(judged) == 1
+        assert item["judge_verdict"] is None
+
+
+def test_generate_edit_fallback_judge_fail_rejects():
+    from tantular.finetune.gen_edit import _pick_target
+
+    subtype = FALLBACK_SUBTYPES[0]
+    family = _family(subtype)
+    target = _pick_target(family["id"], 0)
+    edit_json = _fallback_edit_json(subtype, target)
+    sampler = FixedSampler(edit_json)
+    judged = []
+
+    def judge(source, instruction, produced):
+        judged.append((source, instruction, produced))
+        return {"verdict": "FAIL", "reason": "unlicensed change", "raw": "GAGAL unlicensed change"}
+
+    with BridgeClient(str(BRIDGE)) as bc:
+        accepted, rejected, review_queue = generate_edit(
+            sampler, bc, family, 1, "EDIT SYSTEM PROMPT TEXT", judge=judge,
+        )
+
+    assert accepted == []
+    assert review_queue == []
+    assert len(rejected) == 1
+    assert rejected[0]["provenance"]["reject_reason"] == "judge_rejected"
+    assert rejected[0]["payload"]["judge_verdict"]["verdict"] == "FAIL"
+    assert len(judged) == 1
+
+
+def test_generate_edit_fallback_judge_pass_accepts_and_samples_every_nth():
+    """judge-PASS -> accepted; every FALLBACK_JUDGE_SAMPLE_EVERY_N-th accepted
+    fallback example is ADDITIONALLY copied into review_queue."""
+    from tantular.finetune.gen_edit import _pick_target
+
+    subtype = FALLBACK_SUBTYPES[0]
+    n = FALLBACK_JUDGE_SAMPLE_EVERY_N + 1  # covers exactly one sampled item
+
+    def judge(source, instruction, produced):
+        return {"verdict": "PASS", "reason": "ok", "raw": "LULUS ok"}
+
+    # One fixed edit JSON reused for every candidate: `_pick_target` is
+    # deterministic per (family_id, i), but the fallback loop doesn't vary
+    # the source text's *word choice* across i in a way this test needs to
+    # track -- what matters here is that every candidate clears the
+    # validator and gets the same PASS verdict.
+    family = _family(subtype)
+
+    def sampler_for(i):
+        target = _pick_target(family["id"], i)
+        return _fallback_edit_json(subtype, target)
+
+    class PerCandidateSampler:
+        def __init__(self):
+            self.i = -1
+
+        def sample(self, messages):
+            self.i += 1
+            return sampler_for(self.i)
+
+    with BridgeClient(str(BRIDGE)) as bc:
+        accepted, rejected, review_queue = generate_edit(
+            PerCandidateSampler(), bc, family, n, "EDIT SYSTEM PROMPT TEXT", judge=judge,
+        )
+
+    assert rejected == []
+    assert len(accepted) == n
+    for ex in accepted:
+        assert ex["provenance"]["status"] == "accepted"
+        assert ex["provenance"]["reject_reason"] is None
+        assert ex["payload"]["judge_verdict"]["verdict"] == "PASS"
+
+    # Exactly one sampled item: the FALLBACK_JUDGE_SAMPLE_EVERY_N-th accepted.
+    assert len(review_queue) == 1
+    assert review_queue[0]["reason"] == "sampled_judge_pass"
+    assert review_queue[0]["judge_verdict"]["verdict"] == "PASS"
+
+
+def test_generate_edit_fallback_judge_pass_carries_judge_prompt_hash():
+    """The caller-supplied judge_prompt_hash (e.g. judge.JUDGE_PROMPT_HASH
+    for a real judge.TinkerEditJudge) lands in generation.judge_prompt_hash
+    for fallback-subtype accepted AND rejected examples, same as the
+    synthesizable path."""
+    from tantular.finetune.gen_edit import _pick_target
+
+    subtype = FALLBACK_SUBTYPES[0]
+    family = _family(subtype)
+    target = _pick_target(family["id"], 0)
+    edit_json = _fallback_edit_json(subtype, target)
+    sampler = FixedSampler(edit_json)
+
+    with BridgeClient(str(BRIDGE)) as bc:
+        accepted, rejected, review_queue = generate_edit(
+            sampler, bc, family, 1, "EDIT SYSTEM PROMPT TEXT",
+            judge=lambda s, i, p: {"verdict": "PASS", "reason": "ok", "raw": "LULUS ok"},
+            judge_prompt_hash="real-judge-prompt-hash",
+        )
+
+    assert len(accepted) == 1
+    assert accepted[0]["provenance"]["generation"]["judge_prompt_hash"] == "real-judge-prompt-hash"
+
+
+def test_judge_passed_reads_dict_and_string_verdicts():
+    assert _judge_passed({"verdict": "PASS"}) is True
+    assert _judge_passed({"verdict": "pass"}) is True
+    assert _judge_passed({"verdict": "FAIL"}) is False
+    assert _judge_passed("PASS") is True
+    assert _judge_passed("fail") is False
+    assert _judge_passed(None) is False
+    assert _judge_passed({}) is False
 
 
 def test_generate_edit_fallback_rejects_invalid_teacher_json():

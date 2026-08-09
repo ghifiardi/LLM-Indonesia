@@ -24,9 +24,22 @@ known clean target to reconstruct. "perjelas" (clarity rewrite), "elaborasi"
 (elaboration/expansion), and "ringkas_bagian" (condensation) do not -- there
 is no single deterministic "clean" version of a clarity rewrite. For those,
 `generate_edit` falls back to the validator (structural/semantic guards via
-the bridge) plus an injectable judge, and ALWAYS samples the result into a
-human-review queue -- never auto-accepted, per the spec's "known target OR
-validator+judge with human sampling" split.
+the bridge) plus an injectable judge, per the spec's "known target OR
+validator + independent judge, sampled into human review" split:
+
+    - `judge=None` (degraded mode -- no judge implementation wired): every
+      candidate that clears the validator is queued into `review_queue`,
+      never auto-accepted. This is the conservative fallback this module
+      shipped with before a judge existed.
+    - `judge` provided: the validator-cleared candidate is additionally
+      judged. Judge-FAIL -> `rejected` with reject_reason "judge_rejected".
+      Judge-PASS -> `accepted` (this IS the training target for that
+      candidate), and a deterministic sample of those accepted fallback
+      examples -- every `FALLBACK_JUDGE_SAMPLE_EVERY_N`th one -- is
+      additionally copied into `review_queue` for human audit. See
+      `_judge_passed` for how an arbitrary judge return value is read as
+      pass/fail, and `tantular/finetune/judge.py` (`TinkerEditJudge`) for the
+      real teacher-as-judge implementation.
 
 `ubah_istilah` per families.py is "terminology/name/number-preserving
 substitution" -- swapping a term while PRESERVING names/numbers, not a
@@ -75,8 +88,17 @@ SYNTHESIZABLE_SUBTYPES = {
 }
 
 # Edit subtypes with no synthesizable known target: validator + judge
-# fallback, always sampled into human review (see module docstring).
+# fallback (see module docstring).
 FALLBACK_SUBTYPES = ("perjelas", "elaborasi", "ringkas_bagian")
+
+# Deterministic human-review sampling rate for judge-PASS fallback examples
+# (see module docstring): every Nth accepted fallback example -- counted
+# per `generate_edit` call, 1-based, so the Nth/2Nth/3Nth/... accepted
+# fallback candidate is copied into `review_queue` -- is additionally sampled
+# into human review, on top of being accepted. Judgment call, no canonical
+# source; small enough to keep human review material flowing without
+# reviewing every judge-passed example.
+FALLBACK_JUDGE_SAMPLE_EVERY_N = 10
 
 _FALLBACK_INSTRUCTIONS = {
     "perjelas": "Perjelas kalimat berikut tanpa mengubah maknanya.",
@@ -404,6 +426,21 @@ def _run_resolve_gates(resolve):
     return None
 
 
+def _judge_passed(verdict):
+    """Read an arbitrary judge return value as pass/fail.
+
+    The canonical shape (what `judge.TinkerEditJudge` and `judge.
+    parse_verdict` return) is a dict with a "verdict" key set to "PASS" or
+    "FAIL". Test stubs are free to return that shape, or just a bare
+    "PASS"/"FAIL" (any case) string -- both are accepted here. Anything else
+    (unrecognized shape, or a "FAIL"/other value) is conservatively read as
+    fail: this gate must never accept on a judge return value it doesn't
+    understand.
+    """
+    value = verdict.get("verdict") if isinstance(verdict, dict) else verdict
+    return str(value or "").strip().upper() == "PASS"
+
+
 # ---------------------------------------------------------------------------
 # Acceptance: contract validity + reconstruction (via the bridge oracle) +
 # semantic guards. Never reimplements parse/resolve/apply -- always the real
@@ -535,27 +572,35 @@ def generate_edit(
     - `judge`: injectable judge callable `judge(source_text, instruction,
       produced_text) -> Any`, used ONLY for the no-synthesizable-target
       fallback subtypes (see FALLBACK_SUBTYPES). Never called in tests as a
-      live model -- deterministic stub only.
+      live model -- deterministic stub only. `None` (the default) means "no
+      judge implementation wired" -- the degraded queue-everything mode (see
+      module docstring); `_judge_passed` reads whatever a real `judge`
+      returns as pass/fail.
     - `judge_prompt_hash`: this module owns no judge PROMPT template (`judge`
       is a caller-supplied callable, not a module-owned prompt string), so
       the caller may pass the hash of whatever prompt template their `judge`
-      uses internally; recorded verbatim into `generation.judge_prompt_hash`
+      uses internally (e.g. `judge.JUDGE_PROMPT_HASH` for `judge.
+      TinkerEditJudge`); recorded verbatim into `generation.judge_prompt_hash`
       (defaults to None, matching the spec's "...|null").
     - `max_retries`: for synthesizable subtypes, how many teacher samples to
       try per candidate before discarding to `rejected` (retry-then-discard).
 
     Returns three lists:
-    - accepted: provenance-tracked examples (status="accepted"). Only ever
-      populated for SYNTHESIZABLE_SUBTYPES -- known-target reconstruction
-      verified via the bridge oracle.
+    - accepted: provenance-tracked examples (status="accepted"). Populated
+      for SYNTHESIZABLE_SUBTYPES (known-target reconstruction verified via
+      the bridge oracle), AND for FALLBACK_SUBTYPES candidates that pass the
+      validator and a provided `judge` (see module docstring) -- never for
+      FALLBACK_SUBTYPES when `judge` is None.
     - rejected: provenance-tracked examples (status="rejected") for
-      candidates that failed structural sanity, teacher JSON parsing, or (for
+      candidates that failed structural sanity, teacher JSON parsing, (for
       synthesizable subtypes) exhausted all retries without reconstructing
-      the known target.
-    - review_queue: plain dicts for FALLBACK_SUBTYPES candidates that passed
-      the validator (parse/resolve/guards) -- ALWAYS routed here, never
-      auto-accepted, per the spec's "no synthesizable target -> validator +
-      judge + human review sampling" rule.
+      the known target, or (for FALLBACK_SUBTYPES with a `judge` provided)
+      failed the judge (reject_reason "judge_rejected").
+    - review_queue: plain dicts for FALLBACK_SUBTYPES candidates -- either
+      every validator-cleared candidate (`judge=None`, degraded mode), or a
+      deterministic sample of judge-PASS accepted candidates
+      (`FALLBACK_JUDGE_SAMPLE_EVERY_N`th one, `judge` provided). Never
+      contains judge-FAIL candidates (those go straight to `rejected`).
     """
     subtype = _subtype_of_family(family)
     family_id = family["id"]
@@ -597,6 +642,7 @@ def generate_edit(
     accepted, rejected, review_queue = [], [], []
 
     if subtype in FALLBACK_SUBTYPES:
+        fallback_accepted_count = 0
         for i in range(n):
             target = _pick_target(family_id, i)
             source_text = target["text"]
@@ -642,18 +688,67 @@ def generate_edit(
                 continue
 
             produced_text = result["apply"]["text"]
-            verdict = judge(source_text, instruction, produced_text) if judge is not None else None
 
-            review_queue.append({
-                "family": family_id,
-                "subtype": subtype,
-                "reason": "no_synthesizable_target",
-                "source_text": source_text,
-                "instruction": instruction,
-                "edits": edits,
-                "produced_text": produced_text,
-                "judge_verdict": verdict,
-            })
+            if judge is None:
+                # Degraded mode: no judge implementation wired -- queue
+                # EVERY validator-cleared candidate for human review, never
+                # auto-accept (see module docstring).
+                review_queue.append({
+                    "family": family_id,
+                    "subtype": subtype,
+                    "reason": "no_synthesizable_target",
+                    "source_text": source_text,
+                    "instruction": instruction,
+                    "edits": edits,
+                    "produced_text": produced_text,
+                    "judge_verdict": None,
+                })
+                continue
+
+            verdict = judge(source_text, instruction, produced_text)
+
+            if not _judge_passed(verdict):
+                rejected.append(_example(
+                    messages,
+                    {
+                        "source_text": source_text, "instruction": instruction,
+                        "edits": edits, "produced_text": produced_text,
+                        "judge_verdict": verdict,
+                    },
+                    "rejected", "judge_rejected",
+                ))
+                continue
+
+            # Judge-PASS: this IS the training target for this candidate.
+            accepted.append(_example(
+                [
+                    {"role": "system", "content": edit_system_prompt},
+                    {"role": "user", "content": messages[1]["content"]},
+                    {"role": "assistant", "content": json.dumps({"edits": edits})},
+                ],
+                {
+                    "source_text": source_text, "instruction": instruction,
+                    "edits": edits, "produced_text": produced_text,
+                    "judge_verdict": verdict,
+                },
+                "accepted", None,
+            ))
+            fallback_accepted_count += 1
+
+            # Deterministic sample of judge-PASS accepted examples, ADDED to
+            # review_queue on top of being accepted (never a substitute for
+            # acceptance) -- every FALLBACK_JUDGE_SAMPLE_EVERY_N-th one.
+            if fallback_accepted_count % FALLBACK_JUDGE_SAMPLE_EVERY_N == 0:
+                review_queue.append({
+                    "family": family_id,
+                    "subtype": subtype,
+                    "reason": "sampled_judge_pass",
+                    "source_text": source_text,
+                    "instruction": instruction,
+                    "edits": edits,
+                    "produced_text": produced_text,
+                    "judge_verdict": verdict,
+                })
 
         return accepted, rejected, review_queue
 

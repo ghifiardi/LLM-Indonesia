@@ -140,13 +140,18 @@ MIN_ACCEPT_RATE = 0.05
 MAX_CANDIDATES_PER_CALL = {"router": 150, "edit": 40, "prose": 40}
 
 # Coverage-only generation for the 3 edit subtypes with no synthesizable
-# known target (gen_edit.FALLBACK_SUBTYPES): these NEVER auto-accept (100% of
-# their yield is review-queue or rejected), so they contribute nothing to the
-# exposure-mix/target-accepted balancing above. They are still generated in a
-# small, fixed, budget-bounded amount so the corpus's review queue has real
-# audit material for those subtypes (per the design spec's "known target OR
-# validator+judge with human sampling" split) -- judgment call, deliberately
-# small to avoid spending budget on candidates that can never be accepted.
+# known target (gen_edit.FALLBACK_SUBTYPES): with no judge wired (judge=None)
+# these never auto-accept (100% of their yield is review-queue or rejected),
+# so they contribute nothing to the exposure-mix/target-accepted balancing
+# above; with a real judge wired (see main()), a fraction do auto-accept
+# (judge-PASS) and DO flow into that balancing, same as any other accepted
+# example -- see `_generate_fallback_edit_coverage`. Either way they are
+# still generated in a small, fixed, budget-bounded amount, independent of
+# the exposure-mix target sizing, so the corpus's review queue has real audit
+# material for those subtypes (per the design spec's "known target OR
+# validator + independent judge, sampled into human review" split) --
+# judgment call, deliberately small to avoid overspending budget on a
+# fixed-size coverage pass that isn't driving the main exposure-mix target.
 FALLBACK_FAMILIES_PER_SUBTYPE = 2
 FALLBACK_N_PER_FAMILY = 5
 
@@ -482,6 +487,7 @@ def run_generate(
     teacher_sampler,
     cold_sampler=None,
     judge=None,
+    judge_prompt_hash=None,
     token_counter=None,
     seed=DEFAULT_SEED,
     target_accepted=DEFAULT_TARGET_ACCEPTED,
@@ -574,7 +580,12 @@ def run_generate(
             "bridge_protocol_version": bridge_protocol_version,
             "bridge_js_commit": bridge_js_commit,
             "synthesis_prompt_hash": EDIT_SYNTHESIS_PROMPT_HASH,
-            "judge_prompt_hash": None,  # no judge implementation exists -- see main()'s deviation note.
+            # Real hash when a judge is wired (e.g. `judge.JUDGE_PROMPT_HASH`
+            # for `judge.TinkerEditJudge`, threaded in by `main()`); None
+            # (matching the spec's "...|null") when `judge_prompt_hash` isn't
+            # supplied -- e.g. no judge wired, or a judge whose prompt hash
+            # isn't known here.
+            "judge_prompt_hash": judge_prompt_hash,
         }
 
     def _prose_generation_meta():
@@ -606,6 +617,7 @@ def run_generate(
         a, r, rq = generate_edit(
             metered_teacher, bridge, family, n, edit_system_prompt,
             judge=metered_judge,
+            judge_prompt_hash=judge_prompt_hash,
             bridge_protocol_version=bridge_protocol_version,
             bridge_js_commit=bridge_js_commit,
             production_prompt_content_hash=content_hashes.get("edit"),
@@ -685,7 +697,13 @@ def run_generate(
             for family in families:
                 a, r, rq = _call_edit(family, fallback_n_per_family)
                 _check_budget()
-                accepted.extend(a)  # always empty for FALLBACK_SUBTYPES, kept for symmetry/audit
+                # Empty when judge=None (degraded mode: every validator-
+                # cleared candidate is queued for review, never accepted).
+                # With a real judge wired (see main()), judge-PASS candidates
+                # land here too -- genuinely accepted training examples, so
+                # they flow into the same exposure-mix/dedup/split accounting
+                # as every other accepted example below, not held out of it.
+                accepted.extend(a)
                 rejected.extend(r)
                 review_queue.extend(rq)
 
@@ -999,6 +1017,7 @@ def main(argv=None):
     from tantular.finetune.gen_edit import TinkerEditTeacher
     from tantular.finetune.gen_prose import TinkerProseTeacher
     from tantular.finetune.gen_router import TinkerRouterTeacher
+    from tantular.finetune.judge import JUDGE_PROMPT_HASH, TinkerEditJudge
     from tantular.finetune.pilot import _MultiAxisTeacher
 
     bridge = BridgeClient(str(BRIDGE_PATH))
@@ -1022,11 +1041,9 @@ def main(argv=None):
         )
         cold_teacher = TinkerRouterTeacher()
 
-        # No judge implementation exists anywhere in this codebase for
-        # gen_edit's FALLBACK_SUBTYPES -- same documented deviation as
-        # pilot.py's main(); those candidates still reach the review queue
-        # with judge_verdict: null.
-        judge = None
+        # Teacher-as-judge for gen_edit's FALLBACK_SUBTYPES -- same
+        # tantular/finetune/judge.py wiring as pilot.py's main().
+        judge = TinkerEditJudge()
 
         token_counter = _tinker_tokenizer_token_counter()
         accept_rate_estimates = load_accept_rate_estimates(args.pilot_report)
@@ -1039,6 +1056,7 @@ def main(argv=None):
             teacher_sampler=teacher,
             cold_sampler=cold_teacher,
             judge=judge,
+            judge_prompt_hash=JUDGE_PROMPT_HASH,
             token_counter=token_counter,
             seed=args.seed,
             target_accepted=args.target_accepted,

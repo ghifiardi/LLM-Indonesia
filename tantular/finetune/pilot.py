@@ -401,6 +401,7 @@ def run_pilot(
     teacher_sampler,
     cold_sampler=None,
     judge=None,
+    judge_prompt_hash=None,
     token_counter=None,
     strata=None,
     seed=0,
@@ -440,6 +441,11 @@ def run_pilot(
       `cold_sampler` default) -- always metered separately.
     - `judge`: optional, forwarded (metered) to `generate_edit` for its
       FALLBACK_SUBTYPES review-queue judge calls.
+    - `judge_prompt_hash`: forwarded verbatim to `generate_edit` (recorded
+      into `generation.judge_prompt_hash` on every edit example) -- pass
+      `judge.JUDGE_PROMPT_HASH` when `judge` is a `judge.TinkerEditJudge` (or
+      wraps one); left None (matching the spec's "...|null") when `judge` is
+      None or some other judge whose prompt hash isn't known here.
     - `token_counter`: callable(text) -> int; defaults to
       `default_token_counter` (a rough approximation -- see its docstring).
     - `target_accepted` / `amortized_export_spike_usd` /
@@ -516,6 +522,7 @@ def run_pilot(
             accepted, rejected, review_queue = generate_edit(
                 metered_teacher, bridge, family, n, edit_system_prompt,
                 judge=metered_judge,
+                judge_prompt_hash=judge_prompt_hash,
                 bridge_protocol_version=bridge_protocol_version,
                 bridge_js_commit=bridge_js_commit,
                 production_prompt_content_hash=(production_prompt_content_hashes or {}).get("edit"),
@@ -678,6 +685,7 @@ def main(argv=None):
     from tantular.finetune.gen_edit import TinkerEditTeacher
     from tantular.finetune.gen_prose import TinkerProseTeacher
     from tantular.finetune.gen_router import TinkerRouterTeacher
+    from tantular.finetune.judge import JUDGE_PROMPT_HASH, TinkerEditJudge
 
     bridge = BridgeClient(str(BRIDGE_PATH))
     try:
@@ -703,14 +711,11 @@ def main(argv=None):
         # of `teacher`'s current axis.
         cold_teacher = TinkerRouterTeacher()
 
-        # No judge implementation exists anywhere in this codebase for
-        # gen_edit's FALLBACK_SUBTYPES (perjelas/elaborasi/ringkas_bagian) --
-        # `judge` stays None here, matching generate_edit's documented
-        # optional-judge contract (those candidates still reach the review
-        # queue with `judge_verdict: null`). Deviation noted in the task
-        # report; a real judge can be wired in later without touching this
-        # module's interface.
-        judge = None
+        # Teacher-as-judge for gen_edit's FALLBACK_SUBTYPES
+        # (perjelas/elaborasi/ringkas_bagian): see tantular/finetune/judge.py.
+        # `run_pilot`/`generate_edit` meter it (via `MeteredJudge`) exactly
+        # like the synthesis/cold-classify teacher samplers.
+        judge = TinkerEditJudge()
 
         token_counter = _tinker_tokenizer_token_counter()
 
@@ -722,6 +727,7 @@ def main(argv=None):
             teacher_sampler=teacher,
             cold_sampler=cold_teacher,
             judge=judge,
+            judge_prompt_hash=JUDGE_PROMPT_HASH,
             token_counter=token_counter,
             bridge_protocol_version=bridge_protocol_version,
             bridge_js_commit=production_prompt_git_sha,

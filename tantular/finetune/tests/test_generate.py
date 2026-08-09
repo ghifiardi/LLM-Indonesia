@@ -457,3 +457,71 @@ def test_main_verify_fails_on_empty_dir(tmp_path, capsys):
     err = capsys.readouterr().err
     assert code == 1
     assert "VERIFY FAILED" in err
+
+
+# --- run_generate: judge wiring for gen_edit.FALLBACK_SUBTYPES ---------------
+
+class FallbackAwareSampler(CombinedSampler):
+    """Same as CombinedSampler, but also answers FALLBACK_SUBTYPES edit
+    instructions (perjelas/elaborasi/ringkas_bagian) -- which match none of
+    CombinedSampler's synthesizable-subtype regexes, so it falls back to a
+    deliberately-invalid `{"edits": []}` -- with a trivial validator-clearing
+    edit built straight from the doc text, so this test can exercise the
+    judge-PASS path all the way through to a written artifact.
+    """
+
+    def _edit_response(self, content):
+        base = super()._edit_response(content)
+        if base != '{"edits": []}':
+            return base
+        doc_text = content.split("Dokumen:\n", 1)[1].split("\n\nInstruksi:")[0]
+        words = doc_text.split()
+        word = (words[1] if len(words) > 1 else words[0]).rstrip(".,")
+        return json.dumps({"edits": [{"find": word, "replace": f"{word} secara rinci", "occurrence": 1}]})
+
+
+def test_run_generate_threads_judge_prompt_hash_into_fallback_accepted_examples(tmp_path):
+    """judge-PASS fallback-subtype candidates are genuinely accepted (see
+    gen_edit.generate_edit's spec-aligned fallback flow), and the real
+    judge's prompt hash -- as supplied by the caller, e.g.
+    judge.JUDGE_PROMPT_HASH for judge.TinkerEditJudge -- lands in their
+    provenance, not None."""
+    teacher = FallbackAwareSampler()
+
+    def judge(source, instruction, produced):
+        return {"verdict": "PASS", "reason": "ok", "raw": "LULUS ok"}
+
+    with BridgeClient(str(BRIDGE)) as bc:
+        manifest = run_generate(
+            bc,
+            "ROUTER SYSTEM PROMPT",
+            "EDIT SYSTEM PROMPT",
+            PROSE_SYSTEM_PROMPTS,
+            teacher_sampler=teacher,
+            judge=judge,
+            judge_prompt_hash="real-judge-prompt-hash",
+            token_counter=lambda t: max(1, len(str(t).split())),
+            data_dir=tmp_path,
+            target_accepted=6,
+            avg_tokens_by_axis={"router": 4, "edit": 15, "prose": 20},
+            max_topup_rounds=1,
+        )
+
+    assert manifest["counts"]["accepted_total"] > 0
+
+    fallback_accepted = []
+    for name in ("train.jsonl", "eval.jsonl", "challenge.jsonl"):
+        for line in (tmp_path / name).read_text().splitlines():
+            if not line:
+                continue
+            ex = json.loads(line)
+            # Fallback-origin accepted examples carry "produced_text" in
+            # their payload (see generate_edit's fallback accept branch);
+            # synthesizable-subtype accepted examples carry
+            # "corruption_category" instead -- this distinguishes them.
+            if ex["task"] == "edit" and "produced_text" in ex["payload"]:
+                fallback_accepted.append(ex)
+
+    assert fallback_accepted, "expected at least one judge-PASS fallback example to be accepted"
+    for ex in fallback_accepted:
+        assert ex["provenance"]["generation"]["judge_prompt_hash"] == "real-judge-prompt-hash"
