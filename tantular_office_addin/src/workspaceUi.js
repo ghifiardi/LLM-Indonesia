@@ -40,7 +40,7 @@ function formatTime(isoString) {
   return `${hh}:${mm}`;
 }
 
-export function mountWorkspace({ host, sourceTextEl, statusEl, doc = document }) {
+export function mountWorkspace({ host, sourceTextEl, statusEl, doc = document, onContext }) {
   const sendBtn = doc.querySelector("#workspace-send");
   const bannerEl = doc.querySelector("#workspace-banner");
   const inboxListEl = doc.querySelector("#workspace-inbox-list");
@@ -235,6 +235,7 @@ export function mountWorkspace({ host, sourceTextEl, statusEl, doc = document })
       items = Array.isArray(body.items) ? body.items : [];
       updateSendButtonState();
       renderAll();
+      onContext?.(body.context);
     },
     onError: () => {
       lastOk = false;

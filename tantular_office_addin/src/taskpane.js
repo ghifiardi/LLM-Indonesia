@@ -39,6 +39,7 @@ import { buildDocumentDocxBase64 } from "./document/docxBuilder.js";
 import { planWorkbook } from "./workbook/workbookPlanner.js";
 import { buildWorkbookXlsxBase64 } from "./workbook/xlsxBuilder.js";
 import { hostUiConfig } from "./hostUi.js";
+import { putContext, shouldAdoptServerContext } from "./workspaceClient.js";
 
 const DECK_STUDIO_BUILD = "0.10.3-fullslide-source";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
@@ -54,7 +55,8 @@ const state = {
   documentPreview: "",
   refineSpec: null,
   documentSpec: null,
-  workbookSpec: null
+  workbookSpec: null,
+  lastContextUpdatedAt: null
 };
 
 const els = {
@@ -190,10 +192,24 @@ function mountWorkspaceUi() {
       host: state.host,
       sourceTextEl: els.sourceText,
       statusEl: els.selectionMeta,
-      doc: document
+      doc: document,
+      onContext: adoptServerContext
     });
     globalThis.window?.addEventListener?.("unload", () => workspace.stop?.());
   });
+}
+
+// Adopts the Companion's shared project instructions when the server copy
+// is newer than the one we last applied — ordering is decided purely by
+// shouldAdoptServerContext's string comparison of updated_at, never by
+// comparing local/server clocks.
+function adoptServerContext(context) {
+  if (!shouldAdoptServerContext(context, state.lastContextUpdatedAt)) return;
+  const instructions = context?.instructions || "";
+  els.deckProjectInstructions.value = instructions;
+  localStorage.setItem(PROJECT_INSTRUCTIONS_KEY, instructions);
+  state.lastContextUpdatedAt = context.updated_at;
+  setDeckStatus(`Instruksi bersama · diperbarui dari ${context.updated_by || "?"}`, "");
 }
 
 function bindStaticEvents() {
@@ -370,9 +386,22 @@ function hydrateProjectInstructions() {
   els.deckProjectInstructions.value = localStorage.getItem(PROJECT_INSTRUCTIONS_KEY) || "";
 }
 
-function saveProjectInstructions() {
-  localStorage.setItem(PROJECT_INSTRUCTIONS_KEY, els.deckProjectInstructions.value || "");
+async function saveProjectInstructions() {
+  const instructions = els.deckProjectInstructions.value || "";
+  localStorage.setItem(PROJECT_INSTRUCTIONS_KEY, instructions);
   setDeckStatus("Instruksi project disimpan.", "ok");
+  try {
+    const { status, body } = await putContext({ instructions, source_host: state.host });
+    if (status < 200 || status >= 300) {
+      setDeckStatus("tersimpan lokal; Companion tidak terjangkau", "");
+      return;
+    }
+    if (body?.context?.updated_at) {
+      state.lastContextUpdatedAt = body.context.updated_at;
+    }
+  } catch {
+    setDeckStatus("tersimpan lokal; Companion tidak terjangkau", "");
+  }
 }
 
 function clearProjectInstructions() {
