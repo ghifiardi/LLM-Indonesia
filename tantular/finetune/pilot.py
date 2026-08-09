@@ -549,6 +549,20 @@ def run_pilot(
         total_rejected += n_rejected
         total_review += n_review
 
+        # Reject-reason histogram (this task): tallies
+        # example["provenance"]["reject_reason"] across this stratum's
+        # `rejected` list -- every generator (generate_router/generate_edit/
+        # generate_prose) already stamps a reject_reason string via
+        # provenance.make_example, so this is a pure aggregation, no new
+        # generator-side plumbing needed. A rejected example with a missing/
+        # None reject_reason (shouldn't happen, but not asserted here) is
+        # bucketed under the literal string "unknown" rather than silently
+        # dropped or crashing on a dict key of None.
+        reject_reasons = {}
+        for ex in rejected:
+            reason = ex.get("provenance", {}).get("reject_reason") or "unknown"
+            reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+
         per_stratum.append({
             "stratum": stratum,
             "target_n": n,
@@ -557,6 +571,7 @@ def run_pilot(
             "review_queue": n_review,
             "accept_rate": accept_rate,
             "split": family["split"],
+            "reject_reasons": reject_reasons,
         })
 
     spend = ledger.cost_usd

@@ -381,6 +381,80 @@ def test_run_pilot_caveats_notes_judge_none_by_default():
     assert any("judge" in c and "judge=None" in c for c in report["caveats"])
 
 
+# --- run_pilot: per-stratum reject_reason histogram (this task) ------------
+
+def test_run_pilot_strata_carry_reject_reason_histogram():
+    # Teacher output that fails prose's bullet-format check for every
+    # candidate ("prose:ringkas" requires every non-empty line to start with
+    # "- ") -> every candidate in this stratum rejects with the same
+    # deterministic reason, so the histogram is exactly {"format_invalid": n}.
+    teacher = FixedSampler("bukan bullet markdown sama sekali")
+    cold = FixedSampler("UMUM")
+    strata = [("prose:ringkas", 3)]
+
+    report = run_pilot(
+        None,
+        "ROUTER SYSTEM PROMPT",
+        "EDIT SYSTEM PROMPT",
+        {"ringkas": "RINGKAS SYSTEM PROMPT"},
+        teacher_sampler=teacher,
+        cold_sampler=cold,
+        strata=strata,
+        report_path=False,
+    )
+    stratum = report["strata"][0]
+    assert stratum["stratum"] == "prose:ringkas"
+    assert stratum["rejected"] == 3
+    assert stratum["reject_reasons"] == {"format_invalid": 3}
+
+
+def test_run_pilot_reject_reason_histogram_mixed_reasons():
+    # First candidate too short (length_invalid), second/third valid bullets
+    # but near-identical to each other (one survives, one rejects as
+    # near_duplicate) -- the histogram must reflect BOTH distinct reasons
+    # observed in the same stratum, not just the first one seen.
+    teacher = FixedSampler([
+        "- x",  # too short -> length_invalid
+        "- poin pertama tentang efisiensi biaya operasional",
+        "- poin pertama tentang efisiensi biaya operasional!",  # near-dup of prior
+    ])
+    cold = FixedSampler("UMUM")
+    strata = [("prose:ringkas", 3)]
+
+    report = run_pilot(
+        None,
+        "ROUTER SYSTEM PROMPT",
+        "EDIT SYSTEM PROMPT",
+        {"ringkas": "RINGKAS SYSTEM PROMPT"},
+        teacher_sampler=teacher,
+        cold_sampler=cold,
+        strata=strata,
+        report_path=False,
+    )
+    stratum = report["strata"][0]
+    assert stratum["accepted"] == 1
+    assert stratum["rejected"] == 2
+    assert stratum["reject_reasons"] == {"length_invalid": 1, "near_duplicate": 1}
+
+
+def test_run_pilot_reject_reasons_empty_dict_when_nothing_rejected():
+    teacher = FixedSampler("Pesan umum yang tidak ambigu sama sekali di sini.")
+    cold = FixedSampler("UMUM")
+    strata = [("router:UMUM", 1)]
+
+    report = run_pilot(
+        None,
+        "ROUTER SYSTEM PROMPT",
+        "EDIT SYSTEM PROMPT",
+        {},
+        teacher_sampler=teacher,
+        cold_sampler=cold,
+        strata=strata,
+        report_path=False,
+    )
+    assert report["strata"][0]["reject_reasons"] == {}
+
+
 def test_run_pilot_caveats_empty_when_judge_provided():
     teacher = FixedSampler("Pesan umum yang tidak ambigu sama sekali di sini.")
     cold = FixedSampler("UMUM")

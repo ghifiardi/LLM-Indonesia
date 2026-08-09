@@ -274,6 +274,41 @@ def test_generate_prose_rejects_near_duplicates_within_batch():
     ], threshold=0.8)
 
 
+# --- Fix B: widened seed banks for near-deterministic pipelines ------------
+# terjemah/ringkas/tanyaDokumen are near-deterministic tasks (translate/
+# summarize/answer over a FIXED source text) -- with only a 2-seed bank, a
+# 10-candidate pilot batch collided on the same seed repeatedly, and the
+# teacher's near-identical repeat-seed output then failed `near_duplicates`
+# (confirmed live: 8/10, 8/10, 6/10 rejects for these three pipelines were
+# ALL "near_duplicate", not commentary/format/length -- see
+# .superpowers/sdd/fix-b-probe.md). Pinning the widened bank size here so a
+# future edit can't silently shrink it back to a collision-prone 2 seeds.
+
+import tantular.finetune.gen_prose as gen_prose_mod
+
+
+def test_seed_banks_widened_for_near_deterministic_pipelines():
+    for name in ("terjemah", "ringkas", "tanyaDokumen"):
+        assert len(gen_prose_mod._SEEDS[name]) >= 6, (
+            f"{name}: seed bank too small -- near-deterministic pipelines "
+            "need enough distinct seeds to keep same-seed collisions (and "
+            "the resulting near_duplicate rejects) rare in a 10-candidate "
+            "batch"
+        )
+
+
+def test_pick_seed_distributes_across_wider_terjemah_bank():
+    # With 6 seeds and 10 draws, at least half the picks across a range of
+    # family ids/indices must land on more than 2 distinct seeds (loosely
+    # pins "wider distribution", without over-fitting to the exact hash
+    # distribution).
+    seen = {
+        gen_prose_mod._pick_seed("terjemah", "prose:terjemah::probe", i)
+        for i in range(10)
+    }
+    assert len(seen) > 2
+
+
 def test_generate_prose_spot_check_every_n_accepted():
     # Six distinct valid completions -- distinct so none is flagged as a
     # near-duplicate of another within the batch, isolating the spot-check

@@ -261,6 +261,29 @@ _SEEDS = {
          "pemasaran akan menyiapkan materi promosi, tim produksi memastikan "
          "stok cukup, dan tim penjualan menyiapkan target cabang.",
          "Buat ringkasan poin-poin rapat ini."),
+        # Fix B (live probe, 2026-08): "ringkas" is a near-deterministic
+        # task -- summarizing the SAME fixed source text yields near-
+        # identical bullet points draw after draw, so `near_duplicates`
+        # (correctly) rejects repeat-seed collisions within a batch. A
+        # 2-seed bank meant a 10-candidate pilot batch collided on the same
+        # seed ~5x each; widened to 6 distinct source texts to cut expected
+        # same-seed repeats within a 10-candidate batch (see fix-b-probe.md).
+        ("Tim IT menyelesaikan migrasi server ke cloud pada akhir bulan lalu. "
+         "Downtime tercatat kurang dari dua jam sepanjang proses. Biaya "
+         "infrastruktur diperkirakan turun 20 persen mulai kuartal depan.",
+         "Ringkas laporan migrasi ini menjadi poin-poin utama."),
+        ("Survei kepuasan pelanggan menunjukkan skor rata-rata 4.2 dari 5. "
+         "Keluhan terbanyak terkait waktu respons layanan pelanggan. Tim "
+         "layanan berencana menambah staf shift malam mulai bulan depan.",
+         "Buat ringkasan hasil survei ini."),
+        ("Anggaran pelatihan karyawan naik 15 persen tahun ini. Fokus "
+         "pelatihan bergeser ke keterampilan digital dan analitik data. "
+         "Seluruh divisi wajib menyelesaikan minimal dua modul per kuartal.",
+         "Ringkas kebijakan anggaran pelatihan ini."),
+        ("Cabang baru dibuka di tiga kota pada semester ini. Target "
+         "penjualan cabang baru ditetapkan 30 persen di bawah cabang lama "
+         "pada tahun pertama. Evaluasi kinerja dilakukan setiap triwulan.",
+         "Buat ringkasan rencana ekspansi cabang ini."),
     ),
     "ubahNada": (
         ("Woy, laporan lu telat lagi nih, buruan kelarin ya.",
@@ -273,6 +296,23 @@ _SEEDS = {
         ("Pendapatan perusahaan naik 12 persen pada kuartal kedua tahun ini.",
          "Terjemahkan ke Bahasa Inggris."),
         ("Company revenue increased by 12 percent in the second quarter.",
+         "Terjemahkan ke Bahasa Indonesia."),
+        # Fix B (live probe, 2026-08): "terjemah" is a near-deterministic
+        # task -- translating the SAME fixed source text yields near-
+        # identical output draw after draw, so `near_duplicates` (correctly)
+        # rejects repeat-seed collisions within a batch, not any commentary-
+        # wrapper false positive (the live probe found zero
+        # commentary/format rejects for terjemah -- all 8/10 rejects were
+        # near_duplicate). A 2-seed bank meant a 10-candidate pilot batch
+        # collided on the same seed ~5x each; widened to 6 distinct source
+        # texts to cut expected same-seed repeats (see fix-b-probe.md).
+        ("Tim proyek menyelesaikan implementasi sistem baru tepat waktu.",
+         "Terjemahkan ke Bahasa Inggris."),
+        ("Customer satisfaction improved significantly after the new policy.",
+         "Terjemahkan ke Bahasa Indonesia."),
+        ("Laporan tahunan akan dipresentasikan kepada dewan direksi minggu depan.",
+         "Terjemahkan ke Bahasa Inggris."),
+        ("The warehouse relocation project is expected to finish next month.",
          "Terjemahkan ke Bahasa Indonesia."),
     ),
     "cekAman": (
@@ -295,6 +335,28 @@ _SEEDS = {
         ("Prosedur reimbursement: karyawan mengajukan bukti pengeluaran "
          "dalam 14 hari kerja sejak transaksi, disetujui oleh atasan langsung.",
          "Berapa lama batas waktu pengajuan reimbursement?"),
+        # Fix B (live probe, 2026-08): "tanyaDokumen" is a near-deterministic
+        # task -- answering the SAME fixed question over the SAME fixed
+        # document yields near-identical output draw after draw, so
+        # `near_duplicates` (correctly) rejects repeat-seed collisions
+        # within a batch, not a length-cap hit (the live probe found zero
+        # length_invalid rejects -- all 6/10 rejects were near_duplicate). A
+        # 2-seed bank meant a 10-candidate pilot batch collided on the same
+        # seed ~5x each; widened to 6 distinct context+question pairs to cut
+        # expected same-seed repeats (see fix-b-probe.md).
+        ("Kebijakan lembur: lembur di atas 2 jam per hari memerlukan "
+         "persetujuan tertulis atasan dan dibayar 1.5x tarif per jam normal.",
+         "Berapa kali lipat tarif lembur di atas 2 jam per hari?"),
+        ("Prosedur onboarding karyawan baru: orientasi berlangsung 3 hari, "
+         "diikuti masa percobaan 3 bulan dengan evaluasi mingguan oleh atasan.",
+         "Berapa lama masa percobaan karyawan baru?"),
+        ("Kebijakan kerja jarak jauh: karyawan boleh bekerja dari rumah "
+         "maksimal 2 hari per minggu dengan persetujuan atasan langsung.",
+         "Berapa hari maksimal kerja jarak jauh per minggu?"),
+        ("Prosedur klaim asuransi kesehatan: karyawan mengajukan klaim "
+         "dalam 30 hari sejak perawatan, dilampiri kuitansi asli dan surat "
+         "dokter.",
+         "Berapa lama batas waktu pengajuan klaim asuransi kesehatan?"),
     ),
 }
 
