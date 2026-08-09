@@ -172,6 +172,88 @@ def test_apply_failed_rejected():
         assert not ok and reason == "apply_failed"
 
 
+# --- _corrupt_spelling: avoids capitalized/sentence-initial typo targets ----
+
+def test_corrupt_spelling_avoids_capitalized_tokens():
+    # Only the two early tokens in this sentence are capitalized (both are
+    # sentence-initial-ish proper nouns); every other eligible token is
+    # lowercase. Before the fix, `_corrupt_spelling` could pick a capitalized
+    # word (e.g. "Jakarta") as its typo target, which later trips
+    # `_guard_name_number_altered`'s capitalized-word heuristic and
+    # false-positive-rejects the teacher's correct fix. After the fix, the
+    # corruption must always land on a lowercase, mid-sentence token.
+    from tantular.finetune.gen_edit import _corrupt_spelling, _rng_for
+
+    target = {
+        "text": "Jakarta Indonesia adalah ibukota negara paling ramai sekali.",
+        "number": None, "name": "Jakarta",
+    }
+    saw_a_corruption = False
+    for i in range(20):
+        corruption = _corrupt_spelling(target, _rng_for("edit:koreksi::0000", i))
+        if corruption is None:
+            continue
+        saw_a_corruption = True
+        corrupted_text, _instruction = corruption
+        clean_words = target["text"].split()
+        corrupt_words = corrupted_text.split()
+        diffs = [(w, c) for w, c in zip(clean_words, corrupt_words) if w != c]
+        assert len(diffs) == 1
+        clean_word, _typo_word = diffs[0]
+        # The corrupted word, as it appears in the ORIGINAL (clean) text,
+        # must be lowercase -- never "Jakarta" or "Indonesia".
+        assert clean_word[:1].islower(), clean_word
+        assert clean_word not in ("Jakarta", "Indonesia")
+    assert saw_a_corruption
+
+
+def test_generate_edit_koreksi_no_name_number_false_reject_on_capitalized_target():
+    # End-to-end acceptance: with a target whose earliest tokens are
+    # sentence-initial capitals, the koreksi generation path must still
+    # accept a correct teacher fix -- it must NOT false-positive-reject via
+    # name_number_altered just because capitalized words appear early in the
+    # sentence.
+    import tantular.finetune.gen_edit as gen_edit_mod
+
+    custom_target = {
+        "text": "Jakarta Indonesia adalah ibukota negara paling ramai sekali.",
+        "number": None, "name": "Jakarta",
+    }
+    family = _family("koreksi")
+
+    # Discover exactly what corruption i=0 produces for this target, so the
+    # stub teacher can emit an edit that reconstructs the known clean target.
+    corrupted_text, _instruction = gen_edit_mod._corrupt_spelling(
+        custom_target, gen_edit_mod._rng_for(family["id"], 0)
+    )
+    clean_words = custom_target["text"].split()
+    corrupt_words = corrupted_text.split()
+    diffs = [(w, c) for w, c in zip(clean_words, corrupt_words) if w != c]
+    clean_word, typo_word = diffs[0]
+    assert clean_word[:1].islower()
+
+    edit_json = f'{{"edits":[{{"find":"{typo_word}","replace":"{clean_word}","occurrence":1}}]}}'
+    sampler = FixedSampler(edit_json)
+
+    original_pick_target = gen_edit_mod._pick_target
+    gen_edit_mod._pick_target = lambda family_id, i, _t=custom_target: _t
+    try:
+        with BridgeClient(str(BRIDGE)) as bc:
+            accepted, rejected, review_queue = generate_edit(
+                sampler, bc, family, 1, "EDIT SYSTEM PROMPT TEXT",
+            )
+    finally:
+        gen_edit_mod._pick_target = original_pick_target
+
+    assert review_queue == []
+    assert not any(
+        r["provenance"]["reject_reason"] == "name_number_altered" for r in rejected
+    ), rejected
+    assert rejected == []
+    assert len(accepted) == 1
+    assert accepted[0]["payload"]["target_text"] == custom_target["text"]
+
+
 # --- generate_edit: synthesizable path (known-target reconstruction) --------
 
 def test_generate_edit_accepts_koreksi_when_teacher_reconstructs_target():

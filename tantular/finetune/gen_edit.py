@@ -132,8 +132,20 @@ _SPELLING_INSTRUCTION_TEMPLATE = (
 
 
 def _corrupt_spelling(target, rng):
+    """Pick a typo target among lowercase, mid-sentence words only. Mirrors
+    `_find_term_in_text`'s lowercase-only discipline: any capitalized word
+    (sentence-initial or a proper name/title elsewhere in the sentence) is
+    excluded from the candidate pool. Without this, a sentence-initial
+    capitalized word (e.g. "Budi ...") could be chosen as the typo target;
+    `_guard_name_number_altered`'s `\\b[A-Z][a-z]+\\b` heuristic then sees the
+    capitalized find/replace pair differ (typo vs. corrected spelling isn't
+    generally capitalization-preserving under a two-char swap at index 1) and
+    false-positive-rejects the teacher's correct fix as an unlicensed "name"
+    change. Restricting to lowercase words sidesteps that guard entirely, the
+    same way `_find_term_in_text` sidesteps it for `_corrupt_terminology`.
+    """
     words = re.findall(r"[A-Za-z]+", target["text"])
-    candidates = [w for w in words if len(w) >= 5]
+    candidates = [w for w in words if len(w) >= 5 and w[:1].islower()]
     if not candidates:
         return None
     word = rng.choice(candidates)
