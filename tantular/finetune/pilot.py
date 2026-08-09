@@ -30,6 +30,7 @@ import pathlib
 import sys
 
 from tantular.finetune.families import (
+    DEFAULT_INSTANCES_PER_KIND,
     EDIT_SUBTYPES,
     PROSE_PIPELINES,
     ROUTER_INTENTS,
@@ -334,17 +335,60 @@ class MeteredJudge:
 def _pilot_families(seed):
     """One family per stratum kind (document families aren't part of the
     pilot's router/edit/prose strata, but `enumerate_families` always
-    produces them too -- harmless, just unused here). `instances_per_kind=1`
-    keeps this to exactly one family instance per kind, matching the pilot's
-    "one representative family per stratum" design; `assign_splits` still
-    resolves each to a valid split (train/eval/challenge), which is all
-    `generate_router`/`generate_edit`/`generate_prose` require.
+    produces them too -- harmless, just unused here) -- and, critically,
+    ONE ASSIGNED TO THE "train" SPLIT.
+
+    The pilot must never generate against a family that `assign_splits`
+    assigned to "eval" or "challenge": "eval" is the held-out yield/accuracy
+    check and "challenge" is the frozen release-set pool, and pilot
+    generation calls the same teacher/bridge machinery the full run does --
+    letting a pilot family leak into either would mean the pilot itself
+    "trains on" (in the loose sense of "touches") material that must stay
+    unseen until eval/release time.
+
+    Uses `enumerate_families()` at its documented default
+    (`DEFAULT_INSTANCES_PER_KIND` instances per kind, not `instances_per_kind
+    =1`) specifically because `assign_splits`'s coverage guard only has
+    something to work with -- a donor split with >1 instance -- when a kind
+    has enough instances; at `instances_per_kind=1` there is nothing to
+    guard, and a stratum's lone instance can land in "eval" or "challenge"
+    with no recourse. At the default, the guard *guarantees* every stratum
+    (kind) has at least one instance in every split (see
+    `families.assign_splits` and
+    `tests/test_families.py::test_every_stratum_appears_in_every_split`), so
+    a train instance is always available.
+
+    Selection is deterministic: for each kind, the family instances are
+    sorted by id and the FIRST one assigned to "train" is picked -- same
+    seed, same families list, same pick, every time.
+
+    `assignments` (from `assign_splits(families, seed)`) is threaded through
+    explicitly and used directly here -- this function never reads
+    `families.split_of`'s module-level assignment cache, so the split
+    resolved for each picked family is always the one computed for this
+    exact `families`/`seed` pair, never a stale cross-call cache.
     """
-    families = enumerate_families(instances_per_kind=1)
+    families = enumerate_families()
     assignments = assign_splits(families, seed)
+
     by_kind = {}
-    for fam in families:
-        by_kind[fam["kind"]] = {**fam, "split": assignments[fam["id"]]}
+    for fam in sorted(families, key=lambda f: f["id"]):
+        kind = fam["kind"]
+        if kind in by_kind:
+            continue
+        if assignments[fam["id"]] == "train":
+            by_kind[kind] = {**fam, "split": assignments[fam["id"]]}
+
+    missing = sorted({fam["kind"] for fam in families} - set(by_kind))
+    if missing:
+        raise RuntimeError(
+            "_pilot_families: no train-split family instance found for "
+            f"stratum kind(s) {missing!r} at seed={seed} with "
+            f"enumerate_families()'s default {DEFAULT_INSTANCES_PER_KIND} "
+            "instances/kind -- assign_splits's coverage guard should "
+            "guarantee this; investigate before proceeding (do not silently "
+            "fall back to a non-train family)."
+        )
     return by_kind
 
 
@@ -428,6 +472,24 @@ def run_pilot(
 
     families_by_kind = _pilot_families(seed)
 
+    # Defense in depth: `_pilot_families` already guarantees every selected
+    # family is train-split, but re-check here too -- controller
+    # adjudication (task 10 review) was explicit that the pilot must NEVER
+    # generate against an eval/challenge family, so this stays a hard
+    # failure, not a warning, even if `_pilot_families`'s own guarantee is
+    # ever weakened by a future edit.
+    non_train = {
+        stratum: fam["split"]
+        for stratum, fam in families_by_kind.items()
+        if fam["split"] != "train"
+    }
+    if non_train:
+        raise RuntimeError(
+            f"run_pilot: refusing to generate -- non-train-split family "
+            f"selected for stratum(s) {non_train!r} (seed={seed}); the "
+            "pilot must only ever touch train-split families."
+        )
+
     per_stratum = []
     total_accepted = 0
     total_rejected = 0
@@ -487,6 +549,7 @@ def run_pilot(
             "rejected": n_rejected,
             "review_queue": n_review,
             "accept_rate": accept_rate,
+            "split": family["split"],
         })
 
     spend = ledger.cost_usd
@@ -497,6 +560,16 @@ def run_pilot(
         training_eval_usd_estimate=training_eval_usd_estimate,
     )
     over_budget = projection["over_budget"]
+
+    # Top-level caveats note: artifact-only readers of pilot_report.json (no
+    # access to the caller's `judge=None` argument) need this surfaced in
+    # the report itself -- e.g. it explains why `spend`/`cost_per_accepted_usd`
+    # never include any judge-call cost.
+    caveats = []
+    if judge is None:
+        caveats.append(
+            "judge cost is $0 in this run: no judge implementation wired (judge=None)"
+        )
 
     report = {
         "seed": seed,
@@ -511,6 +584,7 @@ def run_pilot(
         "cost_per_accepted_usd": cpa,
         "projection": projection,
         "over_budget": over_budget,
+        "caveats": caveats,
     }
 
     if over_budget:
