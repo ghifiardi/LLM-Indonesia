@@ -37,7 +37,7 @@ export function createWorkspaceStore({ filePath }) {
       if (state.items.length > MAX_ITEMS) state.items.shift();
       state.rev += 1;
       persist();
-      return { ok: true, item };
+      return { ok: true, item: structuredClone(item) };
     },
     deleteItem(id) {
       const before = state.items.length;

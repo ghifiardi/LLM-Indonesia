@@ -75,3 +75,40 @@ test("persists atomically and recovers from a corrupt file", () => {
   assert.equal(s3.snapshot().items.length, 0);
   assert.ok(fs.readdirSync(dir).some((f) => f.startsWith("workspace.json.corrupt-")));
 });
+
+test("addItem returns clone; mutating returned item does not affect internal state", () => {
+  const { store } = tmpStore();
+  const r = store.addItem(ITEM);
+  assert.equal(r.ok, true);
+  const returnedItem = r.item;
+  returnedItem.label = "MUTATED";
+  const snapshot = store.snapshot();
+  assert.equal(snapshot.items[0].label, "Bab 2");
+  assert.notEqual(snapshot.items[0].label, "MUTATED");
+});
+
+test("RESTART preserves rev, items, and context", () => {
+  const { dir } = tmpStore();
+  const fp = path.join(dir, "workspace.json");
+  const s1 = createWorkspaceStore({ filePath: fp });
+  s1.addItem({ ...ITEM, label: "L1" });
+  s1.addItem({ ...ITEM, label: "L2" });
+  const contextResp = s1.setContext({ instructions: "Gaya formal.", source_host: "Word" });
+  const before = {
+    rev: s1.rev,
+    itemsLength: s1.snapshot().items.length,
+    contextInstructions: s1.snapshot().context.instructions,
+    contextUpdatedBy: s1.snapshot().context.updated_by
+  };
+  const s2 = createWorkspaceStore({ filePath: fp });
+  const after = {
+    rev: s2.rev,
+    itemsLength: s2.snapshot().items.length,
+    contextInstructions: s2.snapshot().context.instructions,
+    contextUpdatedBy: s2.snapshot().context.updated_by
+  };
+  assert.equal(after.rev, before.rev);
+  assert.equal(after.itemsLength, before.itemsLength);
+  assert.equal(after.contextInstructions, before.contextInstructions);
+  assert.equal(after.contextUpdatedBy, before.contextUpdatedBy);
+});
