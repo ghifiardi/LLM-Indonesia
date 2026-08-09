@@ -99,6 +99,15 @@ Primary acceptance flow (manual checklist): **Word → PowerPoint → Excel** �
 - Pane side: pure-function tests for label derivation and banner text (word count); polling/backoff logic extracted into a testable helper with fake timers where the existing test setup allows.
 - Manual checklist (docs): the Word→PowerPoint→Excel acceptance path on one machine, plus Companion-down behavior.
 
+## Resolved decisions (user review, 2026-08-09)
+
+1. **Item lifecycle.** "Abaikan" is a **per-pane banner dismissal only** — implemented client-side (the pane records the dismissed item id locally); the item remains in every pane's inbox and on the server. "Pakai" **does not delete**: it fills the target and marks the item visually as used in that pane (✓), preserving fan-out (one Word section → both a deck brief and a sheet brief). Global removal happens only via explicit "Hapus" (DELETE) or FIFO expiry.
+2. **Insertion semantics.** Every "Pakai/Tempel" action **replaces** the target box's content. If the target box is non-empty and differs from the incoming text, an inline confirmation is required first: "Kotak tujuan sudah berisi teks — ganti?" [Ganti] [Batal]. Append is not offered in v1.
+3. **Cheap polling.** `GET /api/workspace?since_rev=N` returns **304 with an empty body** when `rev <= N`, else the full `{rev, items, context}`. Clients always send `since_rev` after their first fetch. (Chosen over ETag for simplicity; semantics identical.)
+4. **Escaped, text-only rendering (hard rule).** Workspace-derived strings (labels, text, host names) cross webview boundaries and MUST be rendered exclusively via `textContent`/`createTextNode` — never `innerHTML`/insertAdjacentHTML. The banner/inbox builders are pure functions returning strings consumed as textContent, unit-tested; a test also asserts no workspace render path contains `innerHTML`.
+
+**Prioritization (user):** Workspace implementation runs AHEAD of the remaining fine-tune fix queue (which resumes afterward), keeping the one-implementer-at-a-time rule.
+
 ## Out of scope (v1)
 
 Cross-machine sync; SSE push; auto-fill; orchestrated multi-app generation; per-item provenance beyond source_host; item kinds beyond the four listed; deck-outline sender (kind reserved); Excel-range→Word-table structured insert.
