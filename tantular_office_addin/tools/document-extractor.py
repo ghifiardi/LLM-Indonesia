@@ -24,6 +24,18 @@ from pathlib import Path
 from typing import Tuple
 from xml.etree import ElementTree as ET
 
+# Apple Vision OCR is optional and macOS-only. Guarded import so the server
+# starts cleanly (and /api/ocr answers a clean 501) on Windows/Linux or when
+# pyobjc-framework-Vision/Quartz are not installed.
+try:
+    import Vision  # type: ignore
+    import Quartz  # type: ignore
+    from Foundation import NSData  # type: ignore
+
+    VISION_AVAILABLE = True
+except ImportError:
+    VISION_AVAILABLE = False
+
 HOST = "127.0.0.1"
 PORT = 8787
 # 100 MB. This is a local-only helper (127.0.0.1) that reads the whole
@@ -265,6 +277,48 @@ def extract_pdf(data: bytes) -> str:
     )
 
 
+def run_apple_vision_ocr(image_bytes: bytes) -> dict:
+    """Run OCR over raw image bytes using the macOS Vision framework.
+
+    Isolated behind the guarded import above so this is only ever called when
+    VISION_AVAILABLE is True; still defensive internally since decode/OCR can
+    fail on malformed images even when the framework itself is present.
+    """
+    if not VISION_AVAILABLE:
+        return {"ok": False, "error": "Apple Vision tidak tersedia di sistem ini."}
+    try:
+        ns_data = NSData.dataWithBytes_length_(image_bytes, len(image_bytes))
+        source = Quartz.CGImageSourceCreateWithData(ns_data, None)
+        if source is None:
+            return {"ok": False, "error": "Gagal membaca data gambar."}
+        cg_image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None)
+        if cg_image is None:
+            return {"ok": False, "error": "Gagal decode gambar."}
+
+        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, None)
+        request = Vision.VNRecognizeTextRequest.alloc().init()
+        request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+        request.setRecognitionLanguages_(["id-ID", "en-US"])
+        request.setUsesLanguageCorrection_(True)
+
+        success, error = handler.performRequests_error_([request], None)
+        if not success:
+            return {"ok": False, "error": str(error) if error else "OCR request gagal."}
+
+        lines = []
+        for observation in request.results() or []:
+            candidates = observation.topCandidates_(1)
+            if not candidates:
+                continue
+            top = candidates[0]
+            lines.append({"text": str(top.string()), "confidence": float(top.confidence())})
+
+        text = "\n".join(line["text"] for line in lines)
+        return {"ok": True, "text": text, "lines": lines}
+    except Exception as exc:  # pragma: no cover - depends on live Vision runtime
+        return {"ok": False, "error": str(exc)}
+
+
 def clean_text(text: str, max_chars: int = 80_000) -> str:
     text = html.unescape(text)
     text = re.sub(r"\r\n?", "\n", text)
@@ -295,9 +349,25 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True, "service": "tantular-document-extractor"}).encode())
             return
+        if self.path == "/api/ocr":
+            if VISION_AVAILABLE:
+                payload = {"ok": True, "engine": "apple-vision"}
+                status = 200
+            else:
+                payload = {"ok": False, "error": "Apple Vision tidak tersedia (bukan macOS atau pyobjc belum terpasang)."}
+                status = 501
+            self.send_response(status)
+            self._cors()
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            return
         self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/api/ocr":
+            self._handle_ocr_post()
+            return
         if self.path != "/extract":
             self.send_error(404)
             return
@@ -324,6 +394,39 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
             self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        except Exception as exc:  # pragma: no cover - runtime path
+            payload = {"ok": False, "error": str(exc)}
+            self.send_response(400)
+            self._cors()
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+    def _handle_ocr_post(self) -> None:
+        if not VISION_AVAILABLE:
+            payload = {"ok": False, "error": "Apple Vision tidak tersedia (bukan macOS atau pyobjc belum terpasang)."}
+            self.send_response(501)
+            self._cors()
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > MAX_BYTES:
+                raise ValueError(f"File terlalu besar (maks {MAX_MB_LABEL} MB).")
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(length)
+            _filename, data = parse_multipart_file(content_type, body, "file")
+            if len(data) > MAX_BYTES:
+                raise ValueError(f"File terlalu besar (maks {MAX_MB_LABEL} MB).")
+            result = run_apple_vision_ocr(data)
+            status = 200 if result.get("ok") else 400
+            self.send_response(status)
+            self._cors()
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
         except Exception as exc:  # pragma: no cover - runtime path
             payload = {"ok": False, "error": str(exc)}
             self.send_response(400)

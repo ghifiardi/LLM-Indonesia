@@ -15,7 +15,7 @@
     "cert:office:verify": "npx office-addin-dev-certs verify",
     "cert:office:uninstall": "npx office-addin-dev-certs uninstall",
     "doc-server": "./.venv-doc/bin/python tools/document-extractor.py",
-    "doc-setup": "python3 -m venv .venv-doc && ./.venv-doc/bin/python -m pip install pypdf",
+    "doc-setup": "python3 -m venv .venv-doc && ./.venv-doc/bin/python -m pip install pypdf && ./.venv-doc/bin/python -c \"import sys, subprocess; subprocess.run([sys.executable, '-m', 'pip', 'install', 'pyobjc-framework-Vision', 'pyobjc-framework-Quartz']) if sys.platform == 'darwin' else print('Skipping pyobjc (Apple Vision OCR is macOS-only); document extraction still works.')\"",
     "sideload:word": "./tools/sideload-mac-word.sh",
     "sideload:excel": "./tools/sideload-mac-excel.sh",
     "sideload:powerpoint": "./tools/sideload-mac-powerpoint.sh",
