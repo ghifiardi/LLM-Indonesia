@@ -29,7 +29,14 @@
   <ul>
     <li><strong>Batas unggah dokumen naik ke 100 MB</strong> (sebelumnya 35 MB).</li>
     <li><strong>6 gaya desain deck baru</strong> di dropdown "Gaya desain" Deck Studio: Nusantara, Monokrom, Samudra, Terang, Tegas, Akademik (plus "Bebas / custom").</li>
-    <li><strong>Mac:</strong> ekstraksi teks dari gambar kini memakai <em>Apple Vision OCR</em> (lebih akurat untuk teks Indonesia). Jika Anda sudah pernah memasang paket sebelumnya, jalankan ulang <code>npm run doc-setup</code> di folder paket untuk mengaktifkan OCR Apple Vision. Windows tetap memakai model vision lokal seperti biasa.</li>
+    <li><strong>Mac:</strong> ekstraksi teks dari gambar kini memakai <em>Apple Vision OCR</em> (lebih akurat untuk teks Indonesia). Windows tetap memakai model vision lokal seperti biasa.</li>
+  </ul>
+  <h3>Sudah pernah memasang sebelumnya? Ini yang perlu diperbarui</h3>
+  <ul>
+    <li><strong>Panel Tantular (gaya desain baru): otomatis, tanpa unduh ulang.</strong> Cukup tutup Office sepenuhnya (<code>Cmd+Q</code> di Mac), buka kembali, lalu pastikan tag build di header panel menunjukkan <strong>b0810a</strong> atau lebih baru. Masih tag lama? Tutup penuh Office sekali lagi.</li>
+    <li><strong>Batas 100 MB dan OCR Apple Vision: perlu paket Companion terbaru.</strong> Paket lama belum memuat komponen barunya. Jalankan ulang perintah instalasi satu baris di bawah (bagian "Instalasi satu perintah") — paket terbaru akan terunduh otomatis, pengaturan Anda tidak hilang.</li>
+    <li><strong>Khusus Mac, setelah unduh ulang:</strong> di folder paket jalankan <code>npm run doc-setup</code> satu kali, lalu jalankan <code>npm run doc-server</code> berdampingan dengan Companion. Setelah itu, saat ekstraksi gambar, baris status akan menampilkan "Apple Vision".</li>
+    <li><strong>Windows:</strong> cukup unduh ulang paket untuk batas 100 MB; OCR tetap memakai model vision lokal (tidak ada langkah tambahan).</li>
   </ul>
   <h2>Langkah demi langkah (ringkas)</h2>
   <ol>
