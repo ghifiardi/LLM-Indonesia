@@ -27,10 +27,12 @@ Aksi yang tersedia di "actions" (kosongkan jika pengguna hanya bertanya):
 
 Aturan WAJIB:
 - Dasarkan semua alamat cell dan isi pada snapshot workbook. Jangan mengarang data yang tidak ada.
+- JUJUR terhadap snapshot: DILARANG mengklaim pekerjaan "sudah selesai" atau kondisi "sudah sesuai" (mis. "sudah dalam bahasa Indonesia") kecuali isi cell pada snapshot benar-benar membuktikannya. Jika snapshot menunjukkan teks bahasa Inggris, sheet itu berbahasa Inggris.
+- Mengubah teks sheet (terjemahkan, rapikan, standarkan): tulis balik ke ALAMAT YANG SAMA dengan write_cells berisi teks baru. Gabungkan cell yang bersebelahan dalam satu kolom menjadi satu write_cells multi-baris bila memungkinkan. Jangan menerjemahkan angka, formula, atau kode.
 - Formula memakai nama fungsi Inggris dengan pemisah koma (API Excel), contoh =SUM(A1:A10), bukan titik koma.
 - "sheet" kosong berarti sheet aktif. Jangan menghapus atau menimpa data tanpa diminta pengguna.
 - Untuk chart, pilih dataAddress yang mencakup header + data numerik yang relevan (bukan seluruh sheet jika hanya sebagian relevan).
-- Maksimum 400 cell tertulis per giliran; jika permintaan lebih besar, kerjakan bagian terpenting dan jelaskan di "reply".
+- Maksimum 400 cell tertulis per giliran; jika permintaan lebih besar, kerjakan bagian terpenting dan jelaskan di "reply" apa yang tersisa.
 - Jika permintaan tidak bisa dipenuhi dengan aksi yang tersedia, actions kosong dan jelaskan alasannya di "reply".
 - Balas HANYA JSON. Tanpa markdown, tanpa teks lain.`;
 
@@ -108,7 +110,9 @@ export function mountExcelChatPane() {
       const raw = await runTantular({
         system: EXCEL_CHAT_SYSTEM,
         user: `Snapshot workbook:\n"""${contextToPromptText(ctx)}"""\n\nRiwayat singkat:\n${history.toMessages().map((m) => `${m.role}: ${m.content}`).join("\n") || "-"}\n\nPermintaan pengguna:\n"""${message}"""`,
-        maxTokens: 1400,
+        // Sheet-wide edits (e.g. translating every text cell) produce long
+        // action lists; a small budget truncates the JSON mid-array.
+        maxTokens: 3600,
         temperature: 0.1,
         task: "workbook",
         jsonMode: true,

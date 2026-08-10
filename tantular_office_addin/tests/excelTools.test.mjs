@@ -58,3 +58,29 @@ test("sanitize null/garbage input yields empty plan", () => {
   assert.deepEqual(sanitizeExcelActions(null), { actions: [], rejected: [] });
   assert.deepEqual(sanitizeExcelActions("chart please"), { actions: [], rejected: [] });
 });
+
+test("colLetter maps column numbers", async () => {
+  const { colLetter } = await import("../src/chat/excelTools.js");
+  assert.equal(colLetter(1), "A");
+  assert.equal(colLetter(26), "Z");
+  assert.equal(colLetter(27), "AA");
+  assert.equal(colLetter(52), "AZ");
+});
+
+test("gridToAddressedCells addresses non-empty cells with offsets", async () => {
+  const { gridToAddressedCells } = await import("../src/chat/excelTools.js");
+  const { cells, truncated } = gridToAddressedCells([["Judul", ""], ["", 42]], 4, 1);
+  assert.equal(truncated, false);
+  assert.deepEqual(cells, [
+    { address: "B5", value: "Judul" },
+    { address: "C6", value: "42" }
+  ]);
+});
+
+test("gridToAddressedCells truncates at caps and flags it", async () => {
+  const { gridToAddressedCells } = await import("../src/chat/excelTools.js");
+  const grid = Array.from({ length: 50 }, () => ["x"]);
+  const { cells, truncated } = gridToAddressedCells(grid, 0, 0, { maxCells: 10, maxChars: 9000 });
+  assert.equal(cells.length, 10);
+  assert.equal(truncated, true);
+});

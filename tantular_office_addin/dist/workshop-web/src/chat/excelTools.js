@@ -26,7 +26,9 @@ export function sanitizeExcelActions(rawActions) {
   const actions = [];
   const rejected = [];
   let writeBudget = MAX_WRITE_CELLS_PER_TURN;
-  const list = Array.isArray(rawActions) ? rawActions.slice(0, 12) : [];
+  // Sheet-wide edits (translate/clean-up) legitimately need many per-cell
+  // writes; the real safety valve is the cell budget, not the action count.
+  const list = Array.isArray(rawActions) ? rawActions.slice(0, 60) : [];
 
   for (const raw of list) {
     const op = String(raw?.op || "").trim();
@@ -80,7 +82,40 @@ export function sanitizeExcelActions(rawActions) {
 
 // --- Office-bound parts -----------------------------------------------------
 
-// Compact workbook snapshot for the model prompt.
+export function colLetter(n) {
+  let s = "";
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+// Flatten a values grid into addressed non-empty cells: [{address, value}].
+// rowIndex/colIndex are the grid's 0-based absolute offsets in the sheet.
+// Caps keep the prompt bounded; `truncated` tells the model data was cut.
+export function gridToAddressedCells(values, rowIndex = 0, colIndex = 0, { maxCells = 250, maxChars = 9000 } = {}) {
+  const cells = [];
+  let chars = 0;
+  let truncated = false;
+  for (let r = 0; r < (values?.length || 0); r += 1) {
+    for (let c = 0; c < (values[r]?.length || 0); c += 1) {
+      const raw = values[r][c];
+      if (raw === "" || raw == null) continue;
+      const value = String(raw).slice(0, 300);
+      if (cells.length >= maxCells || chars + value.length > maxChars) { truncated = true; break; }
+      cells.push({ address: `${colLetter(colIndex + c + 1)}${rowIndex + r + 1}`, value });
+      chars += value.length;
+    }
+    if (truncated) break;
+  }
+  return { cells, truncated };
+}
+
+// Workbook snapshot for the model prompt: every non-empty cell of the active
+// sheet WITH its address (bounded), so sheet-wide edits (translate, clean up,
+// reformat) are plannable as write_cells back to exact addresses.
 export async function getExcelChatContext() {
   if (!globalThis.Excel?.run) throw new Error("Excel JavaScript API tidak tersedia.");
   return Excel.run(async (context) => {
@@ -90,21 +125,23 @@ export async function getExcelChatContext() {
     const active = workbook.worksheets.getActiveWorksheet();
     active.load("name");
     const used = active.getUsedRangeOrNullObject();
-    used.load(["address", "rowCount", "columnCount", "isNullObject"]);
+    used.load(["address", "rowCount", "columnCount", "rowIndex", "columnIndex", "isNullObject"]);
     const selection = workbook.getSelectedRange();
     selection.load(["address", "rowCount", "columnCount"]);
     await context.sync();
 
-    let sample = [];
+    let cells = [];
+    let truncated = false;
     let usedAddress = "";
     if (!used.isNullObject) {
       usedAddress = used.address;
-      const rows = Math.min(used.rowCount, 12);
-      const cols = Math.min(used.columnCount, 10);
+      const rows = Math.min(used.rowCount, 120);
+      const cols = Math.min(used.columnCount, 20);
       const sampleRange = used.getAbsoluteResizedRange(rows, cols);
       sampleRange.load("values");
       await context.sync();
-      sample = sampleRange.values || [];
+      ({ cells, truncated } = gridToAddressedCells(sampleRange.values || [], used.rowIndex, used.columnIndex));
+      if (rows < used.rowCount || cols < used.columnCount) truncated = true;
     }
 
     let selectionValues = [];
@@ -118,7 +155,8 @@ export async function getExcelChatContext() {
       activeSheet: active.name,
       sheetNames: (sheets.items || []).map((s) => s.name),
       usedAddress,
-      sample,
+      cells,
+      truncated,
       selectionAddress: selection.address,
       selectionValues
     };
@@ -131,9 +169,10 @@ export function contextToPromptText(ctx) {
     `Semua sheet: ${ctx.sheetNames.join(", ") || "-"}`,
     `Data terpakai: ${ctx.usedAddress || "(kosong)"}`
   ];
-  if (ctx.sample?.length) {
-    lines.push("Cuplikan data (baris pertama = kemungkinan header):");
-    for (const row of ctx.sample) lines.push(row.map((v) => String(v ?? "")).join(" | "));
+  if (ctx.cells?.length) {
+    lines.push("Isi sheet aktif per cell (alamat: nilai) — inilah bukti isi sheet:");
+    for (const cell of ctx.cells) lines.push(`${cell.address}: ${cell.value}`);
+    if (ctx.truncated) lines.push("(sebagian isi terpotong karena batas ukuran — sebutkan di reply jika relevan)");
   }
   lines.push(`Seleksi pengguna: ${ctx.selectionAddress || "-"}`);
   if (ctx.selectionValues?.length) {
