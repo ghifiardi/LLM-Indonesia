@@ -6,6 +6,21 @@ See docs/superpowers/specs/2026-07-20-tantular-productivity-finetune-design.md
 
 import uuid
 
+# Status vocabulary for `provenance.status`. Directly-generated examples use
+# STATUS_ACCEPTED / STATUS_REJECTED (see gen_router.py/gen_edit.py/gen_prose.py
+# and generate.py's global-dedup demotion). The "_HUMAN_REVIEW" variants are
+# for the review-queue promotion CLI (tantular.finetune.review_promote):
+# examples reconstructed from a review_queue.jsonl entry after a human
+# accept/reject decision, never regenerated -- distinguishing them in
+# `provenance.status` (rather than reusing "accepted"/"rejected" verbatim)
+# keeps a promoted example's provenance honest about how it was decided,
+# while every other field stays schema-identical to a directly-generated
+# example (see review_promote.reconstruct_example).
+STATUS_ACCEPTED = "accepted"
+STATUS_REJECTED = "rejected"
+STATUS_ACCEPTED_HUMAN_REVIEW = "accepted_human_review"
+STATUS_REJECTED_HUMAN_REVIEW = "rejected_human_review"
+
 
 def make_example(
     task,
@@ -32,7 +47,10 @@ def make_example(
     - generation: dict with teacher_model, renderer, bridge_protocol_version,
       bridge_js_commit, etc. (see spec)
     - training: dict with student_model, renderer, etc. (see spec)
-    - status: "accepted" | "rejected"
+    - status: STATUS_ACCEPTED | STATUS_REJECTED | STATUS_ACCEPTED_HUMAN_REVIEW |
+      STATUS_REJECTED_HUMAN_REVIEW (any string is accepted here -- the
+      vocabulary constraint is enforced by callers, e.g.
+      generate.verify_artifacts)
     - reject_reason: None | "<code>"
     - prompt_id / production_prompt_content_hash / production_prompt_git_sha:
       optional registry-linkage fields, top-level in `provenance`.

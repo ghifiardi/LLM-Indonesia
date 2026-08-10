@@ -94,6 +94,10 @@ from tantular.finetune.pilot import (
     _tinker_tokenizer_token_counter,
     default_token_counter,
 )
+from tantular.finetune.provenance import (
+    STATUS_ACCEPTED,
+    STATUS_ACCEPTED_HUMAN_REVIEW,
+)
 
 DEFAULT_DATA_DIR = pathlib.Path(__file__).resolve().parent / "data"
 DEFAULT_PILOT_REPORT_PATH = DEFAULT_DATA_DIR / "pilot_report.json"
@@ -961,9 +965,16 @@ def verify_artifacts(data_dir, exposure_tolerance=EXPOSURE_TOLERANCE):
                 problems.append(
                     f"{split_name}: example {ex.get('id')} missing training keys {sorted(train_missing)}"
                 )
-            if provenance.get("status") != "accepted":
+            # STATUS_ACCEPTED_HUMAN_REVIEW is the review-queue promotion
+            # CLI's status for a human-accepted item (tantular.finetune.
+            # review_promote) -- schema-identical to a directly-generated
+            # accepted example (see reconstruct_example), so it belongs in
+            # train/eval/challenge exactly like STATUS_ACCEPTED and must not
+            # fail verification just for recording *how* it was accepted.
+            if provenance.get("status") not in (STATUS_ACCEPTED, STATUS_ACCEPTED_HUMAN_REVIEW):
                 problems.append(
-                    f"{split_name}: example {ex.get('id')} has status {provenance.get('status')!r}, expected 'accepted'"
+                    f"{split_name}: example {ex.get('id')} has status {provenance.get('status')!r}, "
+                    f"expected {STATUS_ACCEPTED!r} or {STATUS_ACCEPTED_HUMAN_REVIEW!r}"
                 )
 
     # Exposure mix within tolerance, read from the manifest this run wrote.
