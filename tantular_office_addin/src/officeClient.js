@@ -22,6 +22,18 @@ export async function insertResultText(hostName, text) {
   if (!text.trim()) throw new Error("Tidak ada hasil untuk dimasukkan.");
 
   if (host === "Excel") {
+    // Writing a 1×1 matrix into a multi-cell selection fails with a shape
+    // mismatch ("data object is not compatible with the shape..."). Write to
+    // the selection's top-left cell instead, whatever the selection size.
+    if (globalThis.Excel?.run) {
+      return Excel.run(async (context) => {
+        const cell = context.workbook.getSelectedRange().getCell(0, 0);
+        cell.values = [[text]];
+        cell.format.wrapText = true;
+        await context.sync();
+        return "Hasil ditulis ke cell kiri-atas seleksi.";
+      });
+    }
     return setCommonSelectedData([[text]], Office.CoercionType.Matrix);
   }
   return setCommonSelectedData(text, Office.CoercionType.Text);
@@ -33,7 +45,11 @@ export async function writeExcelLabels(resultText) {
   }
   const labels = parseLabelLines(resultText);
   if (!labels.length) {
-    throw new Error("Hasil belum berisi label per baris.");
+    throw new Error(
+      "Tombol ini khusus untuk hasil KLASIFIKASI per baris (label 🛑/⚠️/✅ per cell). " +
+      "Hasil saat ini berupa penjelasan biasa — gunakan \"Masukkan ke cell/range\" untuk menaruhnya di satu cell, " +
+      "atau jalankan aksi cepat klasifikasi terlebih dahulu."
+    );
   }
 
   return Excel.run(async (context) => {
@@ -519,7 +535,13 @@ export async function getDocumentBodyText() {
 // safe default so existing user content is never destroyed implicitly.
 export async function insertDocxIntoWord(base64, mode = "append") {
   if (!globalThis.Word?.run) {
-    throw new Error("Fitur ini membutuhkan Word JavaScript API.");
+    // Word disables its JS API entirely for documents opened in
+    // "Compatibility Mode" — the most common reason this branch fires.
+    throw new Error(
+      "Word JavaScript API tidak tersedia. Jika judul jendela menampilkan \"Compatibility Mode\", " +
+      "konversi dulu dokumennya: File → Convert Document (atau Save As format .docx modern), " +
+      "tutup dan buka kembali, lalu coba lagi."
+    );
   }
   if (!base64) throw new Error("File DOCX kosong.");
   return Word.run(async (context) => {
@@ -572,6 +594,42 @@ export function markdownToWordBlocks(markdown) {
 // InvalidArgument, the same way ParagraphCollection.getLast() does.
 function supportsBuiltInStyles() {
   return globalThis.Office?.context?.requirements?.isSetSupported?.("WordApi", "1.3") ?? false;
+}
+
+// Insert markdown (e.g. a generated table) at the current selection as real
+// Word content via insertHtml (WordApi 1.1). mode "after" keeps the selected
+// text and adds the content right after it; mode "replace" swaps the selected
+// text for the content. "After" is rejected by some hosts for Range targets;
+// "End" lands visually in the same place.
+export async function insertMarkdownAtSelection(markdown, mode = "after") {
+  if (!globalThis.Word?.run) {
+    throw new Error(
+      "Word JavaScript API tidak tersedia. Jika judul jendela menampilkan \"Compatibility Mode\", " +
+      "konversi dulu dokumennya lewat File → Convert Document, lalu coba lagi."
+    );
+  }
+  const html = markdownToWordHtml(markdown);
+  return Word.run(async (context) => {
+    const selection = context.document.getSelection();
+    const replace = Word.InsertLocation?.replace || "Replace";
+    const after = Word.InsertLocation?.after || "After";
+    const end = Word.InsertLocation?.end || "End";
+    const attempts = mode === "replace" ? [replace] : [after, end];
+    let lastError = null;
+    for (const location of attempts) {
+      try {
+        selection.insertHtml(html, location);
+        await context.sync();
+        return mode === "replace"
+          ? "Teks yang di-highlight diganti dengan tabel."
+          : "Tabel disisipkan tepat setelah teks yang di-highlight.";
+      } catch (error) {
+        lastError = error;
+        console.warn(`[Tantular] insertHtml(${location}) pada seleksi ditolak host.`, error, error?.debugInfo);
+      }
+    }
+    throw new Error(lastError?.message || "Host menolak penyisipan HTML pada seleksi.");
+  });
 }
 
 // Convert chat markdown into HTML for Range/Body.insertHtml (WordApi 1.1).
@@ -690,7 +748,7 @@ function basicBlockText(block, listIndex) {
 }
 
 // Keep in sync with the tag shown in src/taskpane.html next to the chat title.
-export const TASKPANE_BUILD = "b0810a";
+export const TASKPANE_BUILD = "b0810b";
 
 // Insert a formatted answer. When `afterText` is provided and located, the
 // content is placed immediately after that anchor (end of the queried

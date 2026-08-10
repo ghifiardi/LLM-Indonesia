@@ -27,6 +27,11 @@ export function buildDocumentDeckSpec(rawText, slideCount = 8) {
   const count = requestedCount;
   const bodyBudget = Math.max(2, count - 3); // title + agenda + closing reserved
   sections = mergeOrTrimSections(sections, bodyBudget);
+  // The requested count is a TARGET, not just a cap. A document with few
+  // detected sections used to yield ~6 slides even when the user asked for 20,
+  // silently dropping both the request and every sentence past each section's
+  // first bullets. Split sentence-rich sections into continuation slides.
+  if (sections.length < bodyBudget) sections = expandSectionsToTarget(sections, bodyBudget);
 
   const slides = [];
   slides.push({
@@ -244,6 +249,32 @@ function fallbackSections(text, targetGroups = 6) {
     if (sections.length >= groups) break;
   }
   return sections.filter((s) => s.body.length > 40);
+}
+
+// Split the sentence-richest sections in half (repeatedly) until we reach the
+// requested body-slide budget or run out of splittable content. Keeps document
+// order; continuation slides reuse the section title with "(lanjutan)".
+function expandSectionsToTarget(sections, budget) {
+  const MIN_SENTENCES_TO_SPLIT = 6; // below this a slide reads fine as-is
+  const result = sections.map((s) => ({ ...s, sentences: splitSentences(s.body) }));
+  while (result.length < budget) {
+    let best = -1;
+    let bestLen = MIN_SENTENCES_TO_SPLIT - 1;
+    for (let i = 0; i < result.length; i += 1) {
+      const len = result[i].sentences?.length || 0;
+      if (len > bestLen) { best = i; bestLen = len; }
+    }
+    if (best === -1) break; // nothing left worth splitting
+    const section = result[best];
+    const half = Math.ceil(section.sentences.length / 2);
+    const partA = section.sentences.slice(0, half);
+    const partB = section.sentences.slice(half);
+    const contTitle = /\(lanjutan\)$/.test(section.title) ? section.title : `${section.title} (lanjutan)`;
+    result.splice(best, 1,
+      { title: section.title, body: partA.join(" "), sentences: partA },
+      { title: contTitle, body: partB.join(" "), sentences: partB });
+  }
+  return result.map(({ title, body }) => ({ title, body }));
 }
 
 function mergeOrTrimSections(sections, budget) {

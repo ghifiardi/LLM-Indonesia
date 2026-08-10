@@ -17,6 +17,7 @@ import {
   replaceSlideInActivePresentation,
   getDocumentBodyText,
   insertDocxIntoWord,
+  insertMarkdownAtSelection,
   writeWorkbookSpecToExcel
 } from "./officeClient.js";
 import { styleOptions } from "./deck/deckStyles.js";
@@ -41,7 +42,7 @@ import { buildWorkbookXlsxBase64 } from "./workbook/xlsxBuilder.js";
 import { hostUiConfig } from "./hostUi.js";
 import { putContext, shouldAdoptServerContext } from "./workspaceClient.js";
 
-const DECK_STUDIO_BUILD = "0.10.3-fullslide-source";
+const DECK_STUDIO_BUILD = "0.10.6-table-replace-mode";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
 
 const state = {
@@ -553,7 +554,74 @@ async function resolveDocumentSpec() {
   return result;
 }
 
+// "Buat table untuk paragraph yang saya highlight" is a targeted transform of
+// the selection, NOT a request for a whole new document. Route it away from
+// the document generator, which would otherwise append unrelated sections.
+function looksLikeSelectionTableRequest(text) {
+  const value = String(text || "");
+  return /\b(tabel|table)\b/i.test(value)
+    && /\b(highlight|seleksi|selection|blok|(saya|yang di)\s*(pilih|tandai))\b/i.test(value);
+}
+
+async function convertSelectionToTable(instruction) {
+  await withDocumentProgress("Membaca teks yang di-highlight...", async () => {
+    const selection = await getSelectionContext("Word");
+    const source = String(selection.text || "").trim();
+    if (!source) {
+      setDocumentStatus(
+        "Instruksi meminta tabel dari teks yang di-highlight, tetapi tidak ada teks terpilih. " +
+        "Blok dulu paragrafnya di dokumen, lalu klik Buat di Word lagi.",
+        "error"
+      );
+      return;
+    }
+
+    els.documentProgressText.textContent = "Menyusun tabel dari teks terpilih...";
+    const raw = await runTantular({
+      system: `Anda mengubah teks menjadi SATU tabel markdown.
+Aturan:
+- Keluarkan HANYA tabel markdown (baris header, baris pemisah |---|, baris data). Tanpa penjelasan, tanpa markdown lain.
+- Semua isi sel harus berasal dari teks sumber. Jangan menambah fakta, angka, atau kategori baru.
+- Pilih kolom yang paling masuk akal dari struktur teks (mis. Aspek | Closed Model | Open-Weight, atau Poin | Penjelasan).
+- Header dalam Bahasa Indonesia kecuali istilah teknis.
+- Maksimum 8 baris data; ringkas isi sel seperlunya tanpa mengubah makna.`,
+      user: `Instruksi pengguna: ${instruction}\n\nTeks sumber (hasil highlight):\n"""${source}"""`,
+      maxTokens: 900,
+      temperature: 0.1,
+      task: "document"
+    });
+
+    const table = extractMarkdownTable(raw);
+    if (!table) {
+      throw new Error("Model tidak menghasilkan tabel yang valid. Coba lagi, atau sebutkan kolom yang diinginkan di Instruksi dokumen.");
+    }
+
+    els.documentProgressText.textContent = "Menyisipkan tabel ke Word...";
+    // Honor the insert-mode dropdown: "Ganti" replaces the highlighted text
+    // with the table; the safe default keeps the text and adds the table after.
+    const mode = els.documentInsertMode.value === "replace" ? "replace" : "after";
+    const message = await insertMarkdownAtSelection(table, mode);
+    setDocumentStatus(`${message} Isi tabel hanya dari teks yang di-highlight, tanpa fakta baru.`, "ok");
+  });
+}
+
+function extractMarkdownTable(raw) {
+  const lines = String(raw || "").split(/\r?\n/).map((l) => l.trim());
+  const start = lines.findIndex((l) => /^\|.*\|$/.test(l));
+  if (start === -1) return "";
+  let end = start;
+  while (end + 1 < lines.length && /^\|.*\|$/.test(lines[end + 1])) end += 1;
+  const block = lines.slice(start, end + 1);
+  // Header + |---| separator + at least one data row.
+  if (block.length < 3 || !/^\|(\s*:?-{2,}:?\s*\|)+$/.test(block[1])) return "";
+  return block.join("\n");
+}
+
 async function createDocumentSmart() {
+  const documentInstruction = els.documentInstruction.value.trim();
+  if (state.host === "Word" && looksLikeSelectionTableRequest(documentInstruction)) {
+    return convertSelectionToTable(documentInstruction);
+  }
   await withDocumentProgress("Menyiapkan dokumen Word...", async () => {
     const result = await resolveDocumentSpec();
     els.documentProgressText.textContent = "Membuat file .docx...";
@@ -890,7 +958,14 @@ async function resolveDeckSpec() {
     if (docSpec) {
       const finalized = await maybeSummarize(applyProjectOutputFormat(docSpec, content));
       state.deckSpec = finalized;
-      renderDeckPreview(state.deckSpec, cameFromDocument ? "struktur dokumen" : "struktur teks panjang");
+      // Say so when the document can't fill the requested count — a silent
+      // 6-of-20 result reads as a glitch to the user.
+      const got = finalized.slides?.length || 0;
+      const baseLabel = cameFromDocument ? "struktur dokumen" : "struktur teks panjang";
+      renderDeckPreview(
+        state.deckSpec,
+        got < count ? `${baseLabel} · ${got}/${count} slide — konten sumber tidak cukup untuk ${count} slide` : baseLabel
+      );
       return "document";
     }
   }
