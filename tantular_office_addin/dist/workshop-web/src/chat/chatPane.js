@@ -15,7 +15,14 @@ const CONTEXT_ORDER = [null, "selection", "document", "none"];
 
 export function mountChatPane({ host }) {
   const card = document.querySelector("#chat-card");
-  if (!card || host !== "Word") return;
+  if (!card) return;
+  if (host === "Excel") {
+    // Agentic Excel chat: same card, different engine (plan-and-execute over
+    // the open workbook instead of Word document pipelines).
+    import("./excelChat.js").then(({ mountExcelChatPane }) => mountExcelChatPane());
+    return;
+  }
+  if (host !== "Word") return;
   card.classList.remove("hidden");
 
   const els = {
