@@ -25,6 +25,12 @@
     <li>Sertifikat HTTPS lokal tepercaya yang dipasang oleh installer workshop.</li>
     <li>Tantular Companion berjalan di <code>https://localhost:3000</code>.</li>
   </ul>
+  <h2>Baru: OCR Apple Vision (Mac), desain deck baru, batas file 100 MB</h2>
+  <ul>
+    <li><strong>Batas unggah dokumen naik ke 100 MB</strong> (sebelumnya 35 MB).</li>
+    <li><strong>6 gaya desain deck baru</strong> di dropdown "Gaya desain" Deck Studio: Nusantara, Monokrom, Samudra, Terang, Tegas, Akademik (plus "Bebas / custom").</li>
+    <li><strong>Mac:</strong> ekstraksi teks dari gambar kini memakai <em>Apple Vision OCR</em> (lebih akurat untuk teks Indonesia). Jika Anda sudah pernah memasang paket sebelumnya, jalankan ulang <code>npm run doc-setup</code> di folder paket untuk mengaktifkan OCR Apple Vision. Windows tetap memakai model vision lokal seperti biasa.</li>
+  </ul>
   <h2>Langkah demi langkah (ringkas)</h2>
   <ol>
     <li>Jalankan <strong>satu perintah instalasi</strong> sesuai sistem operasi (bagian berikutnya). Node.js, Ollama, sertifikat, dan model Tantular (dari ollama.com, sesuai RAM) dipasang otomatis.</li>
