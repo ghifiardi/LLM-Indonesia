@@ -2,9 +2,9 @@ import { createSseAccumulator } from "./chat/sse.js";
 import { companionUrl } from "./companionUrl.js";
 
 const DEFAULT_ENDPOINT = companionUrl("/api/chat-completions");
-const DEFAULT_MODEL = "qwen3:8b";
-const DEFAULT_DECK_MODEL = "tantular-office:0.3-8b";
-const DECK_MODEL_FALLBACK = "qwen3:8b";
+const DEFAULT_MODEL = "qwen3.5:9b";
+const DEFAULT_DECK_MODEL = "tantular-office:0.4-9b";
+const DECK_MODEL_FALLBACK = "qwen3.5:9b";
 const DEFAULT_VISION_MODEL = "llama3.2-vision";
 const SETTINGS_KEY = "tantular.office.settings.v1";
 const LEGACY_LOCAL_ENDPOINT_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost):11434\/v1\/chat\/completions\/?$/i;
@@ -83,9 +83,9 @@ export async function testLocalModel(modelName) {
 }
 
 // Lighter models to auto-downgrade to (in preference order) when the Studio
-// model times out — typically a low-RAM machine swapping on an 8B model.
+// model times out — typically a low-RAM machine swapping on a 9B model.
 const LITE_MODEL_CANDIDATES = [
-  "tantular-office:lite", "qwen3:4b", "qwen2.5:3b", "llama3.2:3b", "gemma3:4b", "llama3.2:1b"
+  "tantular-office:lite", "qwen3.5:4b", "qwen3:4b", "qwen2.5:3b", "llama3.2:3b", "gemma3:4b", "llama3.2:1b"
 ];
 
 let autoSwitchNote = "";
@@ -126,7 +126,7 @@ export async function runTantular({
     ],
     maxTokens,
     temperature,
-    // Deck planning uses a larger local model (8B) plus long JSON output and can
+    // Studio planning uses a larger local model (9B) plus long JSON output and can
     // cold-start slowly, so give it a much larger budget than short chat calls.
     // 8 minutes accommodates slow CPU-only laptops (~5-8 tok/s) on compact plans.
     timeoutMs: usesOfficeModel ? 480_000 : 90_000,
