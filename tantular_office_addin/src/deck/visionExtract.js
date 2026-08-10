@@ -46,9 +46,11 @@ export async function extractWithFallback({ probe, ocrCall, modelCall }) {
   return { text: String(text || "").trim(), engine: "model" };
 }
 
-// Wraps a probe function so it only ever runs once per session (memoized).
-// A rejected/failed probe call is cached too (Windows/no-doc-server keeps
-// resolving to "model" without re-probing on every image).
+// Wraps a probe function so a successful result is memoized for the rest of
+// the session (no re-probing on every image). A rejected/failed probe call is
+// NOT cached — it is retried on the next call, so a transiently unavailable
+// doc-server (still starting up, etc.) doesn't permanently pin the session to
+// the model-vision fallback.
 export function memoizeOcrProbe(probeFn) {
   let cached;
   let pending;

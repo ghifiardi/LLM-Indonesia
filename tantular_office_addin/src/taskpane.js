@@ -30,7 +30,7 @@ import {
   improveExistingSlide
 } from "./deck/deckPlanner.js";
 import { buildDeckPptxBase64 } from "./deck/pptxBuilder.js";
-import { extractSlideFromImage, fileToDataUrl } from "./deck/visionExtract.js";
+import { extractSlideFromImage, fileToDataUrl, getLastOcrEngine, ocrStatusLine } from "./deck/visionExtract.js";
 import { buildCapabilityMapSpec } from "./deck/capabilityMapSpec.js";
 import { extractDocumentFile } from "./deck/documentExtract.js";
 import { buildDocumentDeckSpec } from "./deck/documentDeck.js";
@@ -813,7 +813,7 @@ async function resolveDeckSpec() {
 
   // 2) If an image is uploaded (and not yet extracted), OCR it once.
   if (!docFile && file && state.extractedImageName !== file.name) {
-    els.deckProgressText.textContent = "Membaca gambar dengan model vision lokal...";
+    els.deckProgressText.textContent = "Membaca teks dari gambar...";
     const dataUrl = await fileToDataUrl(file);
     const extra = [
       els.deckTone.value.trim() ? `Tone deck: ${els.deckTone.value.trim()}` : "",
@@ -823,6 +823,7 @@ async function resolveDeckSpec() {
     ].filter(Boolean).join("\n\n");
     const extracted = await extractSlideFromImage(dataUrl, extra);
     els.sourceText.value = extracted;
+    els.deckProgressText.textContent = ocrStatusLine(getLastOcrEngine());
     els.selectionMeta.textContent = `Gambar diekstrak: ${extracted.length} karakter dari ${file.name}.`;
     updateCharCount();
     state.extractedImageName = file.name;
