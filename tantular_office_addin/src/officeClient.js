@@ -75,7 +75,18 @@ export async function writeExcelLabels(resultText) {
   });
 }
 
-export async function writeWorkbookSpecToExcel(spec, mode = "new_sheets") {
+// Map an instruction like "buat chart/grafik garis" to an Excel chart type.
+// Returns "" when no chart was asked for.
+export function requestedExcelChartType(instruction) {
+  const text = String(instruction || "");
+  if (!/\b(chart|grafik|diagram)\b/i.test(text)) return "";
+  if (/\b(line|garis|tren|trend)\b/i.test(text)) return "Line";
+  if (/\b(pie|lingkaran|donat|doughnut)\b/i.test(text)) return "Pie";
+  if (/\b(bar|horizontal)\b/i.test(text)) return "BarClustered";
+  return "ColumnClustered";
+}
+
+export async function writeWorkbookSpecToExcel(spec, mode = "new_sheets", options = {}) {
   if (!globalThis.Excel?.run) {
     throw new Error("Fitur Sheet Studio membutuhkan Excel JavaScript API.");
   }
@@ -88,6 +99,7 @@ export async function writeWorkbookSpecToExcel(spec, mode = "new_sheets") {
     await context.sync();
     const usedNames = new Set((existing.items || []).map((sheet) => String(sheet.name).toLowerCase()));
     let firstOutput = null;
+    let chartCount = 0;
 
     for (let index = 0; index < spec.sheets.length; index += 1) {
       const sheetSpec = spec.sheets[index];
@@ -134,12 +146,32 @@ export async function writeWorkbookSpecToExcel(spec, mode = "new_sheets") {
         noteRange.format.font.italic = true;
         noteRange.format.font.color = "#667085";
       }
+
+      // Chart on request ("buat chart/grafik") — ExcelApi 1.1 charts.add over
+      // the freshly written header+data range, placed below the data.
+      if (options.chartType && columns.length && rows.length) {
+        try {
+          const dataRange = sheet.getRangeByIndexes(0, 0, values.length, columns.length);
+          const chart = sheet.charts.add(options.chartType, dataRange, "Auto");
+          chart.setPosition(
+            sheet.getRangeByIndexes(values.length + (sheetSpec.notes?.length || 0) + 2, 0, 1, 1),
+            sheet.getRangeByIndexes(values.length + (sheetSpec.notes?.length || 0) + 17, Math.max(7, columns.length), 1, 1)
+          );
+          try { chart.title.text = sheetSpec.name || spec.title || "Chart"; } catch (_) { /* optional */ }
+          chartCount += 1;
+        } catch (chartError) {
+          console.warn("Chart creation failed; data sheet still written.", chartError, chartError?.debugInfo);
+        }
+      }
       if (!firstOutput) firstOutput = sheet;
     }
 
     firstOutput?.activate();
     await context.sync();
-    return `${spec.sheets.length} sheet dibuat di workbook aktif.`;
+    const chartNote = options.chartType
+      ? (chartCount ? ` ${chartCount} chart (${options.chartType}) ditambahkan di bawah data.` : " Chart diminta tetapi gagal dibuat pada host ini.")
+      : "";
+    return `${spec.sheets.length} sheet dibuat di workbook aktif.${chartNote}`;
   });
 }
 
@@ -748,7 +780,7 @@ function basicBlockText(block, listIndex) {
 }
 
 // Keep in sync with the tag shown in src/taskpane.html next to the chat title.
-export const TASKPANE_BUILD = "b0810b";
+export const TASKPANE_BUILD = "b0810c";
 
 // Insert a formatted answer. When `afterText` is provided and located, the
 // content is placed immediately after that anchor (end of the queried

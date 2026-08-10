@@ -19,6 +19,7 @@ import {
   insertDocxIntoWord,
   insertMarkdownAtSelection,
   writeWorkbookSpecToExcel,
+  requestedExcelChartType,
   TASKPANE_BUILD
 } from "./officeClient.js";
 
@@ -763,7 +764,10 @@ async function createWorkbookSmart() {
     if (state.host === "Excel") {
       try {
         els.workbookProgressText.textContent = "Membuat sheet di Excel...";
-        const message = await writeWorkbookSpecToExcel(state.workbookSpec, els.workbookInsertMode.value);
+        const message = await writeWorkbookSpecToExcel(state.workbookSpec, els.workbookInsertMode.value, {
+          // "tolong dibuatkan chart/grafik" harus menghasilkan chart sungguhan.
+          chartType: requestedExcelChartType(els.workbookInstruction.value)
+        });
         setWorkbookStatus(`${message} Struktur: ${result.source === "model" ? "Tantular" : "fallback lokal"}.`, "ok");
         return;
       } catch (error) {
