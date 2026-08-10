@@ -433,6 +433,47 @@ def test_apply_skips_near_duplicate_of_existing_accepted_example(tmp_path):
     assert len(train) == 1  # only the pre-seeded example -- nothing appended
 
 
+def test_apply_skips_cross_split_near_duplicate_train_item_vs_existing_eval(tmp_path):
+    """The dedup pool that a promoted item is checked against must be
+    GLOBAL across train/eval/challenge, not scoped to the item's own
+    resolved split -- mirrors generate.run_generate's dedup.near_duplicates
+    pass, which runs over ALL accepted examples (every split) before
+    splitting. A queue item resolving to "train" that near-duplicates an
+    example already sitting in eval.jsonl must be skipped, exactly like the
+    same-split case is."""
+    seed = 3
+    fam = _seeded_family_id("router:UMUM", seed, "train")
+    text = "Tolong jelaskan kebijakan cuti tahunan karyawan secara detail dan lengkap."
+    entry = _router_entry(fam, text)
+    _write_queue(tmp_path, [entry])
+    _write_manifest(tmp_path, seed=seed)
+
+    # Pre-seed EVAL (not train) with a (near-)identical accepted example.
+    existing = {
+        "id": "existing-eval-1", "task": "router", "split": "eval", "family": "router:UMUM::8888",
+        "payload": {}, "messages": [
+            {"role": "system", "content": "ROUTER SYSTEM PROMPT"},
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": "UMUM"},
+        ],
+        "provenance": {
+            "prompt_id": "router", "production_prompt_content_hash": "hash-router",
+            "production_prompt_git_sha": "sha-abc", "generation": {}, "training": {},
+            "status": "accepted", "reject_reason": None,
+        },
+    }
+    (tmp_path / ARTIFACT_FILENAMES["eval"]).write_text(json.dumps(existing) + "\n")
+
+    item_id = queue_item_id(entry)
+    record_decision(tmp_path, item_id, "accept")
+    result = apply_review_queue(tmp_path, StubBridge(PROMPTS), seed=seed)
+    assert result["skipped_duplicate"] == [item_id]
+    assert result["promoted"] == []
+
+    train_path = tmp_path / ARTIFACT_FILENAMES["train"]
+    assert not train_path.exists() or train_path.read_text().strip() == ""
+
+
 def test_apply_dry_run_writes_nothing(tmp_path):
     seed = 3
     fam = _seeded_family_id("router:UMUM", seed, "train")

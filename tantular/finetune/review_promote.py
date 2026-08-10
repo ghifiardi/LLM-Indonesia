@@ -348,8 +348,17 @@ def apply_review_queue(
     - accept -> reconstructed (STATUS_ACCEPTED_HUMAN_REVIEW) example
       appended to its resolved split's artifact file (train/eval/challenge),
       UNLESS it's a near-duplicate (`dedup.near_duplicates`, same filter
-      `generate.run_generate`'s global pass uses) of something already in
-      that split -- then it's skipped and recorded as such, never appended.
+      `generate.run_generate`'s global pass uses) of something ALREADY IN
+      ANY SPLIT -- train, eval, OR challenge, not just its own -- or of
+      another item promoted earlier in this same `apply` run (to any
+      split). This mirrors `generate.run_generate`'s invariant (see
+      generate.py's global near-duplicate filter, run over ALL accepted
+      examples across every split BEFORE splitting): the corpus-wide
+      guarantee is that no accepted example anywhere near-duplicates any
+      other, cross-split included -- promotion must not let a train item
+      slip past a duplicate that happens to live in eval/challenge (or vice
+      versa), which would contaminate a held-out split. A caught duplicate
+      is skipped and recorded as such, never appended.
     - reject -> reconstructed (STATUS_REJECTED_HUMAN_REVIEW) example
       appended to `rejects.jsonl` (never mixed into an accepted split --
       matches generate.py's "rejects.jsonl is a complete audit trail"
@@ -382,12 +391,18 @@ def apply_review_queue(
         "already_applied": [], "pending": [],
     }
 
-    existing_texts_by_split = {}
+    # Corpus-wide dedup pool: texts from every existing accepted example in
+    # ALL THREE split files (not just the item's own resolved split), since
+    # the near-duplicate invariant this mirrors (generate.run_generate's
+    # global pass) is checked across the whole accepted corpus before it is
+    # ever split. `existing_pool_texts` grows as items are promoted within
+    # this same run so two same-run promotions to different splits still
+    # catch each other.
+    existing_pool_texts = []
     for split_name in ("train", "eval", "challenge"):
         path = data_dir / ARTIFACT_FILENAMES[split_name]
-        existing_texts_by_split[split_name] = (
-            [_dedup_text(ex) for ex in _read_jsonl(path)] if path.exists() else []
-        )
+        if path.exists():
+            existing_pool_texts.extend(_dedup_text(ex) for ex in _read_jsonl(path))
 
     to_append_by_split = {"train": [], "eval": [], "challenge": []}
     to_append_rejects = []
@@ -416,16 +431,13 @@ def apply_review_queue(
                 allow_prompt_drift=allow_prompt_drift,
             )
             text = _dedup_text(example)
-            pool = (
-                existing_texts_by_split[split]
-                + [_dedup_text(e) for e in to_append_by_split[split]]
-                + [text]
-            )
+            pool = existing_pool_texts + [text]
             dup_indices = near_duplicates(pool, threshold=dedup_threshold)
             if (len(pool) - 1) in dup_indices:
                 result["skipped_duplicate"].append(item_id)
             else:
                 to_append_by_split[split].append(example)
+                existing_pool_texts.append(text)
                 result["promoted"].append(item_id)
         else:
             example = reconstruct_example(
