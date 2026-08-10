@@ -236,3 +236,70 @@ def test_hash_constants_changes_when_a_synthesis_constant_changes():
     assert original != modified
     # Sanity: hashing the same object twice is stable.
     assert original == _hash_constants({"synthesis_template": "Tulis {n} pesan.", "intent_cues": {}})
+
+
+# --- D2 (ft-fixD): TinkerRouterTeacher.sample() strips trailing <|im_end|> --
+# Mirrors test_gen_prose.py's TinkerProseTeacher stub-teacher tests: the
+# decoded output feeds `_split_candidates` (the router synthesis path),
+# which never itself stripped a trailing chat-template terminator, so the
+# stripping has to happen in `.sample()` itself, same as gen_prose.py's
+# TinkerProseTeacher.
+
+from tantular.finetune.gen_router import TinkerRouterTeacher
+
+
+class _StubRenderer:
+    def build_generation_prompt(self, messages, role):
+        return ("stub-prompt", messages, role)
+
+
+class _StubResult:
+    def __init__(self, tokens):
+        self.sequences = [type("Seq", (), {"tokens": tokens})()]
+
+    def result(self):
+        return self
+
+
+class _StubSamplingClient:
+    def __init__(self, tokens):
+        self._tokens = tokens
+
+    def sample(self, prompt, num_samples, sampling_params):
+        return _StubResult(self._tokens)
+
+
+class _StubTokenizer:
+    def __init__(self, decoded):
+        self._decoded = decoded
+
+    def decode(self, tokens):
+        return self._decoded
+
+
+def _router_teacher_with_stubbed_raw_sample(raw_text):
+    """Construct a TinkerRouterTeacher with its Tinker-facing internals
+    pre-populated by stubs, so `.sample()` never touches the real
+    `tinker`/`tinker_cookbook` SDK (no network, no Tinker API call) --
+    `_ensure_ready` short-circuits because `_sampling_client` is already set.
+    """
+    teacher = TinkerRouterTeacher()
+    teacher._sampling_client = _StubSamplingClient(tokens=[1, 2, 3])
+    teacher._tokenizer = _StubTokenizer(decoded=raw_text)
+    teacher._renderer = _StubRenderer()
+    teacher._sampling_params = object()
+    return teacher
+
+
+def test_tinker_router_teacher_sample_strips_trailing_im_end():
+    teacher = _router_teacher_with_stubbed_raw_sample("EDIT_TEKS<|im_end|>")
+    out = teacher.sample([{"role": "user", "content": "halo"}])
+    assert out == "EDIT_TEKS"
+    assert "<|im_end|>" not in out
+
+
+def test_tinker_router_teacher_sample_preserves_mid_text_token():
+    raw = 'Model menjelaskan token "<|im_end|>" sebagai penanda akhir giliran.'
+    teacher = _router_teacher_with_stubbed_raw_sample(raw)
+    out = teacher.sample([{"role": "user", "content": "halo"}])
+    assert out == raw

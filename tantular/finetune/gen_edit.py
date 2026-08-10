@@ -145,7 +145,7 @@ _TARGETS = (
      "number": None, "name": "Ani"},
     {"text": "Jumlah karyawan tetap bertambah menjadi 85 orang pada akhir tahun ini.",
      "number": "85", "name": None},
-    {"text": "Pelanggan setia mendapatkan diskon khusus sebesar 20 persen setiap bulan.",
+    {"text": "Divisi layanan memberikan diskon khusus kepada pelanggan setia sebesar 20 persen setiap bulan.",
      "number": "20", "name": None},
     {"text": "Rudi menandatangani kontrak kerja sama dengan pelanggan strategis kemarin sore.",
      "number": None, "name": "Rudi"},
@@ -558,6 +558,16 @@ def _parse_edits_json(raw):
     NOT the production contract parser (that lives only in editContract.js,
     reached via the bridge) -- it is just enough to hand a Python list of
     edit dicts to the bridge. Malformed output -> (None, "teacher_json_invalid").
+
+    D2 (ft-fixD review finding) adjudication: unlike gen_prose.py's
+    TinkerProseTeacher and gen_router.py's TinkerRouterTeacher,
+    `TinkerEditTeacher.sample()` (below) intentionally does NOT strip a
+    trailing chat-template terminator (e.g. `<|im_end|>`) from the decoded
+    teacher text. It doesn't need to: this function locates `{`..`}` via
+    `find`/`rfind` and parses only that slice, structurally discarding
+    anything after the final `}` -- including a trailing terminator token --
+    regardless of whether it was stripped upstream. Adding a strip here
+    would be redundant, not incorrect; left out on purpose.
     """
     text = str(raw or "")
     start = text.find("{")

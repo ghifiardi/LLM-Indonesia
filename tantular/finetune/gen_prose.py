@@ -66,6 +66,8 @@ import re
 
 from tantular.finetune.dedup import near_duplicates
 from tantular.finetune.provenance import make_example
+from tantular.finetune.teacher_text import strip_trailing_chat_terminator as \
+    _strip_trailing_chat_terminator
 
 # Teacher: same model/renderer as gen_router.py / gen_edit.py / the sentinel
 # export spike.
@@ -606,33 +608,13 @@ def generate_prose(
 # Real Tinker-backed teacher (never called in tests / at import time).
 # ---------------------------------------------------------------------------
 
-_CHAT_TEMPLATE_TERMINATORS = ("<|im_end|>",)
-
-
-def _strip_trailing_chat_terminator(text):
-    """Strip a trailing chat-template terminator token (e.g. `<|im_end|>`)
-    and surrounding whitespace from decoded teacher output, at the source
-    (D2, ft-fixD review finding: sampled teacher text can carry a trailing
-    `<|im_end|>` that pollutes accepted data downstream). Only removes a
-    terminator that is *trailing* -- after stripping trailing whitespace, the
-    string ends with the terminator; loops to also catch a terminator
-    followed by more trailing whitespace/terminators. A terminator occurring
-    mid-text (e.g. quoted inside sampled prose) is never touched, since it
-    isn't at the end of the string.
-    """
-    if not isinstance(text, str):
-        return text
-    result = text
-    while True:
-        stripped = result.rstrip()
-        matched = None
-        for terminator in _CHAT_TEMPLATE_TERMINATORS:
-            if stripped.endswith(terminator):
-                matched = terminator
-                break
-        if matched is None:
-            return stripped
-        result = stripped[: -len(matched)]
+# `_strip_trailing_chat_terminator` used to be defined here. Moved to
+# teacher_text.py (D2, ft-fixD review finding) so gen_router.py's
+# TinkerRouterTeacher.sample() can share the exact same stripping logic
+# instead of leaving its decoded output unstripped -- see that module's
+# docstring for the full rationale. Imported at module top under the
+# original name so existing callers/tests that reach into gen_prose for
+# `_strip_trailing_chat_terminator` keep working unchanged.
 
 
 class TinkerProseTeacher:

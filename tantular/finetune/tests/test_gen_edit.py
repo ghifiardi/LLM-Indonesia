@@ -683,3 +683,27 @@ def test_target_bank_entries_pass_bridge_validation_via_spelling_corruption():
                 instruction="Perbaiki ejaan kata yang salah tersebut.",
             )
             assert ok, f"entry {i} failed reconstruction: {reason} -- {target['text']!r}"
+
+
+def test_target_bank_entries_all_have_a_terminology_candidate():
+    # Regression for the D1 gap (ft-fixD): entry 8 used to be "Pelanggan
+    # setia mendapatkan diskon khusus sebesar 20 persen setiap bulan." --
+    # its only `_TERM_PAIRS` term ("Pelanggan") was sentence-initial and
+    # capitalized, and `_find_term_in_text` matches lowercase occurrences
+    # only (by design -- see its docstring), so `_corrupt_terminology`
+    # dead-ended into "no_corruption_candidate" every single time that entry
+    # was drawn for the "terminology" subtype. `_corrupt_terminology` itself
+    # is fully deterministic (the `rng` parameter it takes is unused --
+    # `_find_term_in_text` + a fixed-count `re.sub` do all the work), so
+    # unlike `_corrupt_spelling` this doesn't need multi-attempt retries to
+    # prove non-dead-end: a single call per entry is the correct, tightest
+    # assertion.
+    from tantular.finetune.gen_edit import _TARGETS, _corrupt_terminology, _rng_for
+    for i, target in enumerate(_TARGETS):
+        corruption = _corrupt_terminology(target, _rng_for(f"bank-check-term::{i}", 0))
+        assert corruption is not None, (
+            f"entry {i} yields no terminology candidate: {target['text']!r}"
+        )
+        corrupted_text, instruction = corruption
+        assert corrupted_text != target["text"]
+        assert isinstance(instruction, str) and instruction.strip() == instruction

@@ -113,3 +113,88 @@ directly-populated stub internals, never via `_ensure_ready`'s real
 ## Commit
 
 `fix(finetune): expand edit target bank, strip teacher im_end, deterministic train-tiebreak dedup`
+
+## Rejection fix pass (bdef09c rejected on two Important findings)
+
+Commit `bdef09c` was rejected on two Important findings from review. Both fixed below.
+
+### D1 gap — entry 8 had no lowercase mid-sentence `_TERM_PAIRS` term
+
+Despite the module docstring's claim that every `_TARGETS` entry contains a
+mid-sentence lowercase `_TERM_PAIRS` term, entry 8 ("Pelanggan setia
+mendapatkan diskon khusus sebesar 20 persen setiap bulan.") did not: its
+only term-bank word ("Pelanggan") was sentence-initial and capitalized, and
+`_find_term_in_text` matches lowercase occurrences only by design (so a
+capitalized find/replace pair never trips `_guard_name_number_altered`'s
+"looks like a name" heuristic). Verified programmatically that entry 8 was
+the *only* offender across all 25 entries before assuming it was isolated.
+
+Fix: reworded entry 8 to
+`"Divisi layanan memberikan diskon khusus kepada pelanggan setia sebesar 20
+persen setiap bulan."` — same schema (`text`/`number="20"`/`name=None`),
+final period preserved, distinct from every other entry, and "pelanggan"
+now appears lowercase mid-sentence. Re-verified `_find_term_in_text` returns
+non-None for all 25 entries after the change, and that all entry texts
+remain unique.
+
+Test added in `tests/test_gen_edit.py`:
+- `test_target_bank_entries_all_have_a_terminology_candidate` — calls
+  `_corrupt_terminology` (not `_find_term_in_text` directly, since
+  `_corrupt_terminology` is the actual synthesis-path function, and it is
+  fully deterministic — its `rng` parameter is unused, so a single call per
+  entry is the correct, tightest assertion, unlike the multi-attempt-retry
+  pattern needed for `_corrupt_spelling`) across every `_TARGETS` entry,
+  asserting a non-None candidate every time.
+
+### D2 gap — `TinkerRouterTeacher.sample()` never stripped the trailing terminator
+
+`_strip_trailing_chat_terminator` previously lived only in `gen_prose.py`
+and was applied only inside `TinkerProseTeacher.sample()`.
+`TinkerRouterTeacher.sample()` in `gen_router.py` decodes teacher output
+with the identical `tokenizer.decode` pattern and feeds it straight into
+`_split_candidates` (the router synthesis path), which does not itself
+strip a trailing terminator — so `<|im_end|>` could land inside an accepted
+router-synthesis completion.
+
+Fix: extracted the stripping helper into a new shared module,
+`tantular/finetune/teacher_text.py`
+(`strip_trailing_chat_terminator(text)`), since no existing shared-util
+module fit (`provenance.py` is schema-specific, `bridge_client.py` is
+JS-bridge-specific) and cross-importing between `gen_prose.py` and
+`gen_router.py` directly would have coupled two otherwise-independent
+synthesis modules to each other instead of to a common utility.
+`gen_prose.py` now imports it under the original name
+`_strip_trailing_chat_terminator` (re-exported at module top, so existing
+callers/tests reaching into `gen_prose` for that name keep working
+unchanged). `gen_router.py`'s `TinkerRouterTeacher.sample()` now calls
+`strip_trailing_chat_terminator` on its decoded output before returning.
+
+`TinkerEditTeacher` in `gen_edit.py` needs no code change: added a comment
+on `_parse_edits_json` (its consumer) documenting why — that function slices
+`text.find("{")..text.rfind("}")`, structurally discarding any trailing
+terminator token regardless of whether it was stripped upstream, so
+stripping there would be redundant, not incorrect.
+
+Tests added in `tests/test_gen_router.py` (mirrors
+`test_gen_prose.py`'s `TinkerProseTeacher` stub-teacher tests, same stub
+classes re-declared locally):
+- `test_tinker_router_teacher_sample_strips_trailing_im_end`
+- `test_tinker_router_teacher_sample_preserves_mid_text_token`
+
+## Verification (rejection fix pass)
+
+```
+tantular/finetune/.venv/bin/python -m pytest tantular/finetune/tests/ -q
+216 passed in 2.07s
+```
+
+213 pre-existing (post-bdef09c) tests + 3 new (1 D1 terminology-bank test +
+2 D2 router-teacher tests), all green. `review_promote.py` not touched.
+No Tinker/API calls made anywhere (`TinkerRouterTeacher.sample()` was
+exercised via directly-populated stub internals, never via `_ensure_ready`'s
+real `tinker`/`tinker_cookbook` imports); `~/.tantular-tinker.env` was never
+read.
+
+## Commit
+
+`fix(finetune): terminology-usable target entry 8 + shared im_end strip for router teacher`

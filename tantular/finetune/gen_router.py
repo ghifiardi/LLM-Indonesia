@@ -32,6 +32,7 @@ import json
 import re
 
 from tantular.finetune.provenance import make_example
+from tantular.finetune.teacher_text import strip_trailing_chat_terminator
 
 # Source of truth: tantular_office_addin/src/chat/intentRouter.js INTENTS.
 ROUTER_INTENTS = (
@@ -439,11 +440,21 @@ class TinkerRouterTeacher:
 
     def sample(self, messages):
         """messages: list of {"role", "content"} dicts. Returns decoded
-        assistant-turn text."""
+        assistant-turn text.
+
+        D2 (ft-fixD review finding): the decoded text feeds `_split_candidates`
+        (the router synthesis path), which does NOT itself strip a trailing
+        chat-template terminator -- unlike gen_prose.py's TinkerProseTeacher,
+        whose `sample()` already stripped it before this fix. Without
+        stripping here, `<|im_end|>` could land inside an accepted
+        router-synthesis completion. Shared with TinkerProseTeacher via
+        `teacher_text.strip_trailing_chat_terminator`.
+        """
         self._ensure_ready()
         prompt = self._renderer.build_generation_prompt(messages, role="assistant")
         result = self._sampling_client.sample(
             prompt=prompt, num_samples=1, sampling_params=self._sampling_params
         ).result()
         out_tokens = result.sequences[0].tokens
-        return self._tokenizer.decode(out_tokens)
+        raw = self._tokenizer.decode(out_tokens)
+        return strip_trailing_chat_terminator(raw)
