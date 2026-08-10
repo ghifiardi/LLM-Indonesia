@@ -100,6 +100,18 @@ test("static handler: blocks data/ and certs/ but still serves normal assets and
     assert.equal(normalAsset.status, 200);
     assert.equal(normalAsset.headers["access-control-allow-origin"], "*");
 
+    // Case variants must also be blocked: on case-insensitive filesystems
+    // (APFS, NTFS), fs.readFile resolves "/DATA/..." to the same file as
+    // "/data/...", so the guard must not be a case-sensitive string compare.
+    const upperData = await get(scheme, port, "/DATA/workspace.json");
+    assert.equal(upperData.status, 404);
+
+    const upperCerts = await get(scheme, port, "/Certs/localhost.key");
+    assert.equal(upperCerts.status, 404);
+
+    const mixedData = await get(scheme, port, "/dAtA/workspace.json");
+    assert.equal(mixedData.status, 404);
+
     // /api/workspace behavior (origin allowlist) is unaffected by this change.
     const apiNoOrigin = await get(scheme, port, "/api/workspace");
     assert.equal(apiNoOrigin.status, 200);

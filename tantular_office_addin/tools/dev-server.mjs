@@ -94,7 +94,12 @@ function handler(req, res) {
   // 403) so we don't confirm these paths exist.
   const relativePath = path.relative(root, filePath);
   const relativeSegments = relativePath.split(path.sep);
-  if (relativeSegments[0] === "data" || relativeSegments[0] === "certs") {
+  // Case-insensitive compare: APFS/NTFS resolve "/DATA/x" to the same file as
+  // "/data/x", so a case-sensitive check here is bypassable on those file
+  // systems. This over-blocks on case-sensitive Linux filesystems, which is
+  // acceptable and safer than under-blocking.
+  const firstSegment = relativeSegments[0]?.toLowerCase();
+  if (firstSegment === "data" || firstSegment === "certs") {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
     return;
   }
