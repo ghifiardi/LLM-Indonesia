@@ -88,6 +88,17 @@ function handler(req, res) {
     return;
   }
 
+  // The workspace store (data/workspace.json) and TLS private key material
+  // (certs/) must never be reachable via the static file handler, which
+  // serves Access-Control-Allow-Origin: * to any web page. Return 404 (not
+  // 403) so we don't confirm these paths exist.
+  const relativePath = path.relative(root, filePath);
+  const relativeSegments = relativePath.split(path.sep);
+  if (relativeSegments[0] === "data" || relativeSegments[0] === "certs") {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
+    return;
+  }
+
   fs.readFile(filePath, (err, data) => {
     if (err) {
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
