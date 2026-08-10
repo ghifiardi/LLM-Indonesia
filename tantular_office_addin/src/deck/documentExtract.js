@@ -5,10 +5,20 @@
 import { companionUrl } from "../companionUrl.js";
 
 const DEFAULT_DOC_EXTRACT_URL = companionUrl("/api/document-extract");
+export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+// Pure, testable upload-size guard. Throws the Indonesian error the UI
+// surfaces to the user; kept separate from extractDocumentFile so tests can
+// exercise the boundary without mocking fetch/FormData.
+export function assertUploadSize(file) {
+  if (!file) throw new Error("Tidak ada file dokumen.");
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error("File terlalu besar (maks 100 MB).");
+  }
+}
 
 export async function extractDocumentFile(file, endpoint = DEFAULT_DOC_EXTRACT_URL) {
-  if (!file) throw new Error("Tidak ada file dokumen.");
-  if (file.size > 35 * 1024 * 1024) throw new Error("File terlalu besar (maks 35 MB). ");
+  assertUploadSize(file);
 
   // Lightweight direct browser extraction for simple text files.
   if (isPlainText(file.name, file.type)) {

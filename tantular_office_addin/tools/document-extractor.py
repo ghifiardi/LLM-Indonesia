@@ -26,7 +26,12 @@ from xml.etree import ElementTree as ET
 
 HOST = "127.0.0.1"
 PORT = 8787
-MAX_BYTES = 35 * 1024 * 1024
+# 100 MB. This is a local-only helper (127.0.0.1) that reads the whole
+# request body into memory in one shot (see do_POST below) — acceptable at
+# this size for a single local developer/workshop process, but do not raise
+# this further without switching to a streaming/chunked read.
+MAX_BYTES = 100 * 1024 * 1024
+MAX_MB_LABEL = MAX_BYTES // (1024 * 1024)
 
 TEXT_EXTS = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".log"}
 
@@ -299,12 +304,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length > MAX_BYTES:
-                raise ValueError("File too large")
+                raise ValueError(f"File terlalu besar (maks {MAX_MB_LABEL} MB).")
             content_type = self.headers.get("Content-Type", "")
             body = self.rfile.read(length)
             filename, data = parse_multipart_file(content_type, body, "file")
             if len(data) > MAX_BYTES:
-                raise ValueError("File too large")
+                raise ValueError(f"File terlalu besar (maks {MAX_MB_LABEL} MB).")
             text, kind = extract_text(filename, data)
             text = clean_text(text)
             payload = {
