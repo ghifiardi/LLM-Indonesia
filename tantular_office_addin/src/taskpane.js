@@ -164,7 +164,7 @@ function bootstrap() {
       renderForHost();
       setStatus(`Terhubung ke ${state.host}.`, "ok");
       mountWorkspaceUi();
-      if (state.host === "Word") {
+      if (state.host === "Word" || state.host === "Excel") {
         import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
       }
       // Warm up the Studio model in the background: the first Studio call
@@ -187,7 +187,7 @@ function bootstrap() {
     renderForHost();
     setStatus("Mode pratinjau browser: Office.js belum tersedia.", "");
     mountWorkspaceUi();
-    if (state.host === "Word") {
+    if (state.host === "Word" || state.host === "Excel") {
       import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
     }
   }

@@ -780,7 +780,7 @@ function basicBlockText(block, listIndex) {
 }
 
 // Keep in sync with the tag shown in src/taskpane.html next to the chat title.
-export const TASKPANE_BUILD = "b0810c";
+export const TASKPANE_BUILD = "b0810d";
 
 // Insert a formatted answer. When `afterText` is provided and located, the
 // content is placed immediately after that anchor (end of the queried
