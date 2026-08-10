@@ -18,8 +18,13 @@ import {
   getDocumentBodyText,
   insertDocxIntoWord,
   insertMarkdownAtSelection,
-  writeWorkbookSpecToExcel
+  writeWorkbookSpecToExcel,
+  TASKPANE_BUILD
 } from "./officeClient.js";
+
+// Keep the visible header tags in lockstep with the JS build: a hardcoded
+// HTML tag went stale once and masqueraded as a caching problem.
+document.querySelectorAll(".build-tag").forEach((el) => { el.textContent = TASKPANE_BUILD; });
 import { styleOptions } from "./deck/deckStyles.js";
 import {
   planDeck,
