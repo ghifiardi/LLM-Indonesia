@@ -1,6 +1,10 @@
 import { streamedAnswer } from "./index.js";
 import { ACTIONS, scopedUserPrompt } from "../../prompts.js";
 
+// Canonical system prompt lives in prompts.js ACTIONS.word_summarize; exported
+// here for promptRegistry.js to enumerate/hash without duplicating content.
+export const RINGKAS_SYSTEM = ACTIONS.word_summarize.system;
+
 export function runRingkas({ instruction, contextText, history, emit, signal }) {
   const action = ACTIONS.word_summarize;
   const text = contextText || "";

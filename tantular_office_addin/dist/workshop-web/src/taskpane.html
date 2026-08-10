@@ -5,6 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Tantular</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <!-- ES5 on purpose: on legacy webviews (IE11 in Office 2016/2019 Windows, or
+       Office 2021 without WebView2) the ES-module bundle below never executes,
+       leaving a silent white pane. This guard runs anywhere and replaces the
+       mystery blank with a clear Indonesian message. Static literals only. -->
+  <script>
+    (function () {
+      var modern = typeof Promise !== "undefined" && typeof fetch !== "undefined" &&
+        typeof Symbol !== "undefined";
+      if (!modern) {
+        window.onload = function () {
+          document.body.innerHTML =
+            '<div style="padding:16px;font-family:sans-serif">' +
+            '<h3>Versi Office tidak didukung</h3>' +
+            '<p>Tantular memerlukan Microsoft 365, Office 2021, atau Office 2024 ' +
+            '(di Windows: dengan WebView2). Office 2016/2019 Windows tidak didukung — ' +
+            'gunakan Word di web (office.com) di komputer ini, atau hubungi panitia workshop.</p></div>';
+        };
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="./taskpane.css" />
 </head>
 <body>
@@ -12,14 +32,14 @@
     <header class="hero">
       <div class="mark" aria-hidden="true">T</div>
       <div>
-        <h1>Tantular <small style="font-size:11px;color:#98a2b3;font-weight:400">b0806h</small></h1>
+        <h1>Tantular <small style="font-size:11px;color:#98a2b3;font-weight:400">b0810a</small></h1>
         <p id="host-subtitle">Asisten privat Bahasa Indonesia untuk Microsoft 365.</p>
       </div>
     </header>
 
     <section class="card chat hidden" id="chat-card" aria-labelledby="chat-title">
       <div class="section-title-row">
-        <h2 id="chat-title">💬 Tantular Chat <small style="font-size:10px;color:#98a2b3;font-weight:400">b0806h</small></h2>
+        <h2 id="chat-title">💬 Tantular Chat <small style="font-size:10px;color:#98a2b3;font-weight:400">b0810a</small></h2>
         <button id="chat-context-pill" class="pill pill-button" type="button"
                 title="Konteks yang akan dibaca Tantular">Konteks: —</button>
       </div>
@@ -79,13 +99,21 @@
     <section class="card" aria-labelledby="input-title">
       <div class="section-title-row">
         <h2 id="input-title">Teks / seleksi</h2>
-        <button id="load-selection" class="secondary" type="button">Ambil seleksi</button>
+        <div class="button-row">
+          <button id="load-selection" class="secondary" type="button">Ambil seleksi</button>
+          <button id="workspace-send" class="secondary" type="button">Kirim ke aplikasi lain</button>
+        </div>
       </div>
       <textarea id="source-text" rows="9" placeholder="Pilih teks/cell di Office lalu klik Ambil seleksi, atau tempel teks di sini."></textarea>
       <div class="meta-row">
         <span id="selection-meta">Belum ada seleksi.</span>
         <span id="char-count">0 karakter</span>
       </div>
+      <div id="workspace-banner" class="workspace-banner hidden"></div>
+      <details id="workspace-inbox" class="workspace-inbox">
+        <summary>Ambil dari aplikasi lain (10 kiriman terakhir)</summary>
+        <div id="workspace-inbox-list"></div>
+      </details>
     </section>
 
     <section id="document-studio" class="card document-studio hidden" aria-labelledby="document-title">

@@ -325,4 +325,38 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .edit-old, .edit-new { margin-top: 3px; padding: 7px 8px; border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .edit-old { background: #fff1f0; color: #7a271a; text-decoration: line-through; }
 .edit-new { background: #ecfdf3; color: #05603a; }
+
+.workspace-send-hint { color: var(--muted); margin: 4px 0 0; font-size: 11px; }
+.workspace-banner {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #fff6e6;
+  border: 1px solid #ecd4b3;
+}
+.workspace-banner-text { margin: 0 0 8px; font-size: 12.5px; color: var(--ink); }
+.workspace-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.workspace-actions button.small { padding: 6px 10px; font-size: 12px; }
+.workspace-confirm-text { font-size: 12px; color: var(--ink); font-weight: 650; }
+.workspace-inbox { margin-top: 10px; font-size: 12.5px; }
+.workspace-inbox summary { cursor: pointer; font-weight: 700; color: var(--brand-dark); }
+.workspace-inbox-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+}
+.workspace-inbox-row:first-child { border-top: 0; }
+.workspace-inbox-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.workspace-used-check { color: var(--safe); font-weight: 700; }
+.link {
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 8px;
+  font-weight: 650;
+  text-decoration: underline;
+}
+.link:hover { color: var(--ink); }
 .edit-preview > .primary { width: 100%; }

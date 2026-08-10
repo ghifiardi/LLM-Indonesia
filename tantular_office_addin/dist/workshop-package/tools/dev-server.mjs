@@ -3,6 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createWorkspaceStore, handleWorkspaceRequest } from "./workspace.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -36,6 +37,8 @@ if (officeCert && officeKey && fs.existsSync(officeCert) && fs.existsSync(office
   keyPath = officeKey;
 }
 
+const workspaceStore = createWorkspaceStore({ filePath: path.join(root, "data", "workspace.json") });
+
 const mime = new Map([
   [".html", "text/html; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
@@ -56,6 +59,11 @@ function handler(req, res) {
     return;
   }
 
+  if (url.pathname === "/api/ocr") {
+    proxyOcr(req, res);
+    return;
+  }
+
   if (url.pathname === "/api/chat-completions") {
     proxyChatCompletions(req, res);
     return;
@@ -66,11 +74,33 @@ function handler(req, res) {
     return;
   }
 
+  if (url.pathname.startsWith("/api/workspace")) {
+    if (!allowApiOrigin(req, res)) return;
+    handleWorkspaceRequest(workspaceStore, req, res, url);
+    return;
+  }
+
   const safePath = path.normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, "");
   const filePath = path.join(root, safePath || "README.md");
 
   if (!filePath.startsWith(root)) {
     res.writeHead(403).end("Forbidden");
+    return;
+  }
+
+  // The workspace store (data/workspace.json) and TLS private key material
+  // (certs/) must never be reachable via the static file handler, which
+  // serves Access-Control-Allow-Origin: * to any web page. Return 404 (not
+  // 403) so we don't confirm these paths exist.
+  const relativePath = path.relative(root, filePath);
+  const relativeSegments = relativePath.split(path.sep);
+  // Case-insensitive compare: APFS/NTFS resolve "/DATA/x" to the same file as
+  // "/data/x", so a case-sensitive check here is bypassable on those file
+  // systems. This over-blocks on case-sensitive Linux filesystems, which is
+  // acceptable and safer than under-blocking.
+  const firstSegment = relativeSegments[0]?.toLowerCase();
+  if (firstSegment === "data" || firstSegment === "certs") {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
     return;
   }
 
@@ -140,6 +170,65 @@ function proxyDocumentExtract(req, res) {
   });
 
   req.pipe(proxyReq);
+}
+
+function proxyOcr(req, res) {
+  if (!allowApiOrigin(req, res)) return;
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      ...corsHeaders(req),
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Private-Network": "true"
+    });
+    res.end();
+    return;
+  }
+  if (req.method !== "GET" && req.method !== "POST") {
+    res.writeHead(405, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+    return;
+  }
+
+  const requestHeaders = { "Content-Type": req.headers["content-type"] || "application/octet-stream" };
+  if (req.method === "POST") {
+    requestHeaders["Content-Length"] = req.headers["content-length"] || undefined;
+  }
+
+  const proxyReq = http.request(
+    {
+      hostname: "127.0.0.1",
+      port: 8787,
+      path: "/api/ocr",
+      method: req.method,
+      headers: requestHeaders
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode || 502, {
+        "Content-Type": proxyRes.headers["content-type"] || "application/json; charset=utf-8",
+        ...corsHeaders(req),
+        "Cache-Control": "no-store"
+      });
+      proxyRes.pipe(res);
+    }
+  );
+
+  proxyReq.on("error", (error) => {
+    res.writeHead(502, {
+      "Content-Type": "application/json; charset=utf-8",
+      ...corsHeaders(req)
+    });
+    res.end(JSON.stringify({
+      ok: false,
+      error: `OCR proxy gagal: ${error.message}. Jalankan: npm run doc-setup lalu npm run doc-server`
+    }));
+  });
+
+  if (req.method === "POST") {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
 }
 
 function proxyChatCompletions(req, res) {

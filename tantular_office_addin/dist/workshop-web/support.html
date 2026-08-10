@@ -25,6 +25,19 @@
     <li>Sertifikat HTTPS lokal tepercaya yang dipasang oleh installer workshop.</li>
     <li>Tantular Companion berjalan di <code>https://localhost:3000</code>.</li>
   </ul>
+  <h2>Baru: OCR Apple Vision (Mac), desain deck baru, batas file 100 MB</h2>
+  <ul>
+    <li><strong>Batas unggah dokumen naik ke 100 MB</strong> (sebelumnya 35 MB).</li>
+    <li><strong>6 gaya desain deck baru</strong> di dropdown "Gaya desain" Deck Studio: Nusantara, Monokrom, Samudra, Terang, Tegas, Akademik (plus "Bebas / custom").</li>
+    <li><strong>Mac:</strong> ekstraksi teks dari gambar kini memakai <em>Apple Vision OCR</em> (lebih akurat untuk teks Indonesia). Windows tetap memakai model vision lokal seperti biasa.</li>
+  </ul>
+  <h3>Sudah pernah memasang sebelumnya? Ini yang perlu diperbarui</h3>
+  <ul>
+    <li><strong>Panel Tantular (gaya desain baru): otomatis, tanpa unduh ulang.</strong> Cukup tutup Office sepenuhnya (<code>Cmd+Q</code> di Mac), buka kembali, lalu pastikan tag build di header panel menunjukkan <strong>b0810a</strong> atau lebih baru. Masih tag lama? Tutup penuh Office sekali lagi.</li>
+    <li><strong>Batas 100 MB dan OCR Apple Vision: perlu paket Companion terbaru.</strong> Paket lama belum memuat komponen barunya. Jalankan ulang perintah instalasi satu baris di bawah (bagian "Instalasi satu perintah") — paket terbaru akan terunduh otomatis, pengaturan Anda tidak hilang.</li>
+    <li><strong>Khusus Mac, setelah unduh ulang:</strong> di folder paket jalankan <code>npm run doc-setup</code> satu kali, lalu jalankan <code>npm run doc-server</code> berdampingan dengan Companion. Setelah itu, saat ekstraksi gambar, baris status akan menampilkan "Apple Vision".</li>
+    <li><strong>Windows:</strong> cukup unduh ulang paket untuk batas 100 MB; OCR tetap memakai model vision lokal (tidak ada langkah tambahan).</li>
+  </ul>
   <h2>Langkah demi langkah (ringkas)</h2>
   <ol>
     <li>Jalankan <strong>satu perintah instalasi</strong> sesuai sistem operasi (bagian berikutnya). Node.js, Ollama, sertifikat, dan model Tantular (dari ollama.com, sesuai RAM) dipasang otomatis.</li>
@@ -33,6 +46,11 @@
     <li>Di pengaturan Tantular klik <strong>Refresh</strong> lalu <strong>Tes model terpilih</strong> — harus membalas dalam hitungan detik (panggilan pertama bisa lebih lama karena model baru dimuat).</li>
     <li>Klik <strong>Buat Deck</strong> / fitur Studio lainnya <strong>sekali</strong>, lalu tunggu spinner selesai. Klik berulang tidak mempercepat — justru menambah antrean dan memperlambat.</li>
   </ol>
+  <h2>Kompatibilitas versi Office</h2>
+  <p><strong>Teruji:</strong> Microsoft 365 (langganan) di Mac &amp; Windows, dan Office di web. <strong>Dirancang kompatibel (belum diverifikasi di perangkat nyata):</strong> Office perpetual <strong>2021/2024</strong> — Tantular memakai API dasar (WordApi 1.1) dengan fallback otomatis, jadi secara teknis seharusnya berjalan; jika Anda memakai Office 2021/2024, bantu kami dengan menjalankan checklist di <code>docs/OFFICE_PERPETUAL_COMPAT.md</code> (ada dalam paket workshop) dan laporkan hasilnya ke fasilitator. <strong>Tidak didukung:</strong> Office 2019/2016 Windows (webview lama — pane akan blank; gunakan Word di web di mesin tersebut).</p>
+  <h2>Persiapan sebelum workshop (preflight)</h2>
+  <p><strong>Kirim versi Office Anda ke panitia</strong> beberapa hari sebelum acara: buka Word → <em>File → Account</em> (Windows) atau <em>Word → About Word</em> (Mac), foto/salin versi yang tertera. Ini mencegah kejutan kompatibilitas di hari-H.</p>
+  <p><strong>Windows dengan Office 2021:</strong> pastikan <em>Microsoft Edge WebView2 Runtime</em> terpasang (unduhan kecil dari situs Microsoft; sudah bawaan di Windows 11 dan Microsoft 365 terbaru). Tanpa WebView2, panel Tantular dapat tampil kosong — kini panel akan menampilkan pesan "Versi Office tidak didukung" alih-alih layar putih.</p>
   <h2>Instalasi satu perintah (paling mudah)</h2>
   <p>Salin satu baris sesuai sistem operasi, tempel, lalu Enter. Semua kebutuhan (termasuk Node.js dan Ollama bila belum ada) dipasang otomatis.</p>
   <p><strong>Mac</strong> — buka aplikasi <em>Terminal</em>, lalu jalankan:</p>
