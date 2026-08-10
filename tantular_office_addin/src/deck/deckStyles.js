@@ -104,10 +104,34 @@ export const PACKS = {
   }
 };
 
+// "Bebas / custom" — same id (`custom_freeform`) as before the design-system
+// packs landed, so the existing dropdown branch in src/taskpane.js keeps
+// working unchanged. Its resolved look starts from this sensible neutral
+// base and is then transformed by the pre-pack keyword inference (see
+// inferStyleFromInstructions below) plus the explicit-hex override in
+// applyProjectPalette — i.e. it "follows the style guide, brand colors, and
+// visual direction" supplied in the project instructions, same as before.
+const CUSTOM_FREEFORM = {
+  id: "custom_freeform",
+  name: "Bebas / custom",
+  label: "Bebas / custom",
+  hint: "Ikuti panduan gaya, warna brand, dan arahan visual di instruksi project.",
+  background: { kind: "solid", bg: "#FFFFFF" },
+  motif: "none",
+  palette: { bg: "#FFFFFF", ink: "#111827", muted: "#667085", accent: "#1F6FEB", accent2: "#A6351D" },
+  type_scale: { display: 40, h1: 26, body: 16, caption: 11, boldHeadings: true },
+  chrome: { footer: true, slideNumber: true },
+  panel: "#F7F8FA",
+  panelAlt: "#EEF2F7",
+  onAccent: "#FFFFFF",
+  heroBg: "#FFFFFF",
+  font: "Segoe UI"
+};
+
 export const DEFAULT_STYLE = "nusantara";
 
 export function getStyle(styleId, projectInstructions = "") {
-  const base = PACKS[styleId] || PACKS[DEFAULT_STYLE];
+  const base = styleId === CUSTOM_FREEFORM.id ? CUSTOM_FREEFORM : (PACKS[styleId] || PACKS[DEFAULT_STYLE]);
   const flat = {
     ...base,
     bg: base.background.bg,
@@ -117,11 +141,12 @@ export function getStyle(styleId, projectInstructions = "") {
     text: base.palette.ink,
     muted: base.palette.muted
   };
-  return applyProjectPalette(flat, projectInstructions);
+  const styled = styleId === CUSTOM_FREEFORM.id ? inferStyleFromInstructions(flat, projectInstructions) : flat;
+  return applyProjectPalette(styled, projectInstructions);
 }
 
 export function styleOptions() {
-  return Object.values(PACKS).map((p) => ({
+  const named = Object.values(PACKS).map((p) => ({
     id: p.id,
     name: p.name,
     label: p.label,
@@ -132,6 +157,20 @@ export function styleOptions() {
     type_scale: p.type_scale,
     chrome: p.chrome
   }));
+  return [
+    ...named,
+    {
+      id: CUSTOM_FREEFORM.id,
+      name: CUSTOM_FREEFORM.name,
+      label: CUSTOM_FREEFORM.label,
+      hint: CUSTOM_FREEFORM.hint,
+      background: CUSTOM_FREEFORM.background,
+      motif: CUSTOM_FREEFORM.motif,
+      palette: CUSTOM_FREEFORM.palette,
+      type_scale: CUSTOM_FREEFORM.type_scale,
+      chrome: CUSTOM_FREEFORM.chrome
+    }
+  ];
 }
 
 export function extractHexPalette(text) {
@@ -144,6 +183,71 @@ export function extractHexPalette(text) {
       seen.add(c);
       return true;
     });
+}
+
+// Keyword inference for the "Bebas / custom" pack only: nudges the flat
+// custom_freeform palette toward a mood implied by the project instructions
+// (dark/academic/warm/minimal), same behavior as before the design-system
+// packs existed. Named packs are unaffected.
+function inferStyleFromInstructions(style, projectInstructions) {
+  const text = String(projectInstructions || "").toLowerCase();
+  const out = { ...style };
+
+  if (/\b(dark|gelap|neon|cyber|futuristic|futuristik|terminal|black)\b/.test(text)) {
+    Object.assign(out, {
+      bg: "#0B1020",
+      panel: "#141B2D",
+      panelAlt: "#1F2A44",
+      accent: "#24BDAD",
+      accent2: "#EC008C",
+      title: "#F8FAFC",
+      text: "#E5E7EB",
+      muted: "#A8B3C7",
+      onAccent: "#07111F",
+      heroBg: "#070B16"
+    });
+  } else if (/\b(academic|akademik|research|paper|jurnal|lecture|kuliah|university|universitas)\b/.test(text)) {
+    Object.assign(out, {
+      bg: "#FBFCFE",
+      panel: "#EEF4FF",
+      panelAlt: "#E4ECF8",
+      accent: "#234B75",
+      accent2: "#C58A2A",
+      title: "#14213D",
+      text: "#25364D",
+      muted: "#667085",
+      onAccent: "#FFFFFF",
+      heroBg: "#F7FAFF"
+    });
+  } else if (/\b(warm|hangat|earth|natural|heritage|batik|premium|luxury|elegant|elegan)\b/.test(text)) {
+    Object.assign(out, {
+      bg: "#FFFDF8",
+      panel: "#F5EBDD",
+      panelAlt: "#ECDCC4",
+      accent: "#A6351D",
+      accent2: "#D9A441",
+      title: "#2B2118",
+      text: "#3C3026",
+      muted: "#7A6A58",
+      onAccent: "#FFFFFF",
+      heroBg: "#FFF8EC"
+    });
+  } else if (/\b(minimal|minimalist|minimalis|clean|bersih|white|putih|editorial)\b/.test(text)) {
+    Object.assign(out, {
+      bg: "#FFFFFF",
+      panel: "#F5F7FA",
+      panelAlt: "#EBEEF3",
+      accent: "#111827",
+      accent2: "#7C3AED",
+      title: "#111827",
+      text: "#374151",
+      muted: "#6B7280",
+      onAccent: "#FFFFFF",
+      heroBg: "#FFFFFF"
+    });
+  }
+
+  return out;
 }
 
 // Optional opt-in override: if the user's instructions carry explicit brand
