@@ -8,11 +8,13 @@ import pytest
 from tantular.finetune.bridge_client import BridgeClient
 from tantular.finetune.families import PROSE_PIPELINES, ROUTER_INTENTS
 from tantular.finetune.gen_edit import SYNTHESIZABLE_SUBTYPES
+from tantular.finetune.dedup import DEFAULT_THRESHOLD as DEFAULT_DEDUP_THRESHOLD
 from tantular.finetune.generate import (
     DEFAULT_AVG_TOKENS_BY_AXIS,
     EXPOSURE_TARGETS,
     BudgetExceeded,
     VerifyError,
+    _apply_global_dedup,
     _augment_review_entries,
     _build_family_pool,
     _distribute_evenly,
@@ -74,6 +76,101 @@ def test_dedup_text_uses_user_turn_not_completion():
         {"role": "assistant", "content": "EDIT_TEKS"},
     ]}
     assert _dedup_text(example) == "USER TURN"
+
+
+# --- D3 (ft-fixD): cross-split dedup tiebreak -------------------------------
+
+def _accepted_example(id_, split, user_text):
+    return {
+        "id": id_, "task": "edit", "family": "edit:koreksi::0000", "split": split,
+        "messages": [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": "OUT"},
+        ],
+        "provenance": {"status": "accepted", "reject_reason": None},
+    }
+
+
+def test_apply_global_dedup_protects_held_out_split_even_when_train_generated_first():
+    # `accepted` order = generation order: the train copy appears FIRST,
+    # its eval near-duplicate SECOND. A naive first-occurrence-wins dedup
+    # would keep the train copy and drop eval; the policy must invert that.
+    accepted = [
+        _accepted_example("train-1", "train", "Laporan keuangan perusahaan tahun ini sangat baik sekali."),
+        _accepted_example("eval-1", "eval", "Laporan keuangan perusahaan tahun ini sangat baik sekali."),
+    ]
+    kept, rejected, dedup_log = _apply_global_dedup(accepted, [], DEFAULT_DEDUP_THRESHOLD)
+
+    assert [ex["id"] for ex in kept] == ["eval-1"]
+    assert [d["id"] for d in dedup_log] == ["train-1"]
+    assert len(rejected) == 1
+    assert rejected[0]["id"] == "train-1"
+    assert rejected[0]["provenance"]["status"] == "rejected"
+    assert rejected[0]["provenance"]["reject_reason"] == "near_duplicate_global"
+
+
+def test_apply_global_dedup_protects_challenge_split_too():
+    accepted = [
+        _accepted_example("train-1", "train", "Karyawan baru wajib mengikuti pelatihan orientasi perusahaan."),
+        _accepted_example("challenge-1", "challenge", "Karyawan baru wajib mengikuti pelatihan orientasi perusahaan."),
+    ]
+    kept, rejected, dedup_log = _apply_global_dedup(accepted, [], DEFAULT_DEDUP_THRESHOLD)
+    assert [ex["id"] for ex in kept] == ["challenge-1"]
+    assert [d["id"] for d in dedup_log] == ["train-1"]
+
+
+def test_apply_global_dedup_ties_within_same_split_keep_original_order():
+    # Two train-split near-duplicates: no cross-split protection applies,
+    # so the ORIGINAL (generation) order tiebreak still governs -- first
+    # occurrence kept, exactly like plain `near_duplicates`.
+    accepted = [
+        _accepted_example("train-1", "train", "Pendapatan perusahaan naik dua belas persen kuartal ini."),
+        _accepted_example("train-2", "train", "Pendapatan perusahaan naik dua belas persen kuartal ini."),
+    ]
+    kept, rejected, dedup_log = _apply_global_dedup(accepted, [], DEFAULT_DEDUP_THRESHOLD)
+    assert [ex["id"] for ex in kept] == ["train-1"]
+    assert [d["id"] for d in dedup_log] == ["train-2"]
+
+
+def test_apply_global_dedup_ties_within_eval_split_keep_original_order():
+    accepted = [
+        _accepted_example("eval-1", "eval", "Siti menyampaikan hasil audit kepada tim pagi ini."),
+        _accepted_example("eval-2", "eval", "Siti menyampaikan hasil audit kepada tim pagi ini."),
+    ]
+    kept, rejected, dedup_log = _apply_global_dedup(accepted, [], DEFAULT_DEDUP_THRESHOLD)
+    assert [ex["id"] for ex in kept] == ["eval-1"]
+    assert [d["id"] for d in dedup_log] == ["eval-2"]
+
+
+def test_apply_global_dedup_no_duplicates_is_a_pure_noop():
+    accepted = [
+        _accepted_example("train-1", "train", "Target penjualan bulan ini adalah tiga ratus unit."),
+        _accepted_example("eval-1", "eval", "Realisasi anggaran mencapai tujuh puluh delapan persen tahun ini."),
+    ]
+    kept, rejected, dedup_log = _apply_global_dedup(accepted, [], DEFAULT_DEDUP_THRESHOLD)
+    assert kept == accepted
+    assert rejected == []
+    assert dedup_log == []
+
+
+def test_apply_global_dedup_does_not_mutate_inputs_in_place():
+    accepted = [
+        _accepted_example("train-1", "train", "Biaya operasional turun setelah efisiensi diterapkan perusahaan."),
+        _accepted_example("eval-1", "eval", "Biaya operasional turun setelah efisiensi diterapkan perusahaan."),
+    ]
+    original_rejected = []
+    original_accepted_snapshot = [dict(ex) for ex in accepted]
+    _apply_global_dedup(accepted, original_rejected, DEFAULT_DEDUP_THRESHOLD)
+    assert accepted == original_accepted_snapshot
+    assert original_rejected == []
+
+
+def test_apply_global_dedup_empty_accepted_is_a_noop():
+    kept, rejected, dedup_log = _apply_global_dedup([], ["pre-existing-reject"], DEFAULT_DEDUP_THRESHOLD)
+    assert kept == []
+    assert rejected == ["pre-existing-reject"]
+    assert dedup_log == []
 
 
 def test_exposure_mix_and_tolerance():

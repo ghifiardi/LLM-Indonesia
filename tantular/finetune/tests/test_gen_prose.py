@@ -429,6 +429,95 @@ def test_hash_constants_changes_when_a_synthesis_constant_changes():
     assert original == _hash_constants({"seeds": {"umum": (("a", "b"),)}, "format_suffixes": {}})
 
 
+# --- D2 (ft-fixD): strip trailing <|im_end|> from TinkerProseTeacher.sample()
+
+from tantular.finetune.gen_prose import TinkerProseTeacher, _strip_trailing_chat_terminator
+
+
+def test_strip_trailing_chat_terminator_removes_trailing_im_end():
+    assert _strip_trailing_chat_terminator("Jawaban singkat.<|im_end|>") == "Jawaban singkat."
+
+
+def test_strip_trailing_chat_terminator_removes_surrounding_whitespace():
+    assert _strip_trailing_chat_terminator("Jawaban singkat.  <|im_end|>  \n") == "Jawaban singkat."
+
+
+def test_strip_trailing_chat_terminator_handles_repeated_trailing_terminators():
+    assert _strip_trailing_chat_terminator(
+        "Jawaban singkat.<|im_end|> <|im_end|>"
+    ) == "Jawaban singkat."
+
+
+def test_strip_trailing_chat_terminator_leaves_mid_text_occurrence_untouched():
+    # A terminator that is NOT trailing (e.g. quoted mid-text in sampled
+    # prose) must never be stripped -- only a trailing terminator is a
+    # chat-template artifact; a mid-text one is part of the actual content.
+    text = 'Contoh token adalah "<|im_end|>" dalam dokumentasi model.'
+    assert _strip_trailing_chat_terminator(text) == text
+
+
+def test_strip_trailing_chat_terminator_noop_when_absent():
+    assert _strip_trailing_chat_terminator("Jawaban singkat tanpa token apa pun.") == \
+        "Jawaban singkat tanpa token apa pun."
+
+
+class _StubRenderer:
+    def build_generation_prompt(self, messages, role):
+        return ("stub-prompt", messages, role)
+
+
+class _StubResult:
+    def __init__(self, tokens):
+        self.sequences = [type("Seq", (), {"tokens": tokens})()]
+
+    def result(self):
+        return self
+
+
+class _StubSamplingClient:
+    def __init__(self, tokens):
+        self._tokens = tokens
+
+    def sample(self, prompt, num_samples, sampling_params):
+        return _StubResult(self._tokens)
+
+
+class _StubTokenizer:
+    def __init__(self, decoded):
+        self._decoded = decoded
+
+    def decode(self, tokens):
+        return self._decoded
+
+
+def _teacher_with_stubbed_raw_sample(raw_text):
+    """Construct a TinkerProseTeacher with its Tinker-facing internals
+    pre-populated by stubs, so `.sample()` never touches the real
+    `tinker`/`tinker_cookbook` SDK (no network, no Tinker API call) --
+    `_ensure_ready` short-circuits because `_sampling_client` is already set.
+    """
+    teacher = TinkerProseTeacher()
+    teacher._sampling_client = _StubSamplingClient(tokens=[1, 2, 3])
+    teacher._tokenizer = _StubTokenizer(decoded=raw_text)
+    teacher._renderer = _StubRenderer()
+    teacher._sampling_params = object()
+    return teacher
+
+
+def test_tinker_prose_teacher_sample_strips_trailing_im_end():
+    teacher = _teacher_with_stubbed_raw_sample("Jawaban dari model.<|im_end|>")
+    out = teacher.sample([{"role": "user", "content": "halo"}])
+    assert out == "Jawaban dari model."
+    assert "<|im_end|>" not in out
+
+
+def test_tinker_prose_teacher_sample_preserves_mid_text_token():
+    raw = 'Model menjelaskan token "<|im_end|>" sebagai penanda akhir giliran.'
+    teacher = _teacher_with_stubbed_raw_sample(raw)
+    out = teacher.sample([{"role": "user", "content": "halo"}])
+    assert out == raw
+
+
 def _valid_completion_for(pipeline):
     if pipeline == "ringkas":
         return "- poin pertama yang cukup panjang\n- poin kedua yang cukup panjang juga"

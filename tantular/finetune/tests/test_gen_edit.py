@@ -1,4 +1,5 @@
 import pathlib
+import re
 
 from tantular.finetune.bridge_client import BridgeClient
 from tantular.finetune.families import assign_splits, enumerate_families, split_of
@@ -618,3 +619,67 @@ def test_hash_constants_changes_when_a_synthesis_constant_changes():
     assert original != modified
     # Sanity: hashing the same object twice is stable.
     assert original == _hash_constants({"term_pairs": {"pelanggan": "konsumen"}})
+
+
+# --- D1 (ft-fixD): target bank sized for 5,000-example-scale generation ----
+
+def test_target_bank_meets_size_floor_for_5k_scale_generation():
+    # Original bank was 5 entries -- flagged as too small for 5k-scale
+    # generation (near-duplicate corrupted/instruction pairs would starve
+    # generate.py's dedup step). Floor set well below the ~5x growth this
+    # module actually ships, so the assertion documents the scale concern
+    # without hard-pinning the exact bank size.
+    from tantular.finetune.gen_edit import _TARGETS
+    assert len(_TARGETS) >= 20
+
+
+def test_target_bank_entries_are_unique_and_schema_valid():
+    from tantular.finetune.gen_edit import _TARGETS
+    texts = [t["text"] for t in _TARGETS]
+    assert len(texts) == len(set(texts)), "duplicate target text in _TARGETS"
+    for t in _TARGETS:
+        assert set(t.keys()) == {"text", "number", "name"}
+        assert isinstance(t["text"], str) and t["text"].strip() == t["text"]
+        assert t["text"].endswith(".")
+        assert t["number"] is None or isinstance(t["number"], str)
+        assert t["name"] is None or isinstance(t["name"], str)
+        # Every entry usable by _corrupt_word_order (>= 4 words) and a
+        # realistic candidate for _corrupt_spelling (a lowercase word of
+        # length >= 5, matching that corruptor's own candidate filter).
+        assert len(t["text"].split(" ")) >= 4
+        words = re.findall(r"[A-Za-z]+", t["text"])
+        assert any(len(w) >= 5 and w[:1].islower() for w in words)
+
+
+def test_target_bank_entries_pass_bridge_validation_via_spelling_corruption():
+    # Every entry must actually be usable end-to-end through the real
+    # reconstruction oracle, not just pass the pure schema checks above.
+    # `_corrupt_spelling` can legitimately draw a no-op swap (e.g. an
+    # adjacent repeated letter, like "minggu"'s "gg") for a *specific*
+    # rng draw -- that's a property of the corruptor's own randomness, not
+    # a defect in the target, and production `generate_edit` naturally
+    # retries across many (family_id, i) draws. Mirror that here with a
+    # small number of deterministic retries per entry before concluding an
+    # entry has no usable spelling candidate at all.
+    from tantular.finetune.gen_edit import _TARGETS, _corrupt_spelling, _rng_for
+    with BridgeClient(str(BRIDGE)) as bc:
+        for i, target in enumerate(_TARGETS):
+            corruption = None
+            for attempt in range(5):
+                rng = _rng_for(f"bank-check::{i}", attempt)
+                corruption = _corrupt_spelling(target, rng)
+                if corruption is not None:
+                    break
+            assert corruption is not None, f"no spelling candidate for entry {i}: {target['text']!r}"
+            corrupted_text, _instruction = corruption
+            clean_words = target["text"].split()
+            corrupt_words = corrupted_text.split()
+            diffs = [(w, c) for w, c in zip(clean_words, corrupt_words) if w != c]
+            assert len(diffs) == 1
+            clean_word, typo_word = diffs[0]
+            ok, reason = accept_edit(
+                bc, corrupted_text, target["text"],
+                [{"find": typo_word, "replace": clean_word, "occurrence": 1}],
+                instruction="Perbaiki ejaan kata yang salah tersebut.",
+            )
+            assert ok, f"entry {i} failed reconstruction: {reason} -- {target['text']!r}"

@@ -342,6 +342,80 @@ def _deduped_view(accepted_examples, dedup_threshold):
     return [ex for i, ex in enumerate(accepted_examples) if i not in dup_indices]
 
 
+def _apply_global_dedup(accepted, rejected, dedup_threshold):
+    """The destructive, run-ending counterpart to `_deduped_view`: actually
+    demotes global near-duplicates out of `accepted` into `rejected`
+    (reject_reason "near_duplicate_global"), and returns
+    `(new_accepted, new_rejected, dedup_log)` -- `accepted`/`rejected` are
+    read-only inputs, never mutated in place.
+
+    Cross-split dedup tiebreak policy (D3, ft-fixD; FT-Task 11 review
+    finding "cross-split dedup tiebreak unpoliced"): `near_duplicates` keeps
+    whichever occurrence comes FIRST in the sequence it's handed and demotes
+    every later near-duplicate in the same cluster. Handed `accepted` in raw
+    order, "first" means "generated first" -- which is GENERATION order
+    (families iterated sorted by id within each kind, interleaved across
+    splits by `assign_splits`' hash draw), not split. Left unpoliced, a
+    train-split example generated before its eval/challenge near-duplicate
+    would survive at the held-out example's expense -- silently leaking a
+    near-duplicate of an eval/challenge example into train (or shrinking
+    eval/challenge to protect train), backwards from the point of holding
+    examples out at all.
+
+    Policy: when a near-duplicate cluster spans splits, the held-out
+    (eval/challenge) copy is ALWAYS protected and the train-side copy is the
+    one dropped. Implemented by handing `near_duplicates` a REORDERED view
+    of the texts -- every eval/challenge example sorted ahead of every train
+    example -- so its first-occurrence-wins rule keeps the held-out copy;
+    within the same split-priority bucket, original generation order is
+    preserved (stable sort on `(split_priority, original_index)`, both plain
+    ints -- no set/dict iteration anywhere in this ordering, so it stays
+    fully deterministic for a fixed `accepted` list). `dup_positions`
+    (indices into the reordered view) are mapped back to `order[pos]`
+    (indices into the original `accepted` list) before the destructive
+    removal, which itself still iterates `accepted` in original order so
+    `dedup_log`/`rejects.jsonl` ordering is unaffected by the reorder --
+    it's purely a tiebreak input, not a change to output ordering.
+
+    NOTE: this policies dedup *within a single run*. `run_generate` has no
+    incremental/resume mode (no code path reads pre-existing split files
+    before generating), so a "duplicate vs. a prior run's eval/challenge
+    file" surface does not exist in the current codebase -- nothing to
+    police there yet; if an incremental mode is added later, it must load
+    prior eval/challenge examples into this same protected bucket before
+    generating new train candidates.
+    """
+    if not accepted:
+        return accepted, rejected, []
+
+    split_priority = {"eval": 0, "challenge": 0, "train": 1}
+    order = sorted(
+        range(len(accepted)),
+        key=lambda i: (split_priority.get(accepted[i]["split"], 1), i),
+    )
+    texts_in_order = [_dedup_text(accepted[i]) for i in order]
+    dup_positions = near_duplicates(texts_in_order, threshold=dedup_threshold)
+    dup_indices = {order[pos] for pos in dup_positions}
+
+    if not dup_indices:
+        return accepted, rejected, []
+
+    dedup_log = []
+    new_rejected = list(rejected)
+    kept = []
+    for i, ex in enumerate(accepted):
+        if i in dup_indices:
+            dedup_log.append({
+                "id": ex["id"], "task": ex["task"], "family": ex["family"], "split": ex["split"],
+            })
+            demoted = dict(ex)
+            demoted["provenance"] = {**ex["provenance"], "status": "rejected", "reject_reason": "near_duplicate_global"}
+            new_rejected.append(demoted)
+        else:
+            kept.append(ex)
+    return kept, new_rejected, dedup_log
+
+
 def _measure_avg_tokens_by_axis(accepted_examples, token_counter, fallback=None):
     """Real avg completion-token length per axis from `accepted_examples`.
     Axes with zero accepted examples so far fall back to `fallback[axis]`
@@ -812,25 +886,10 @@ def run_generate(
     # (that only compares within one family's candidate batch). Duplicates
     # are demoted to rejected (never silently vanish), so rejects.jsonl is
     # a complete audit trail of "everything that didn't make the cut and
-    # why", including post-hoc dedup removals.
+    # why", including post-hoc dedup removals. See `_apply_global_dedup`'s
+    # docstring for the cross-split tiebreak policy (D3, ft-fixD).
     # -------------------------------------------------------------------
-    dedup_log = []
-    if accepted:
-        texts = [_dedup_text(ex) for ex in accepted]
-        dup_indices = near_duplicates(texts, threshold=dedup_threshold)
-        if dup_indices:
-            kept = []
-            for i, ex in enumerate(accepted):
-                if i in dup_indices:
-                    dedup_log.append({
-                        "id": ex["id"], "task": ex["task"], "family": ex["family"], "split": ex["split"],
-                    })
-                    demoted = dict(ex)
-                    demoted["provenance"] = {**ex["provenance"], "status": "rejected", "reject_reason": "near_duplicate_global"}
-                    rejected.append(demoted)
-                else:
-                    kept.append(ex)
-            accepted = kept
+    accepted, rejected, dedup_log = _apply_global_dedup(accepted, rejected, dedup_threshold)
 
     by_split = {"train": [], "eval": [], "challenge": []}
     for ex in accepted:

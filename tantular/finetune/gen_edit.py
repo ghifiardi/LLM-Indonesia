@@ -108,23 +108,77 @@ _FALLBACK_INSTRUCTIONS = {
 
 
 # ---------------------------------------------------------------------------
-# Known target bank (deterministic, small, realistic Indonesian sentences).
+# Known target bank (deterministic, realistic Indonesian sentences).
 # ---------------------------------------------------------------------------
 # Judgment call (documented, not sourced from an existing canonical list, same
-# spirit as families.EDIT_SUBTYPES): a small corpus of clean target sentences
-# with explicit metadata about which token is a "number" or a "name", so
+# spirit as families.EDIT_SUBTYPES): a corpus of clean target sentences with
+# explicit metadata about which token is a "number" or a "name", so
 # corruption functions never have to guess via fragile NER/regex heuristics.
+#
+# Sized for 5,000-example-scale generation (D1, ft-fixD): the original 5-entry
+# bank was flagged as too small -- at that scale `_pick_target`'s
+# sha256-mod-len draw would revisit the same handful of clean targets so
+# often that near-duplicate corrupted/instruction pairs would starve
+# generate.py's dedup step. Grown ~5x (5 -> 25) with varied lengths,
+# registers (business/government/academic), and subject matter, while
+# keeping the schema identical. Every entry deliberately contains at least
+# one `_TERM_PAIRS` canonical term as a mid-sentence lowercase word (never
+# sentence-initial), so `_corrupt_terminology` never dead-ends into
+# "no_corruption_candidate" regardless of which entry `_pick_target` draws --
+# this also keeps every entry usable across all three corruption categories
+# (spelling/terminology/word_order), maximizing the bank's effective
+# diversity contribution instead of leaving some entries single-purpose.
 _TARGETS = (
     {"text": "Pendapatan perusahaan naik 12 persen pada kuartal kedua tahun 2025.",
      "number": "12", "name": None},
     {"text": "Budi mengirimkan laporan keuangan kepada Direktur pada hari Senin.",
      "number": None, "name": "Budi"},
-    {"text": "Biaya operasional turun menjadi 450 juta rupiah setelah efisiensi diterapkan.",
+    {"text": "Biaya operasional turun menjadi 450 juta rupiah setelah perusahaan menerapkan efisiensi.",
      "number": "450", "name": None},
-    {"text": "Siti menyampaikan hasil audit kepada seluruh tim pada rapat pagi ini.",
+    {"text": "Siti menyampaikan hasil audit laporan kepada seluruh tim pada rapat pagi ini.",
      "number": None, "name": "Siti"},
-    {"text": "Target penjualan bulan ini adalah 300 unit di seluruh cabang.",
+    {"text": "Target penjualan pelanggan bulan ini adalah 300 unit di seluruh cabang.",
      "number": "300", "name": None},
+    {"text": "Kementerian Keuangan menerbitkan surat edaran laporan baru pada tanggal 15 Januari 2026.",
+     "number": "15", "name": None},
+    {"text": "Ani mengusulkan revisi anggaran kepada pimpinan perusahaan pada rapat minggu lalu.",
+     "number": None, "name": "Ani"},
+    {"text": "Jumlah karyawan tetap bertambah menjadi 85 orang pada akhir tahun ini.",
+     "number": "85", "name": None},
+    {"text": "Pelanggan setia mendapatkan diskon khusus sebesar 20 persen setiap bulan.",
+     "number": "20", "name": None},
+    {"text": "Rudi menandatangani kontrak kerja sama dengan pelanggan strategis kemarin sore.",
+     "number": None, "name": "Rudi"},
+    {"text": "Divisi pemasaran mencatat pendapatan tambahan sebesar 60 juta rupiah bulan lalu.",
+     "number": "60", "name": None},
+    {"text": "Dewan komisaris menyetujui laporan tahunan perusahaan dalam rapat umum pemegang saham.",
+     "number": None, "name": None},
+    {"text": "Maya menyusun laporan pertanggungjawaban kegiatan untuk diserahkan kepada pengawas.",
+     "number": None, "name": "Maya"},
+    {"text": "Perusahaan menambah 40 karyawan baru untuk mendukung ekspansi cabang di luar kota.",
+     "number": "40", "name": None},
+    {"text": "Sekretariat menyampaikan undangan rapat koordinasi karyawan kepada seluruh unit kerja.",
+     "number": None, "name": None},
+    {"text": "Fajar mengoordinasikan distribusi barang kepada pelanggan di lima wilayah pemasaran.",
+     "number": None, "name": "Fajar"},
+    {"text": "Realisasi anggaran pendidikan mencapai 78 persen dari total alokasi pelanggan tahun ini.",
+     "number": "78", "name": None},
+    {"text": "Panitia seminar mengundang 25 pembicara dari berbagai perusahaan dan instansi pemerintah.",
+     "number": "25", "name": None},
+    {"text": "Wulan mempresentasikan hasil penelitian laporan kepada dewan penguji pada sidang akhir.",
+     "number": None, "name": "Wulan"},
+    {"text": "Bagian sumber daya manusia memverifikasi data karyawan sebelum pencairan tunjangan.",
+     "number": None, "name": None},
+    {"text": "Pemerintah daerah mengalokasikan dana sebesar 500 juta rupiah untuk renovasi perusahaan mitra.",
+     "number": "500", "name": None},
+    {"text": "Dian mengajukan permohonan cuti kepada atasan setelah menyelesaikan laporan proyek.",
+     "number": None, "name": "Dian"},
+    {"text": "Auditor eksternal menemukan selisih pencatatan pada laporan keuangan pelanggan triwulan ketiga.",
+     "number": None, "name": None},
+    {"text": "Tim riset perusahaan mempublikasikan 9 artikel ilmiah pada jurnal nasional tahun ini.",
+     "number": "9", "name": None},
+    {"text": "Yusuf mengoreksi kesalahan penomoran pasal pada draf peraturan sebelum laporan diserahkan.",
+     "number": None, "name": "Yusuf"},
 )
 
 

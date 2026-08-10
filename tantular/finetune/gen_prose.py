@@ -606,6 +606,35 @@ def generate_prose(
 # Real Tinker-backed teacher (never called in tests / at import time).
 # ---------------------------------------------------------------------------
 
+_CHAT_TEMPLATE_TERMINATORS = ("<|im_end|>",)
+
+
+def _strip_trailing_chat_terminator(text):
+    """Strip a trailing chat-template terminator token (e.g. `<|im_end|>`)
+    and surrounding whitespace from decoded teacher output, at the source
+    (D2, ft-fixD review finding: sampled teacher text can carry a trailing
+    `<|im_end|>` that pollutes accepted data downstream). Only removes a
+    terminator that is *trailing* -- after stripping trailing whitespace, the
+    string ends with the terminator; loops to also catch a terminator
+    followed by more trailing whitespace/terminators. A terminator occurring
+    mid-text (e.g. quoted inside sampled prose) is never touched, since it
+    isn't at the end of the string.
+    """
+    if not isinstance(text, str):
+        return text
+    result = text
+    while True:
+        stripped = result.rstrip()
+        matched = None
+        for terminator in _CHAT_TEMPLATE_TERMINATORS:
+            if stripped.endswith(terminator):
+                matched = terminator
+                break
+        if matched is None:
+            return stripped
+        result = stripped[: -len(matched)]
+
+
 class TinkerProseTeacher:
     """Real Tinker-backed teacher client for prose synthesis, using the same
     SDK patterns as tantular/finetune/spike/train_sentinel.py,
@@ -650,4 +679,5 @@ class TinkerProseTeacher:
             prompt=prompt, num_samples=1, sampling_params=self._sampling_params
         ).result()
         out_tokens = result.sequences[0].tokens
-        return self._tokenizer.decode(out_tokens)
+        raw = self._tokenizer.decode(out_tokens)
+        return _strip_trailing_chat_terminator(raw)
