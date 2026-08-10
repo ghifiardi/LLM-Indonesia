@@ -823,8 +823,7 @@ async function resolveDeckSpec() {
     ].filter(Boolean).join("\n\n");
     const extracted = await extractSlideFromImage(dataUrl, extra);
     els.sourceText.value = extracted;
-    els.deckProgressText.textContent = ocrStatusLine(getLastOcrEngine());
-    els.selectionMeta.textContent = `Gambar diekstrak: ${extracted.length} karakter dari ${file.name}.`;
+    els.selectionMeta.textContent = `Gambar diekstrak: ${extracted.length} karakter dari ${file.name} — ${ocrStatusLine(getLastOcrEngine())}.`;
     updateCharCount();
     state.extractedImageName = file.name;
   }
