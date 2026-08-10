@@ -57,3 +57,13 @@ Add-in Office di Windows memakai webview yang berbeda-beda: Office 2021/2024 & M
 ## 5. Pencatatan hasil
 
 Per mesin, catat: versi Office + build, OS, hasil #1–#10 (OK / fallback / gagal + pesan), tag build pane, dan model yang dipakai (8B / 4B / lite). Simpan di lembar verifikasi workshop. Temuan gagal yang tidak tercakup dokumen ini → laporkan dengan screenshot pesan status (pesan Tantular memuat tag build + diagnosa).
+
+## 6. Pesan preflight untuk peserta (salin-tempel)
+
+> **[Preflight Workshop Tantular]** Halo Kak! Sebelum workshop, mohon bantu 2 hal singkat (±2 menit):
+> 1. Buka **Word → File → Account** (Windows) atau **Word → About Word** (Mac), lalu **foto/screenshot versi Office** yang tertera dan kirim ke panitia. Contoh yang kami cari: "Microsoft 365", "Office 2024", "Office 2021", atau "Office 2019".
+> 2. Khusus **Windows dengan Office 2021**: pastikan **Microsoft Edge WebView2 Runtime** sudah terpasang (cari "WebView2" di Apps terinstal; jika belum ada, unduh "WebView2 Evergreen Bootstrapper" dari situs Microsoft — kecil dan otomatis).
+>
+> Catatan: Office 2016/2019 di **Windows** tidak didukung Tantular — jangan khawatir, Kakak tetap bisa ikut penuh lewat **Word di web (office.com)**. Office 2019 di **Mac** kemungkinan besar bisa. Terima kasih! 🙏
+
+Panel juga kini menampilkan pesan "Versi Office tidak didukung" (bukan layar putih) bila webview terlalu lama — memudahkan diagnosa di hari-H.

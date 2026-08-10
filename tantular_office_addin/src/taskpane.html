@@ -5,6 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Tantular</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <!-- ES5 on purpose: on legacy webviews (IE11 in Office 2016/2019 Windows, or
+       Office 2021 without WebView2) the ES-module bundle below never executes,
+       leaving a silent white pane. This guard runs anywhere and replaces the
+       mystery blank with a clear Indonesian message. Static literals only. -->
+  <script>
+    (function () {
+      var modern = typeof Promise !== "undefined" && typeof fetch !== "undefined" &&
+        typeof Symbol !== "undefined";
+      if (!modern) {
+        window.onload = function () {
+          document.body.innerHTML =
+            '<div style="padding:16px;font-family:sans-serif">' +
+            '<h3>Versi Office tidak didukung</h3>' +
+            '<p>Tantular memerlukan Microsoft 365, Office 2021, atau Office 2024 ' +
+            '(di Windows: dengan WebView2). Office 2016/2019 Windows tidak didukung — ' +
+            'gunakan Word di web (office.com) di komputer ini, atau hubungi panitia workshop.</p></div>';
+        };
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="./taskpane.css" />
 </head>
 <body>

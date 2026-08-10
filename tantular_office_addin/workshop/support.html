@@ -35,6 +35,9 @@
   </ol>
   <h2>Kompatibilitas versi Office</h2>
   <p><strong>Teruji:</strong> Microsoft 365 (langganan) di Mac &amp; Windows, dan Office di web. <strong>Dirancang kompatibel (belum diverifikasi di perangkat nyata):</strong> Office perpetual <strong>2021/2024</strong> — Tantular memakai API dasar (WordApi 1.1) dengan fallback otomatis, jadi secara teknis seharusnya berjalan; jika Anda memakai Office 2021/2024, bantu kami dengan menjalankan checklist di <code>docs/OFFICE_PERPETUAL_COMPAT.md</code> (ada dalam paket workshop) dan laporkan hasilnya ke fasilitator. <strong>Tidak didukung:</strong> Office 2019/2016 Windows (webview lama — pane akan blank; gunakan Word di web di mesin tersebut).</p>
+  <h2>Persiapan sebelum workshop (preflight)</h2>
+  <p><strong>Kirim versi Office Anda ke panitia</strong> beberapa hari sebelum acara: buka Word → <em>File → Account</em> (Windows) atau <em>Word → About Word</em> (Mac), foto/salin versi yang tertera. Ini mencegah kejutan kompatibilitas di hari-H.</p>
+  <p><strong>Windows dengan Office 2021:</strong> pastikan <em>Microsoft Edge WebView2 Runtime</em> terpasang (unduhan kecil dari situs Microsoft; sudah bawaan di Windows 11 dan Microsoft 365 terbaru). Tanpa WebView2, panel Tantular dapat tampil kosong — kini panel akan menampilkan pesan "Versi Office tidak didukung" alih-alih layar putih.</p>
   <h2>Instalasi satu perintah (paling mudah)</h2>
   <p>Salin satu baris sesuai sistem operasi, tempel, lalu Enter. Semua kebutuhan (termasuk Node.js dan Ollama bila belum ada) dipasang otomatis.</p>
   <p><strong>Mac</strong> — buka aplikasi <em>Terminal</em>, lalu jalankan:</p>
