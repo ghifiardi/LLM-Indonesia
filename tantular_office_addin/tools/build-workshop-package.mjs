@@ -21,6 +21,7 @@ execFileSync(process.execPath, [
 
 copy("tools/dev-server.mjs");
 copy("tools/install-office-model.sh");
+copy("tools/document-extractor.py");
 copy("models/Modelfile.office-8b");
 copy("docs/OFFICE_PERPETUAL_COMPAT.md");
 
@@ -32,7 +33,9 @@ fs.writeFileSync(path.join(out, "package.json"), JSON.stringify({
   scripts: {
     dev: "node tools/dev-server.mjs",
     "cert:office": "npx office-addin-dev-certs install",
-    "model:office": "./tools/install-office-model.sh"
+    "model:office": "./tools/install-office-model.sh",
+    "doc-server": "./.venv-doc/bin/python tools/document-extractor.py",
+    "doc-setup": "python3 -m venv .venv-doc && ./.venv-doc/bin/python -m pip install pypdf && ./.venv-doc/bin/python -c \"import sys, subprocess; subprocess.run([sys.executable, '-m', 'pip', 'install', 'pyobjc-framework-Vision', 'pyobjc-framework-Quartz']) if sys.platform == 'darwin' else print('Skipping pyobjc (Apple Vision OCR is macOS-only); document extraction still works.')\""
   }
 }, null, 2));
 
@@ -346,6 +349,8 @@ Prasyarat Node.js 18+ dan Ollama dipasang OTOMATIS oleh installer bila belum ada
 3. Tutup penuh Word, Excel, dan PowerPoint.
 4. Klik dua kali start-tantular-companion.bat dan biarkan jendelanya terbuka.
 5. Buka kembali Office lalu pilih Home → Tantular → Open Tantular.
+
+Unggah dokumen + OCR Apple Vision (Mac) perlu sekali \`npm run doc-setup\`, lalu jalankan \`npm run doc-server\` berdampingan dengan companion.
 
 Task pane yang dihosting:
 ${baseUrl}

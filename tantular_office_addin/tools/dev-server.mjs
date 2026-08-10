@@ -59,6 +59,11 @@ function handler(req, res) {
     return;
   }
 
+  if (url.pathname === "/api/ocr") {
+    proxyOcr(req, res);
+    return;
+  }
+
   if (url.pathname === "/api/chat-completions") {
     proxyChatCompletions(req, res);
     return;
@@ -149,6 +154,65 @@ function proxyDocumentExtract(req, res) {
   });
 
   req.pipe(proxyReq);
+}
+
+function proxyOcr(req, res) {
+  if (!allowApiOrigin(req, res)) return;
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      ...corsHeaders(req),
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Private-Network": "true"
+    });
+    res.end();
+    return;
+  }
+  if (req.method !== "GET" && req.method !== "POST") {
+    res.writeHead(405, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+    return;
+  }
+
+  const requestHeaders = { "Content-Type": req.headers["content-type"] || "application/octet-stream" };
+  if (req.method === "POST") {
+    requestHeaders["Content-Length"] = req.headers["content-length"] || undefined;
+  }
+
+  const proxyReq = http.request(
+    {
+      hostname: "127.0.0.1",
+      port: 8787,
+      path: "/api/ocr",
+      method: req.method,
+      headers: requestHeaders
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode || 502, {
+        "Content-Type": proxyRes.headers["content-type"] || "application/json; charset=utf-8",
+        ...corsHeaders(req),
+        "Cache-Control": "no-store"
+      });
+      proxyRes.pipe(res);
+    }
+  );
+
+  proxyReq.on("error", (error) => {
+    res.writeHead(502, {
+      "Content-Type": "application/json; charset=utf-8",
+      ...corsHeaders(req)
+    });
+    res.end(JSON.stringify({
+      ok: false,
+      error: `OCR proxy gagal: ${error.message}. Jalankan: npm run doc-setup lalu npm run doc-server`
+    }));
+  });
+
+  if (req.method === "POST") {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
 }
 
 function proxyChatCompletions(req, res) {
