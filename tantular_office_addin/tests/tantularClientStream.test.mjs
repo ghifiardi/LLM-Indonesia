@@ -6,13 +6,13 @@ test("normalizes Ollama model list with Tantular models first", () => {
   assert.deepEqual(
     normalizeModelList({
       models: [
-        { name: "qwen3:8b" },
-        { name: "tantular-office:0.3-8b" },
+        { name: "qwen3.5:9b" },
+        { name: "tantular-office:0.4-9b" },
         { model: "tantular:0.2-id-3b-lora" },
-        { name: "qwen3:8b" }
+        { name: "qwen3.5:9b" }
       ]
     }),
-    ["tantular-office:0.3-8b", "tantular:0.2-id-3b-lora", "qwen3:8b"]
+    ["tantular-office:0.4-9b", "tantular:0.2-id-3b-lora", "qwen3.5:9b"]
   );
 });
 
@@ -42,7 +42,7 @@ test("runTantular (non-streaming callChat) sends reasoning_effort: none", async 
 
 test("runTantular deck JSON mode sends response_format", async () => {
   globalThis.localStorage = {
-    getItem: () => JSON.stringify({ deckModel: "qwen3:8b" }),
+    getItem: () => JSON.stringify({ deckModel: "qwen3.5:9b" }),
     setItem: () => {}
   };
   globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
