@@ -32,6 +32,7 @@ Aturan WAJIB:
 - Formula memakai nama fungsi Inggris dengan pemisah koma (API Excel), contoh =SUM(A1:A10), bukan titik koma.
 - "sheet" kosong berarti sheet aktif. Jangan menghapus atau menimpa data tanpa diminta pengguna.
 - Untuk chart, pilih dataAddress yang mencakup header + data numerik yang relevan (bukan seluruh sheet jika hanya sebagian relevan).
+- Chart dari ratusan baris mentah tidak terbaca. Jika snapshot menunjukkan baris total/ringkasan (mis. TOTAL WEIGHTED SCORE, total per bidder/kategori) atau sheet ringkasan, gunakan range itu. Jika sel numerik pada range yang diminta masih kosong/0 semua, tetap buat chartnya TETAPI katakan di reply bahwa chart akan kosong sampai data diisi.
 - Maksimum 400 cell tertulis per giliran; jika permintaan lebih besar, kerjakan bagian terpenting dan jelaskan di "reply" apa yang tersisa.
 - Jika permintaan tidak bisa dipenuhi dengan aksi yang tersedia, actions kosong dan jelaskan alasannya di "reply".
 - Balas HANYA JSON. Tanpa markdown, tanpa teks lain.`;

@@ -254,17 +254,22 @@ async function runOneAction(action) {
       const sheet = resolveSheet(action.sheet);
       const dataRange = sheet.getRange(action.dataAddress);
       const chart = sheet.charts.add(action.type, dataRange, "Auto");
+      let placement = "";
       try {
         const dims = a1Dims(action.dataAddress);
-        const anchorRow = dims ? dims.rows + 2 : 2;
-        chart.setPosition(
-          sheet.getRange(action.dataAddress).getCell(0, 0).getOffsetRange(anchorRow, 0),
-          sheet.getRange(action.dataAddress).getCell(0, 0).getOffsetRange(anchorRow + 15, Math.max(7, (dims?.cols || 4)))
-        );
+        const topLeft = sheet.getRange(action.dataAddress).getCell(0, 0);
+        // Below a tall range means hundreds of rows off-screen — users think
+        // no chart was created. Tall data gets the chart BESIDE its top edge.
+        const tall = (dims?.rows || 1) > 25;
+        const anchor = tall
+          ? topLeft.getOffsetRange(0, (dims?.cols || 1) + 1)
+          : topLeft.getOffsetRange((dims?.rows || 1) + 2, 0);
+        chart.setPosition(anchor, anchor.getOffsetRange(16, 8));
+        placement = tall ? " di samping kanan-atas data" : " di bawah data";
       } catch (_) { /* position is best-effort */ }
       try { if (action.title) chart.title.text = action.title; } catch (_) { /* optional */ }
       await context.sync();
-      return `✅ Chart ${action.type} dibuat dari ${action.dataAddress}.`;
+      return `✅ Chart ${action.type} dibuat dari ${action.dataAddress}${placement}.`;
     }
 
     throw new Error(`Aksi tidak dikenal: ${action.op}`);
