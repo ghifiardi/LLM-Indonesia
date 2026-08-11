@@ -61,8 +61,8 @@ Tantular settings:
 
 ```text
 Endpoint: http://127.0.0.1:11434/v1/chat/completions
-Model umum / chat: qwen3:8b
-Model deck: tantular-office:0.3-8b
+Model umum / chat: qwen3.5:9b
+Model deck: tantular-office:0.4-9b
 Model vision: llama3.2-vision
 ```
 

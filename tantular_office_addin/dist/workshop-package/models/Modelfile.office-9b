@@ -1,13 +1,13 @@
-# Tantular Office 0.3 — Office/deck profile
+# Tantular Office 0.4 — Office/Studio profile
 #
-# This is an Office-optimized runtime profile built on Qwen3 8B. It is separate
+# This is an Office-optimized runtime profile built on Qwen3.5 9B. It is separate
 # from tantular:0.2-id-3b-lora, whose LoRA training data focuses on short
 # customer-service and digital-safety responses.
 #
 # Build:
-#   ollama create tantular-office:0.3-8b -f models/Modelfile.office-8b
+#   ollama create tantular-office:0.4-9b -f models/Modelfile.office-9b
 
-FROM qwen3:8b
+FROM qwen3.5:9b
 
 PARAMETER num_ctx 32768
 PARAMETER num_predict 8192

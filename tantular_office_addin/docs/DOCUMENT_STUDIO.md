@@ -24,10 +24,10 @@ Home → Tantular → Open Tantular
 
 ## Model
 
-Document Studio uses the same 8B Office model route as Deck Studio:
+Document Studio uses the same 9B Office model route as Deck Studio:
 
 ```text
-Model deck / dokumen: tantular-office:0.3-8b
+Model deck / dokumen: tantular-office:0.4-9b
 ```
 
 The smaller `tantular:0.2-id-3b-lora` remains suitable for short support/safety

@@ -8,14 +8,30 @@ const DECK_MODEL_FALLBACK = "qwen3.5:9b";
 const DEFAULT_VISION_MODEL = "llama3.2-vision";
 const SETTINGS_KEY = "tantular.office.settings.v1";
 const LEGACY_LOCAL_ENDPOINT_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost):11434\/v1\/chat\/completions\/?$/i;
+// Saved settings from earlier installs point at retired default models and
+// would otherwise silently keep users on them forever. Only EXACT old defaults
+// migrate — a deliberately chosen custom model is never touched.
+const RETIRED_MODEL_DEFAULTS = new Map([
+  ["tantular-office:0.3-8b", DEFAULT_DECK_MODEL],
+  ["qwen3:8b", DEFAULT_MODEL],
+  // Old low-RAM quick-fix value: keep those machines on the lite alias, never
+  // auto-upgrade them to a 9B they can't run.
+  ["qwen3:4b", "tantular-office:lite"]
+]);
+
+function migrateRetiredModel(value, fallback) {
+  const model = String(value || "").trim();
+  if (!model) return fallback;
+  return RETIRED_MODEL_DEFAULTS.get(model) || model;
+}
 
 export function loadSettings() {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
     return {
       endpoint: normalizeEndpoint(parsed.endpoint),
-      model: parsed.model || DEFAULT_MODEL,
-      deckModel: parsed.deckModel || DEFAULT_DECK_MODEL,
+      model: migrateRetiredModel(parsed.model, DEFAULT_MODEL),
+      deckModel: migrateRetiredModel(parsed.deckModel, DEFAULT_DECK_MODEL),
       visionModel: parsed.visionModel || DEFAULT_VISION_MODEL
     };
   } catch {

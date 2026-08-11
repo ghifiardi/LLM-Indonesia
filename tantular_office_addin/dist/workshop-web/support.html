@@ -12,10 +12,10 @@
   <p>Rilis ini ditujukan untuk workshop Microsoft 365 terfasilitasi di Mac dan Windows.</p>
   <h2>Spesifikasi laptop &amp; ekspektasi</h2>
   <ul>
-    <li><strong>RAM 16 GB ke atas:</strong> pengalaman penuh dengan model 8B.</li>
-    <li><strong>RAM 8 GB:</strong> otomatis memakai model ringan (lite, 4B) — tetap berfungsi, kualitas deck sedikit di bawah 8B.</li>
+    <li><strong>RAM 16 GB ke atas:</strong> pengalaman penuh dengan model Qwen3.5 9B.</li>
+    <li><strong>RAM 8 GB:</strong> otomatis memakai model ringan (Qwen3.5 4B) — tetap berfungsi, kualitas deck sedikit di bawah 9B.</li>
     <li>Installer mendeteksi RAM secara otomatis dan memilih model yang tepat; tidak perlu diatur manual.</li>
-    <li>Model Tantular dipublikasikan di <a href="https://ollama.com/ghifidanukusumo/Tantular">ollama.com/ghifidanukusumo/Tantular</a> dan diunduh otomatis oleh installer (±5 GB untuk 8B, ±2,5 GB untuk lite) — sebaiknya jalankan installer dari rumah sebelum hari workshop.</li>
+    <li>Installer mengunduh base resmi Qwen3.5 dari Ollama (±6,6 GB untuk 9B, ±3,4 GB untuk lite) dan membuat profil Tantular Office secara lokal — sebaiknya jalankan installer dari rumah sebelum hari workshop.</li>
   </ul>
   <h2>Komponen lokal yang dibutuhkan</h2>
   <ul>
@@ -75,7 +75,7 @@
     <li>Pastikan jendela terminal Tantular Companion tetap terbuka.</li>
     <li>Buka <code>https://localhost:3000/src/taskpane.html</code> satu kali dan setujui/percayai sertifikatnya bila diminta.</li>
     <li>Di pengaturan Tantular, klik <strong>Refresh</strong> lalu <strong>Tes model terpilih</strong>.</li>
-    <li>Jika Buat Deck selalu gagal dengan pesan <em>"Permintaan model lokal terlalu lama"</em>: RAM komputer kemungkinan tidak cukup untuk model 8B. Jalankan <code>ollama pull ghifidanukusumo/tantular:lite</code>, lalu di Pengaturan model lokal isi kolom <strong>Model Studio</strong> dengan <code>ghifidanukusumo/tantular:lite</code> dan klik Simpan. Jangan klik Buat Deck berulang kali saat menunggu — antrean permintaan membuat model makin lambat.</li>
+    <li>Jika Buat Deck selalu gagal dengan pesan <em>"Permintaan model lokal terlalu lama"</em>: RAM komputer kemungkinan tidak cukup untuk model 9B. Jalankan ulang installer agar memilih Qwen3.5 4B, lalu di Pengaturan model lokal isi kolom <strong>Model Studio</strong> dengan <code>tantular-office:lite</code> dan klik Simpan. Jangan klik Buat Deck berulang kali saat menunggu — antrean permintaan membuat model makin lambat.</li>
   </ol>
   <p>Untuk bantuan khusus workshop, hubungi fasilitator yang membagikan paket ini.</p>
 </main>

@@ -1,33 +1,31 @@
 # Tantular Office
 
 Indonesian-first productivity model powering the **Tantular Office add-in**
-(local/private AI for Word, Excel, and PowerPoint). Built on **Qwen3** with an
+(local/private AI for Word, Excel, and PowerPoint). Built on **Qwen3.5** with an
 Office-tuned runtime profile: 32k context, long structured output (up to
 30-slide deck plans), low temperature, and strict source-grounding — it will
 not invent numbers, sources, or benchmarks that aren't in your material.
 
-## Tags
+## Local aliases
 
 | Tag | Base | Size | Minimum comfortable RAM |
 |---|---|---|---|
-| `latest` / `0.3-8b` | Qwen3 8B | ~5 GB | 16 GB |
-| `lite` | Qwen3 4B | ~2.5 GB | 8 GB |
+| `0.4-9b` | Qwen3.5 9B | ~6.6 GB | 16 GB |
+| `lite` | Qwen3.5 4B | ~3.4 GB | 8 GB |
 
-**Under 12 GB RAM, use `lite`** — the 8B model swaps to disk and times out.
-Deck quality on `lite` is a step below 8B but still produces properly
+**Under 12 GB RAM, use `lite`** — the 9B model swaps to disk and times out.
+Deck quality on `lite` is a step below 9B but still produces properly
 structured decks.
 
 ## Usage
 
 ```
-ollama pull ghifidanukusumo/tantular        # 16 GB+ machines
-ollama pull ghifidanukusumo/tantular:lite   # 8 GB machines
+npm run model:office
 ```
 
 Then in the Tantular Office task pane → **Pengaturan model lokal** → set
-**Model Studio** to the tag you pulled → Simpan → Tes model terpilih.
-
-Works standalone too: `ollama run ghifidanukusumo/tantular`
+**Model Studio** to `tantular-office:0.4-9b` or `tantular-office:lite`
+→ Simpan → Tes model terpilih.
 
 ## What it's tuned for
 
@@ -45,4 +43,4 @@ Works standalone too: `ollama run ghifidanukusumo/tantular`
   "perlu validasi" instead of fabricating facts
 - First call after startup includes model load — allow extra time
 
-Base model: Qwen3 (Apache 2.0).
+Base model: Qwen3.5 (Apache 2.0).

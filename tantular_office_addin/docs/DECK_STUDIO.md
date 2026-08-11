@@ -17,8 +17,8 @@ npm run model:office
 Then use:
 
 ```text
-Model umum / chat: qwen3:8b (or another local model)
-Model deck: tantular-office:0.3-8b
+Model umum / chat: qwen3.5:9b (or another local model)
+Model deck: tantular-office:0.4-9b
 ```
 
 The deck model is routed separately, so a small support model can still be used

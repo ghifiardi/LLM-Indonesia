@@ -5,7 +5,7 @@
 # customer-service and digital-safety responses.
 #
 # Build:
-#   ollama create tantular-office:0.4-9b -f models/Modelfile.office-8b
+#   ollama create tantular-office:0.4-9b -f models/Modelfile.office-9b
 
 FROM qwen3.5:9b
 

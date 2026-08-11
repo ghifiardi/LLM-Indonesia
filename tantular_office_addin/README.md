@@ -46,7 +46,6 @@ npm run dev
 # 3) In another terminal, run your local model endpoint.
 # Example with Ollama:
 ollama serve
-ollama pull qwen3:8b
 npm run model:office
 
 # 4) Validate manifest references.
@@ -91,14 +90,14 @@ responses, but it is not trained for long presentation plans and its model
 profile caps generation at 220 tokens.
 
 Deck Studio therefore uses a separate **Model deck** setting. The recommended
-profile is `tantular-office:0.3-8b`, built locally from `qwen3:8b`:
+profile is `tantular-office:0.4-9b`, built locally from `qwen3.5:9b`:
 
 ```bash
 npm run model:office
 ```
 
 If that alias has not been created yet, Deck Studio automatically falls back to
-the installed `qwen3:8b` base. The general/chat model remains independently
+the installed `qwen3.5:9b` base. The general/chat model remains independently
 configurable.
 
 ## Document Studio (Word)

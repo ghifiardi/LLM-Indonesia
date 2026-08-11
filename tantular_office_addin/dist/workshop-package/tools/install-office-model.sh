@@ -50,7 +50,7 @@ else
   fi
   echo "Membuat $MODEL_NAME dari $BASE_MODEL..."
   TMP_MODELFILE="$(mktemp)"
-  sed "s|^FROM .*|FROM $BASE_MODEL|" "$ROOT/models/Modelfile.office-8b" > "$TMP_MODELFILE"
+  sed "s|^FROM .*|FROM $BASE_MODEL|" "$ROOT/models/Modelfile.office-9b" > "$TMP_MODELFILE"
   "$OLLAMA_BIN" create "$MODEL_NAME" -f "$TMP_MODELFILE"
   rm -f "$TMP_MODELFILE"
 fi
