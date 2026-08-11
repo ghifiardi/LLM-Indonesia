@@ -37,6 +37,34 @@ if (officeCert && officeKey && fs.existsSync(officeCert) && fs.existsSync(office
   keyPath = officeKey;
 }
 
+// Dev certs expire after ~30 days and Office then blocks the pane with a
+// cryptic "isn't signed by a valid security certificate" error. Fail fast
+// here, in the terminal the user is actually looking at, with the fix.
+try {
+  const { X509Certificate } = await import("node:crypto");
+  const cert = new X509Certificate(fs.readFileSync(certPath));
+  const validTo = new Date(cert.validTo);
+  const daysLeft = Math.floor((validTo.getTime() - Date.now()) / 86_400_000);
+  if (daysLeft < 0) {
+    console.error("");
+    console.error("========================================================================");
+    console.error(`SERTIFIKAT HTTPS KEDALUWARSA (berakhir ${validTo.toISOString().slice(0, 10)}).`);
+    console.error("Office akan memblokir panel Tantular dengan error \"valid security certificate\".");
+    console.error("");
+    console.error("Perbaiki dengan menjalankan:  npm run cert:office");
+    console.error("(masukkan password Mac/Windows bila diminta), lalu jalankan ulang Companion.");
+    console.error("========================================================================");
+    if (process.env.TANTULAR_IGNORE_CERT_EXPIRY !== "1") process.exit(1);
+  } else if (daysLeft <= 5) {
+    console.warn(`PERINGATAN: sertifikat HTTPS akan kedaluwarsa dalam ${daysLeft} hari (${validTo.toISOString().slice(0, 10)}).`);
+    console.warn("Jalankan 'npm run cert:office' sebelum tanggal itu agar panel Tantular tidak terblokir.");
+  }
+} catch (error) {
+  // Never let the expiry check itself stop the server (e.g. exotic cert
+  // formats); Office will still do its own validation.
+  console.warn("Pemeriksaan kedaluwarsa sertifikat dilewati:", error?.message || error);
+}
+
 const workspaceStore = createWorkspaceStore({ filePath: path.join(root, "data", "workspace.json") });
 
 const mime = new Map([
