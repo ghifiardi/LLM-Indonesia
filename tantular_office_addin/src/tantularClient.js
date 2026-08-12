@@ -32,14 +32,16 @@ export function loadSettings() {
       endpoint: normalizeEndpoint(parsed.endpoint),
       model: migrateRetiredModel(parsed.model, DEFAULT_MODEL),
       deckModel: migrateRetiredModel(parsed.deckModel, DEFAULT_DECK_MODEL),
-      visionModel: parsed.visionModel || DEFAULT_VISION_MODEL
+      visionModel: parsed.visionModel || DEFAULT_VISION_MODEL,
+      apiKey: String(parsed.apiKey || "").trim()
     };
   } catch {
     return {
       endpoint: DEFAULT_ENDPOINT,
       model: DEFAULT_MODEL,
       deckModel: DEFAULT_DECK_MODEL,
-      visionModel: DEFAULT_VISION_MODEL
+      visionModel: DEFAULT_VISION_MODEL,
+      apiKey: ""
     };
   }
 }
@@ -50,7 +52,10 @@ export function saveSettings(settings) {
     endpoint: normalizeEndpoint(settings.endpoint ?? current.endpoint ?? DEFAULT_ENDPOINT),
     model: String(settings.model ?? current.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL,
     deckModel: String(settings.deckModel ?? current.deckModel ?? DEFAULT_DECK_MODEL).trim() || DEFAULT_DECK_MODEL,
-    visionModel: String(settings.visionModel ?? current.visionModel ?? DEFAULT_VISION_MODEL).trim() || DEFAULT_VISION_MODEL
+    visionModel: String(settings.visionModel ?? current.visionModel ?? DEFAULT_VISION_MODEL).trim() || DEFAULT_VISION_MODEL,
+    // Empty string is a meaningful value here (clears the key), so only fall
+    // back to the stored one when the caller omits the field entirely.
+    apiKey: String(settings.apiKey ?? current.apiKey ?? "").trim()
   };
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
   return next;
@@ -82,10 +87,11 @@ export function normalizeModelList(payload) {
 export async function testLocalModel(modelName) {
   const model = String(modelName || "").trim();
   if (!model) throw new Error("Pilih model terlebih dahulu.");
-  const { endpoint } = loadSettings();
+  const { endpoint, apiKey } = loadSettings();
   const startedAt = Date.now();
   const text = await callChat({
     endpoint,
+    apiKey,
     model,
     messages: [
       { role: "system", content: "Anda sedang menjalankan pemeriksaan koneksi. Ikuti format pengguna secara persis." },
@@ -135,6 +141,7 @@ export async function runTantular({
   const model = usesOfficeModel ? settings.deckModel : settings.model;
   const request = {
     endpoint: settings.endpoint,
+    apiKey: settings.apiKey,
     model,
     messages: [
       { role: "system", content: system },
@@ -172,10 +179,11 @@ export async function runTantular({
 // OpenAI-compatible multimodal endpoint (e.g. Ollama with llama3.2-vision,
 // qwen2.5vl, or llava). Uses the standard image_url content-part format.
 export async function runTantularVision({ prompt, dataUrl, maxTokens = 1400, temperature = 0.1 }) {
-  const { endpoint, visionModel } = loadSettings();
+  const { endpoint, visionModel, apiKey } = loadSettings();
   if (!dataUrl) throw new Error("Tidak ada gambar untuk dianalisis.");
   return callChat({
     endpoint,
+    apiKey,
     model: visionModel,
     messages: [
       {
@@ -226,12 +234,23 @@ function looksLikeJsonModeRejection(status, bodyText) {
 // server rejects the field (400-level error whose body mentions
 // "reasoning"/"think"). Returns { response, errorText } — errorText is set
 // only when the final response is not ok (its body has already been read).
-async function fetchChatCompletion(endpoint, signal, bodyParams) {
+// Hosted OpenAI-compatible gateways (LiteLLM, vLLM, OpenRouter…) need a bearer
+// token; a plain local Ollama does not. The key is only ever attached to an
+// endpoint the user configured — never to the bundled local companion proxy,
+// which talks to Ollama on this machine and has no use for a credential.
+export function buildChatHeaders(endpoint, apiKey) {
+  const headers = { "Content-Type": "application/json" };
+  const key = String(apiKey || "").trim();
+  if (key && endpoint !== DEFAULT_ENDPOINT) headers.Authorization = `Bearer ${key}`;
+  return headers;
+}
+
+async function fetchChatCompletion(endpoint, signal, bodyParams, apiKey = "") {
   const attempt = async (includeReasoning, includeJsonMode) => {
     const response = await fetch(endpoint, {
       method: "POST",
       signal,
-      headers: { "Content-Type": "application/json" },
+      headers: buildChatHeaders(endpoint, apiKey),
       body: JSON.stringify(buildChatRequestBody({
         ...bodyParams,
         includeReasoning,
@@ -272,7 +291,8 @@ async function callChat({
   visionModelName,
   signal,
   fallbackModel = "",
-  jsonMode = false
+  jsonMode = false,
+  apiKey = ""
 }) {
   const controller = new AbortController();
   if (signal) {
@@ -283,7 +303,7 @@ async function callChat({
   try {
     const { response, errorText } = await fetchChatCompletion(endpoint, controller.signal, {
       model, messages, temperature, maxTokens, stream: false, jsonMode
-    });
+    }, apiKey);
 
     if (!response.ok) {
       const body = errorText ?? "";
@@ -297,13 +317,14 @@ async function callChat({
           timeoutMs,
           visionModelName,
           signal,
-          jsonMode
+          jsonMode,
+          apiKey
         });
       }
       if (visionModelName && (response.status === 404 || /not found|no such model|try pulling/i.test(body))) {
         throw new Error(`Model vision "${visionModelName}" belum ada di Ollama. Jalankan: ollama pull ${visionModelName}`);
       }
-      throw new Error(`Model endpoint gagal (${response.status}). ${body.slice(0, 240)}`);
+      throw new Error(endpointErrorMessage(response.status, body, model));
     }
 
     const data = await response.json();
@@ -319,7 +340,12 @@ async function callChat({
       }
       throw new Error("Permintaan model lokal terlalu lama. Coba lagi setelah model selesai dimuat, atau pilih model yang lebih cepat.");
     }
-    if (endpoint !== DEFAULT_ENDPOINT && isNetworkLoadFailure(error)) {
+    // Falling back to the local companion is a kindness when a custom LOCAL
+    // endpoint is down. But when an API key is set the user deliberately chose
+    // a remote gateway, and silently answering from a local model instead
+    // would look like success while coming from an entirely different model.
+    // Fail loudly there instead.
+    if (endpoint !== DEFAULT_ENDPOINT && !apiKey && isNetworkLoadFailure(error)) {
       return callChat({
         endpoint: DEFAULT_ENDPOINT,
         model,
@@ -342,12 +368,26 @@ async function callChat({
   }
 }
 
+// A bare "gagal (401)" tells the user nothing about which of the two auth
+// mistakes they made, and both are common the first time the pane is pointed
+// at a gateway: a wrong key, or a key that is fenced to other models.
+export function endpointErrorMessage(status, bodyText, model = "") {
+  const body = String(bodyText || "").slice(0, 160);
+  if (status === 401) {
+    return `Endpoint menolak API key (401). Periksa API key di Pengaturan. ${body}`.trim();
+  }
+  if (status === 403) {
+    return `API key tidak diizinkan memakai model "${model}" (403). Minta admin gateway menambahkan model ini ke key Anda. ${body}`.trim();
+  }
+  return `Model endpoint gagal (${status}). ${String(bodyText || "").slice(0, 240)}`.trim();
+}
+
 function looksLikeMissingModel(status, bodyText) {
   return status === 404 || /model.+(?:not found|does not exist)|no such model|try pulling/i.test(String(bodyText || ""));
 }
 
 export async function runTantularStream({ system, user, messages, maxTokens = 1024, temperature = 0.3, onToken, signal }) {
-  const { endpoint, model } = loadSettings();
+  const { endpoint, model, apiKey } = loadSettings();
   const bodyParams = {
     model,
     messages: messages ?? [
@@ -360,7 +400,7 @@ export async function runTantularStream({ system, user, messages, maxTokens = 10
   };
   let response, errorText;
   try {
-    ({ response, errorText } = await fetchChatCompletion(endpoint, signal, bodyParams));
+    ({ response, errorText } = await fetchChatCompletion(endpoint, signal, bodyParams, apiKey));
   } catch (error) {
     if (error?.name === "AbortError") {
       const stopped = new Error("dihentikan");
@@ -371,7 +411,7 @@ export async function runTantularStream({ system, user, messages, maxTokens = 10
   }
   if (!response.ok || !response.body) {
     const text = errorText ?? await response.text().catch(() => "");
-    throw new Error(`Model endpoint gagal (${response.status}). ${text.slice(0, 240)}`);
+    throw new Error(endpointErrorMessage(response.status, text, model));
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();

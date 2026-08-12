@@ -75,6 +75,7 @@ const els = {
   deckModel: document.querySelector("#deck-model-input"),
   modelCapability: document.querySelector("#model-capability"),
   visionModel: document.querySelector("#vision-model-input"),
+  apiKey: document.querySelector("#api-key-input"),
   installedModel: document.querySelector("#installed-model-select"),
   useModelGeneral: document.querySelector("#use-model-general"),
   useModelDeck: document.querySelector("#use-model-deck"),
@@ -278,6 +279,7 @@ function hydrateSettings() {
   els.model.value = settings.model;
   els.deckModel.value = settings.deckModel;
   els.visionModel.value = settings.visionModel;
+  els.apiKey.value = settings.apiKey;
   renderModelCapability();
   refreshInstalledModels(false);
 }
@@ -351,12 +353,14 @@ function persistVisibleModelSettings(message) {
     endpoint: els.endpoint.value,
     model: els.model.value,
     deckModel: els.deckModel.value,
-    visionModel: els.visionModel.value
+    visionModel: els.visionModel.value,
+    apiKey: els.apiKey.value
   });
   els.endpoint.value = saved.endpoint;
   els.model.value = saved.model;
   els.deckModel.value = saved.deckModel;
   els.visionModel.value = saved.visionModel;
+  els.apiKey.value = saved.apiKey;
   renderModelCapability();
   setModelSelectionStatus(message, "ok");
   return saved;

@@ -90,6 +90,10 @@
           Model vision (untuk Extract from image)
           <input id="vision-model-input" type="text" spellcheck="false" placeholder="mis. llama3.2-vision / qwen2.5vl:7b" />
         </label>
+        <label>
+          API key (kosongkan untuk Ollama lokal)
+          <input id="api-key-input" type="password" spellcheck="false" autocomplete="off" placeholder="mis. sk-… untuk gateway LiteLLM/vLLM" />
+        </label>
         <button id="save-settings" class="secondary" type="button">Simpan</button>
         <p id="model-capability" class="hint">Default: Ollama/OpenAI-compatible endpoint di komputer lokal.</p>
         <p id="model-selection-status" class="status model-selection-status" role="status" aria-live="polite"></p>

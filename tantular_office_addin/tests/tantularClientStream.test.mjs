@@ -1,6 +1,106 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeModelList } from "../src/tantularClient.js";
+import { normalizeModelList, buildChatHeaders, endpointErrorMessage } from "../src/tantularClient.js";
+
+const GATEWAY = "https://openai.example.com/v1/chat/completions";
+
+test("buildChatHeaders attaches Bearer only for a configured remote endpoint", () => {
+  assert.deepEqual(buildChatHeaders(GATEWAY, "sk-abc"), {
+    "Content-Type": "application/json",
+    Authorization: "Bearer sk-abc"
+  });
+  // No key configured: plain local Ollama, nothing to send.
+  assert.deepEqual(buildChatHeaders(GATEWAY, ""), { "Content-Type": "application/json" });
+  assert.deepEqual(buildChatHeaders(GATEWAY, "   "), { "Content-Type": "application/json" });
+  // The bundled companion proxy talks to local Ollama; never hand it a key.
+  assert.deepEqual(buildChatHeaders("/api/chat-completions", "sk-abc"), {
+    "Content-Type": "application/json"
+  });
+});
+
+test("endpointErrorMessage distinguishes bad key (401) from model-scoped key (403)", () => {
+  assert.match(endpointErrorMessage(401, "invalid key"), /API key.*401/s);
+  const forbidden = endpointErrorMessage(403, "key not allowed to access model", "muse-glimmer");
+  assert.match(forbidden, /403/);
+  assert.match(forbidden, /muse-glimmer/);
+  assert.match(endpointErrorMessage(500, "boom"), /Model endpoint gagal \(500\)/);
+});
+
+test("runTantular sends the stored API key to a remote endpoint", async () => {
+  globalThis.localStorage = {
+    getItem: () => JSON.stringify({ endpoint: GATEWAY, apiKey: "sk-secret" }),
+    setItem: () => {}
+  };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let capturedHeaders = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedHeaders = init.headers;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "UMUM" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    assert.equal(await runTantular({ system: "s", user: "u", maxTokens: 8 }), "UMUM");
+    assert.equal(capturedHeaders.Authorization, "Bearer sk-secret");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a keyed remote endpoint does NOT silently fall back to the local companion", async () => {
+  globalThis.localStorage = {
+    getItem: () => JSON.stringify({ endpoint: GATEWAY, apiKey: "sk-secret" }),
+    setItem: () => {}
+  };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(url);
+    throw new TypeError("Load failed");
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    await assert.rejects(() => runTantular({ system: "s", user: "u", maxTokens: 8 }));
+    // Exactly one attempt, against the gateway — never a retry at the local proxy,
+    // which would answer from a different model while looking like success.
+    assert.deepEqual(urls, [GATEWAY]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an unkeyed custom endpoint still falls back to the local companion", async () => {
+  globalThis.localStorage = {
+    getItem: () => JSON.stringify({ endpoint: GATEWAY }),
+    setItem: () => {}
+  };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(url);
+    if (url === GATEWAY) throw new TypeError("Load failed");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "LOKAL" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    assert.equal(await runTantular({ system: "s", user: "u", maxTokens: 8 }), "LOKAL");
+    assert.deepEqual(urls, [GATEWAY, "/api/chat-completions"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("normalizes Ollama model list with Tantular models first", () => {
   assert.deepEqual(
