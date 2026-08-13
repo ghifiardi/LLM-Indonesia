@@ -1,6 +1,90 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeModelList, buildChatHeaders, endpointErrorMessage } from "../src/tantularClient.js";
+import {
+  normalizeModelList,
+  buildChatHeaders,
+  endpointErrorMessage,
+  reasoningControlFor
+} from "../src/tantularClient.js";
+
+test("reasoning control is chosen per model family", () => {
+  // Qwen honours the request field — unchanged behaviour.
+  assert.equal(reasoningControlFor("qwen3.5:9b"), "request_field");
+  assert.equal(reasoningControlFor("tantular-office:0.4-9b"), "request_field");
+  assert.equal(reasoningControlFor("qwen3.5:4b"), "request_field");
+  // Harmony-format models ignore reasoning_effort; their control is a chat
+  // template variable.
+  assert.equal(reasoningControlFor("muse-glimmer:30b"), "chat_template");
+  assert.equal(reasoningControlFor("ollama/muse-glimmer-30b"), "chat_template");
+  assert.equal(reasoningControlFor("gpt-oss:20b"), "chat_template");
+  // Unknown models keep the existing path rather than guessing.
+  assert.equal(reasoningControlFor("llama3.1:8b"), "request_field");
+  assert.equal(reasoningControlFor(""), "request_field");
+});
+
+// REGRESSION: the intent router runs on a 4-token budget. If thinking is not
+// actually disabled, reasoning consumes the whole budget and the router gets an
+// empty string — the failure is silent, because the request itself succeeds.
+// A harmony model ignores reasoning_effort entirely, so sending only that field
+// would reintroduce the bug for any such model.
+test("router receives a non-empty answer with reasoning disabled (Qwen path)", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let body = null;
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body);
+    // Stand in for a server that only silences thinking when asked correctly.
+    const silenced = body.reasoning_effort === "none";
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: silenced ? "EDIT_TEKS" : "" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const out = await runTantular({ system: "route", user: "perbaiki ini", maxTokens: 4 });
+    assert.equal(out, "EDIT_TEKS", "router must get a usable label, not an empty string");
+    assert.equal(body.reasoning_effort, "none");
+    assert.equal(body.chat_template_kwargs, undefined, "Qwen path must be unchanged");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("router receives a non-empty answer with reasoning disabled (harmony path)", async () => {
+  globalThis.localStorage = {
+    getItem: () => JSON.stringify({ model: "muse-glimmer:30b" }),
+    setItem: () => {}
+  };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let body = null;
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body);
+    // A harmony model ignores reasoning_effort. Only the template variable
+    // silences it — exactly the bug this test pins.
+    const silenced = body.chat_template_kwargs?.reasoning_strength
+      && body.chat_template_kwargs.reasoning_strength !== "high";
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: silenced ? "EDIT_TEKS" : "" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const out = await runTantular({ system: "route", user: "perbaiki ini", maxTokens: 4 });
+    assert.equal(out, "EDIT_TEKS", "harmony model must also yield a usable router label");
+    assert.equal(body.chat_template_kwargs.reasoning_strength, "low");
+    assert.equal(body.reasoning_effort, undefined, "reasoning_effort is a no-op here");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 const GATEWAY = "https://openai.example.com/v1/chat/completions";
 

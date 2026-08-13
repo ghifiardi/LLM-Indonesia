@@ -201,12 +201,43 @@ export async function runTantularVision({ prompt, dataUrl, maxTokens = 1400, tem
   });
 }
 
-// Ollama enables "thinking" by default for Qwen3 models on the
-// OpenAI-compatible endpoint, and thinking consumes output tokens — this can
-// exhaust a small max_tokens budget (e.g. the 8-token router) before any
-// content lands in message.content. reasoning_effort: "none" turns thinking
-// off. Some models/Ollama versions reject the field, so we build the body
-// with/without it and retry once if the server complains about it.
+// Models enable "thinking" by default and it consumes output tokens — that can
+// exhaust a small max_tokens budget (e.g. the 4-token router) before any
+// content lands in message.content, so every request asks for it off.
+//
+// HOW you ask differs by model family, and getting it wrong fails silently:
+// the request succeeds, thinking stays on, and short-budget calls return empty.
+//
+//  - Qwen3/Qwen3.5 on Ollama honour the `reasoning_effort` request field.
+//  - Harmony-format models (Muse Glimmer, gpt-oss) ignore it entirely. Their
+//    thinking level is a CHAT TEMPLATE variable — `reasoning_strength`,
+//    defaulting to "high" — so it has to travel in `chat_template_kwargs`.
+//    Verified against muse-glimmer:30b: its chat_template.jinja reads
+//    `set rs = reasoning_strength if reasoning_strength is defined ... else 'high'`,
+//    and ~230 tokens go to reasoning before the first content token.
+//
+// Detection is by model name because that is all the client knows before the
+// first request. An unknown model gets the Qwen path, which is the existing
+// behaviour and is harmless where unsupported (the field is ignored, and the
+// caller already retries without it if a server rejects it outright).
+const HARMONY_MODEL_RE = /muse-glimmer|gpt-oss|harmony/i;
+
+export function reasoningControlFor(model) {
+  return HARMONY_MODEL_RE.test(String(model || "")) ? "chat_template" : "request_field";
+}
+
+function applyReasoningOff(body, model) {
+  if (reasoningControlFor(model) === "chat_template") {
+    // "low" rather than "none": the template interpolates this verbatim into
+    // "Reasoning strength: {rs}.", and only the documented levels are safe to
+    // assert. Low is the minimum that keeps the sentence meaningful.
+    body.chat_template_kwargs = { ...(body.chat_template_kwargs || {}), reasoning_strength: "low" };
+    return body;
+  }
+  body.reasoning_effort = "none";
+  return body;
+}
+
 function buildChatRequestBody({
   model,
   messages,
@@ -217,13 +248,14 @@ function buildChatRequestBody({
   includeJsonMode
 }) {
   const body = { model, messages, temperature, max_tokens: maxTokens, stream };
-  if (includeReasoning) body.reasoning_effort = "none";
+  if (includeReasoning) applyReasoningOff(body, model);
   if (includeJsonMode) body.response_format = { type: "json_object" };
   return body;
 }
 
 function looksLikeReasoningRejection(status, bodyText) {
-  return status >= 400 && status < 500 && /reasoning|think/i.test(String(bodyText ?? ""));
+  return status >= 400 && status < 500
+    && /reasoning|think|chat_template_kwargs/i.test(String(bodyText ?? ""));
 }
 
 function looksLikeJsonModeRejection(status, bodyText) {
