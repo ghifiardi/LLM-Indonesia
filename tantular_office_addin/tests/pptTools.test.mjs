@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -253,4 +253,72 @@ test("orderPptActions does not mutate its input", () => {
   ];
   orderPptActions(input);
   assert.deepEqual(input.map((a) => a.slideIndex), [1, 9]);
+});
+
+test("resolveDeleteTarget prefers id over index", () => {
+  const result = resolveDeleteTarget(["257", "258", "259"], { slideIndex: 1, id: "259" });
+  assert.equal(result.ok, true);
+  assert.equal(result.id, "259");
+  assert.equal(result.index, 3);
+});
+
+test("resolveDeleteTarget matches ids across API surfaces", () => {
+  const result = resolveDeleteTarget(["257#abc", "258#def"], { slideIndex: 2, id: "258" });
+  assert.equal(result.ok, true);
+  assert.equal(result.id, "258#def");
+});
+
+test("resolveDeleteTarget refuses a positional fallback when the id is gone", () => {
+  const result = resolveDeleteTarget(["257", "258"], { slideIndex: 2, id: "999", title: "Penutup" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /berubah/i);
+});
+
+test("resolveDeleteTarget falls back to index only when no id was captured", () => {
+  const result = resolveDeleteTarget(["257", "258", "259"], { slideIndex: 2, id: "" });
+  assert.equal(result.ok, true);
+  assert.equal(result.id, "258");
+});
+
+test("resolveDeleteTarget rejects an index outside the live deck", () => {
+  const result = resolveDeleteTarget(["257"], { slideIndex: 4, id: "" });
+  assert.equal(result.ok, false);
+});
+
+test("deckContextToPromptText states slide count and the global truncation notice", () => {
+  const text = deckContextToPromptText({
+    source: "extractor",
+    slides: [
+      { index: 1, id: "257", title: "Judul", text: "Judul\nSubjudul", truncated: false },
+      { index: 2, id: "258", title: "Agenda", text: "Agenda", truncated: false }
+    ]
+  });
+  assert.match(text, /2 slide/);
+  assert.match(text, /Konten slide dipotong untuk konteks/);
+  assert.match(text, /\[Slide 1 \| id 257\]/);
+  assert.match(text, /\[Slide 2 \| id 258\]/);
+});
+
+test("deckContextToPromptText marks only the slides it actually cut", () => {
+  const long = "x".repeat(900);
+  const text = deckContextToPromptText({
+    source: "host",
+    slides: [
+      { index: 1, id: "257", title: "Pendek", text: "singkat", truncated: false },
+      { index: 2, id: "258", title: "Panjang", text: long, truncated: false }
+    ]
+  });
+  const [first, second] = text.split("[Slide 2");
+  assert.equal(/\[dipotong\]/.test(first), false);
+  assert.match(second, /\[dipotong\]/);
+});
+
+test("deckContextToPromptText respects the total ceiling", () => {
+  const slides = Array.from({ length: 60 }, (_, i) => ({
+    index: i + 1, id: String(257 + i), title: `Slide ${i + 1}`,
+    text: "y".repeat(500), truncated: false
+  }));
+  const text = deckContextToPromptText({ source: "extractor", slides });
+  assert.ok(text.length < 11000, `snapshot too long: ${text.length}`);
+  assert.match(text, /60 slide/);
 });

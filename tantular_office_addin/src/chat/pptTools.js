@@ -2,6 +2,8 @@
 // All Office/PowerPoint access for the PPT chat lives here so pptChat.js can
 // stay a pure UI module (mirrors the excelChat.js / excelTools.js split).
 
+import { sameSlideId } from "../officeClient.js";
+
 const MAX_ACTIONS_PER_TURN = 8;
 const OPS = ["improve_slide", "replace_slide", "add_slide", "delete_slide"];
 const FRONT_INSERT_REJECTION =
@@ -194,6 +196,66 @@ function sanitizeSlide(raw) {
 //     being replaced must therefore run BEFORE the replace, while its anchor
 //     id still exists.
 const OP_RANK = { add_slide: 0, replace_slide: 1, improve_slide: 1, delete_slide: 2 };
+
+export const PER_SLIDE_CHARS = 400;
+export const TOTAL_SNAPSHOT_CHARS = 9000;
+
+// A confirmed delete must hit the slide the user saw in the proposal. If the
+// deck moved between proposal and confirmation, warn instead of deleting
+// whatever now sits at that position.
+export function resolveDeleteTarget(liveIds, descriptor) {
+  const ids = Array.isArray(liveIds) ? liveIds.map((id) => String(id || "")) : [];
+  const wanted = str(descriptor?.id);
+  const index = Number(descriptor?.slideIndex) || 0;
+
+  if (wanted) {
+    let position = ids.findIndex((id) => id === wanted);
+    if (position < 0) {
+      const matches = ids
+        .map((id, i) => (sameSlideId(id, wanted) ? i : -1))
+        .filter((i) => i >= 0);
+      if (matches.length === 1) position = matches[0];
+    }
+    if (position < 0) {
+      const title = str(descriptor?.title);
+      return {
+        ok: false,
+        reason: `Deck sudah berubah sejak penghapusan diusulkan${title ? ` (slide "${title}")` : ""}. ` +
+          "Tidak ada yang dihapus. Minta ulang jika masih ingin menghapusnya."
+      };
+    }
+    return { ok: true, id: ids[position], index: position + 1 };
+  }
+
+  if (!Number.isInteger(index) || index < 1 || index > ids.length) {
+    return { ok: false, reason: `Slide ${index || "?"} tidak ada lagi di deck aktif. Tidak ada yang dihapus.` };
+  }
+  return { ok: true, id: ids[index - 1], index };
+}
+
+export function deckContextToPromptText(ctx) {
+  const slides = Array.isArray(ctx?.slides) ? ctx.slides : [];
+  const lines = [
+    `Deck aktif: ${slides.length} slide. Sumber pembacaan: ${str(ctx?.source) || "tidak diketahui"}.`,
+    "Konten slide dipotong untuk konteks; jangan anggap bagian yang tidak terlihat kosong.",
+    ""
+  ];
+  let budget = TOTAL_SNAPSHOT_CHARS;
+  for (const slide of slides) {
+    const header = `[Slide ${slide.index}${slide.id ? ` | id ${slide.id}` : ""}]`;
+    const room = Math.max(0, Math.min(PER_SLIDE_CHARS, budget));
+    const body = str(slide.text);
+    const cut = body.length > room;
+    const shown = cut ? `${body.slice(0, room)} [dipotong]` : body;
+    lines.push(`${header} ${shown}`.trim());
+    budget -= Math.min(body.length, room);
+    if (budget <= 0) {
+      lines.push(`[… ${slides.length - slide.index} slide berikutnya tidak ditampilkan karena batas konteks]`);
+      break;
+    }
+  }
+  return lines.join("\n");
+}
 
 export function orderPptActions(actions) {
   const list = Array.isArray(actions) ? actions.slice() : [];
