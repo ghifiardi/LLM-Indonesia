@@ -164,7 +164,16 @@ export function mountPptChatPane() {
     cancel.textContent = summary.cancelLabel;
 
     confirm.addEventListener("click", async () => {
-      if (state.busy) return;
+      // An unconfirmed plan from an earlier turn can still be on screen while a
+      // new turn is running. Writing now would race that turn, so we do not —
+      // but returning silently left the user looking at an unchanged row with no
+      // message, which reads exactly like "applied". Say so, and leave the
+      // buttons live so the click can simply be repeated.
+      if (state.busy) {
+        bubble.textContent = `${base}\n⏳ Tunggu sampai proses yang sedang berjalan selesai, lalu klik lagi.`;
+        els.messages.scrollTop = els.messages.scrollHeight;
+        return;
+      }
       confirm.disabled = true;
       cancel.disabled = true;
       row.remove();

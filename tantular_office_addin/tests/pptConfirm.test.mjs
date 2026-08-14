@@ -12,8 +12,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  executeConfirmedPptPlan,
   executePptActions,
   needsPptConfirmation,
+  PPT_CHAT_BUILD,
   summarizePendingChanges,
   describePendingChange,
   resolveDeleteTarget
@@ -177,4 +179,143 @@ test("describePendingChange survives an unknown op instead of printing undefined
   assert.equal(describePendingChange({ op: "add_slide", slideIndex: 1 }),
     'Tambah slide baru "tanpa judul" setelah slide 1');
   assert.equal(summarizePendingChanges(null).count, 0);
+});
+
+// --- Id-less destructive targets -----------------------------------------
+// resolveDeleteTarget is ALLOWED to fall back to position when a descriptor
+// carries no id (that is its own, separately tested contract). But a pending
+// descriptor with id "" would reach the confirmed write with no staleness
+// detection at all — the exact damage class the confirmation exists to prevent.
+// So an id-less target is refused at PLAN time for the destructive ops too, the
+// way an id-less add_slide anchor already was.
+const IDLESS_CTX = { slides: [{ index: 1, id: "", title: "Judul", text: "Judul\nSatu\nDua" }] };
+const WITH_ID_CTX = { slides: [{ index: 1, id: "256", title: "Judul", text: "Judul\nSatu\nDua" }] };
+
+for (const action of [
+  { op: "replace_slide", slideIndex: 1, slide: bullets("Baru") },
+  { op: "improve_slide", slideIndex: 1 },
+  { op: "delete_slide", slideIndex: 1 }
+]) {
+  test(`${action.op} on an id-less slide is refused at plan time and never becomes pending`, () => {
+    const { lines, pending } = executePptActions([action], IDLESS_CTX);
+    assert.deepEqual(pending, []);
+    assert.equal(needsPptConfirmation(pending), false);
+    assert.equal(lines.length, 1);
+    assert.ok(lines[0].startsWith("❌"));
+    assert.match(lines[0], /tidak punya id/);
+
+    // The same action on a slide that DOES have an id still plans normally.
+    const planned = executePptActions([action], WITH_ID_CTX);
+    assert.deepEqual(planned.lines, []);
+    assert.equal(planned.pending.length, 1);
+    assert.equal(planned.pending[0].id, "256");
+  });
+}
+
+// --- The confirmed write path --------------------------------------------
+// executeConfirmedPptPlan is the only code in this add-in that mutates a real
+// deck, and there is no undo. The four Office-touching calls come in through
+// `hooks` (defaulting to the real officeClient functions), so the whole path can
+// be driven with plain functions — no Office mocks, no model calls, no mocking
+// library. improve_slide is deliberately absent here: it calls the local model.
+function fakeDeck(liveIds, outcomes = {}) {
+  const calls = [];
+  const hooks = {
+    readLiveIds: () => liveIds.slice(),
+    deleteSlides: (ids) => {
+      calls.push(`delete:${ids.join(",")}`);
+      return outcomes.delete === false ? { deleted: false, reason: "gagal" } : { deleted: true };
+    },
+    replaceSlide: (_base64, options) => {
+      calls.push(`replace:${options.slideId}`);
+      return outcomes.replace === false ? { replaced: false, reason: "gagal" } : { replaced: true };
+    },
+    insertSlideAfter: (_base64, options) => {
+      calls.push(`insert:${options.slideId}`);
+      return outcomes.insert === false
+        ? { inserted: false, deckChanged: false, reason: "gagal" }
+        : { inserted: true };
+    }
+  };
+  return { calls, hooks };
+}
+
+const PLAN_ACTIONS = [
+  { op: "replace_slide", slideIndex: 2, slide: bullets("Ganti") },
+  { op: "delete_slide", slideIndex: 3 },
+  { op: "add_slide", afterIndex: 1, slide: bullets("Baru") }
+];
+const LIVE_IDS = ["256", "257", "258", "259"];
+
+test("a plan that is never confirmed performs ZERO writes", async () => {
+  const { calls } = fakeDeck(LIVE_IDS);
+  const { pending } = executePptActions(PLAN_ACTIONS, CTX);
+  assert.equal(pending.length, 3);
+  assert.equal(needsPptConfirmation(pending), true);
+  // Planning alone touched nothing, and the write path was never entered.
+  assert.deepEqual(calls, []);
+});
+
+test("a confirmed plan performs exactly the expected writes, in the expected order", async () => {
+  const { calls, hooks } = fakeDeck(LIVE_IDS);
+  const { pending } = executePptActions(PLAN_ACTIONS, CTX);
+  const { lines } = await executeConfirmedPptPlan(pending, hooks);
+  // Highest index first (mutating slide N shifts everything after it), and the
+  // insert runs against its anchor id.
+  assert.deepEqual(calls, ["delete:258", "replace:257", "insert:256"]);
+  assert.equal(lines.filter((line) => line.startsWith("✅")).length, 3);
+  assert.equal(lines[lines.length - 1], `(${PPT_CHAT_BUILD})`);
+});
+
+test("an action whose id is gone from the live deck writes nothing while the rest still run", async () => {
+  // Slide 257 (the replace target) was removed by hand between plan and confirm.
+  const { calls, hooks } = fakeDeck(["256", "258", "259"]);
+  const { pending } = executePptActions(PLAN_ACTIONS, CTX);
+  const { lines } = await executeConfirmedPptPlan(pending, hooks);
+  assert.deepEqual(calls, ["delete:258", "insert:256"]);
+  const refused = lines.filter((line) => line.startsWith("❌"));
+  assert.equal(refused.length, 1);
+  assert.match(refused[0], /Deck sudah berubah sejak penggantian diusulkan/);
+  assert.equal(lines.filter((line) => line.startsWith("✅")).length, 2);
+});
+
+test("an aborted signal performs no writes at all", async () => {
+  const { calls, hooks } = fakeDeck(LIVE_IDS);
+  const { pending } = executePptActions(PLAN_ACTIONS, CTX);
+  const { lines } = await executeConfirmedPptPlan(pending, { ...hooks, signal: { aborted: true } });
+  assert.deepEqual(calls, []);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^⏹ Dihentikan oleh pengguna; 3 aksi berikutnya tidak dijalankan\./);
+  assert.ok(!lines.includes(`(${PPT_CHAT_BUILD})`));
+});
+
+test("the build tag is stamped only when at least one write actually succeeded", async () => {
+  // Every action refused (the whole deck moved): nothing was written, so no tag.
+  const gone = fakeDeck(["900", "901"]);
+  const { pending } = executePptActions(PLAN_ACTIONS, CTX);
+  const refusedRun = await executeConfirmedPptPlan(pending, gone.hooks);
+  assert.deepEqual(gone.calls, []);
+  assert.equal(refusedRun.lines.length, 3);
+  assert.ok(refusedRun.lines.every((line) => line.startsWith("❌")));
+  assert.ok(!refusedRun.lines.includes(`(${PPT_CHAT_BUILD})`));
+
+  // Reached the host but every write failed there: still not a write.
+  const failed = fakeDeck(LIVE_IDS, { delete: false, replace: false, insert: false });
+  const failedRun = await executeConfirmedPptPlan(pending, failed.hooks);
+  assert.deepEqual(failed.calls, ["delete:258", "replace:257", "insert:256"]);
+  assert.ok(failedRun.lines.every((line) => line.startsWith("❌")));
+  assert.ok(!failedRun.lines.includes(`(${PPT_CHAT_BUILD})`));
+
+  // One success is enough.
+  const partial = fakeDeck(LIVE_IDS, { replace: false, insert: false });
+  const partialRun = await executeConfirmedPptPlan(pending, partial.hooks);
+  assert.equal(partialRun.lines.filter((line) => line.startsWith("✅")).length, 1);
+  assert.equal(partialRun.lines[partialRun.lines.length - 1], `(${PPT_CHAT_BUILD})`);
+});
+
+test("an empty confirmed plan writes nothing and reports nothing", async () => {
+  const { calls, hooks } = fakeDeck(LIVE_IDS);
+  assert.deepEqual((await executeConfirmedPptPlan([], hooks)).lines, []);
+  assert.deepEqual((await executeConfirmedPptPlan(null, hooks)).lines, []);
+  assert.deepEqual(calls, []);
 });

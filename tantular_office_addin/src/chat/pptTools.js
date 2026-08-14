@@ -288,6 +288,10 @@ const STALE_VERB = {
   add_slide: "penyisipan"
 };
 
+// The ops that overwrite or remove existing content. add_slide is not one of
+// them (it only adds), but it has its own id requirement for the anchor.
+const DESTRUCTIVE_OPS = new Set(["improve_slide", "replace_slide", "delete_slide"]);
+
 export function resolveDeleteTarget(liveIds, descriptor) {
   const ids = Array.isArray(liveIds) ? liveIds.map((id) => String(id || "")) : [];
   const wanted = str(descriptor?.id);
@@ -861,6 +865,21 @@ export function executePptActions(actions, ctx) {
       lines.push(`❌ Slide ${target.index} tidak punya id, jadi posisi sisipan tidak bisa dipastikan.`);
       continue;
     }
+    // Same refusal, for the ops that DESTROY content. resolveDeleteTarget is
+    // allowed to fall back to position when a descriptor carries no id — that is
+    // its own contract and stays as it is. But a descriptor with no id reaches
+    // the confirmed write with NO staleness detection at all: the user approves
+    // "ganti slide 3" and whatever sits at position 3 at confirm time is
+    // overwritten. That is exactly the damage the confirmation exists to
+    // prevent, so an id-less destructive target is refused HERE, at plan time,
+    // the way an id-less insert anchor already is.
+    if (DESTRUCTIVE_OPS.has(action.op) && !target.id) {
+      lines.push(
+        `❌ Slide ${target.index} tidak punya id, jadi ${STALE_VERB[action.op]} tidak bisa dipastikan `
+        + "mengenai slide yang benar. Muat ulang deck, lalu coba lagi."
+      );
+      continue;
+    }
     pending.push({
       op: action.op,
       slideIndex: target.index,
@@ -886,10 +905,19 @@ export function executePptActions(actions, ctx) {
 // live deck is re-read before EACH action and the descriptor's id is re-resolved
 // against it. If the slide the user approved is gone, that action refuses
 // honestly instead of rewriting whatever now sits at that position.
+//
+// The four Office-touching calls arrive through `hooks`, defaulting to the real
+// officeClient imports, so production behaviour and every existing call site are
+// unchanged while a test can drive this whole path with plain functions. The
+// seam is deliberately narrow: only the calls that need a live PowerPoint.
 export async function executeConfirmedPptPlan(pending, hooks = {}) {
   const {
     onProgress = () => {}, signal, tone = "", instruction = "",
-    styleId = "nusantara", userRequest = ""
+    styleId = "nusantara", userRequest = "",
+    readLiveIds = readLiveSlideIds,
+    deleteSlides = deleteSlidesInActivePresentation,
+    replaceSlide = replaceSlideInActivePresentation,
+    insertSlideAfter = insertSlideAfterInActivePresentation
   } = hooks;
   const lines = [];
   const planned = (Array.isArray(pending) ? pending : []).filter(Boolean);
@@ -906,7 +934,7 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
     let target;
     let deckTotal = 0;
     try {
-      const liveIds = await readLiveSlideIds();
+      const liveIds = await readLiveIds();
       const resolved = resolveDeleteTarget(liveIds, descriptor);
       if (!resolved.ok) { lines.push(`❌ ${resolved.reason}`); continue; }
       target = { id: resolved.id, index: resolved.index, title: str(descriptor.title), text: str(descriptor.text) };
@@ -919,7 +947,7 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
     const action = descriptor;
     try {
       if (action.op === "delete_slide") {
-        const outcome = await deleteSlidesInActivePresentation([target.id]);
+        const outcome = await deleteSlides([target.id]);
         if (!outcome.deleted) { lines.push(`❌ Slide ${target.index}: ${outcome.reason}`); continue; }
         wrote = true;
         lines.push(`✅ Slide ${target.index} ("${target.title}") dihapus.`);
@@ -977,7 +1005,7 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
         }
 
         onProgress(`Mengganti slide ${target.index}...`);
-        const outcome = await replaceSlideInActivePresentation(
+        const outcome = await replaceSlide(
           buildDeckPptxBase64(
             { ...result.spec, ...deckPositionFor(deckTotal, target.index) },
             styleId,
@@ -996,7 +1024,7 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
 
       if (action.op === "replace_slide") {
         onProgress(`Mengganti slide ${target.index}...`);
-        const outcome = await replaceSlideInActivePresentation(
+        const outcome = await replaceSlide(
           buildDeckPptxBase64(specFor(action.slide, deckPositionFor(deckTotal, target.index)), styleId, instruction),
           { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
         );
@@ -1012,7 +1040,7 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
       // Verified insert: reads the deck before and after inside one context and
       // refuses to claim success unless exactly one slide landed right after the
       // anchor — the same contract replace and delete already honor.
-      const inserted = await insertSlideAfterInActivePresentation(
+      const inserted = await insertSlideAfter(
         buildDeckPptxBase64(
           specFor(action.slide, deckPositionFor(deckTotal, target.index + 1, 1)),
           styleId,
