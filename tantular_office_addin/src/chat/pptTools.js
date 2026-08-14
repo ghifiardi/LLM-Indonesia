@@ -90,13 +90,100 @@ export function sanitizePptActions(raw, slideCount) {
   return { actions, rejected };
 }
 
-// TODO(Task 3): replace this permissive stub with full per-type slide validation.
+// Field allowlist = exactly what pptxBuilder consumes. Anything else is
+// stripped so a hallucinated field can never reach the renderer.
+const TYPE_RULES = {
+  title:         { requires: null },
+  closing:       { requires: null },
+  quote:         { requires: null },
+  agenda:        { requires: "bullets" },
+  bullets:       { requires: "bullets" },
+  cards:         { requires: "cards" },
+  columns:       { requires: "columns" },
+  metrics:       { requires: "metrics" },
+  visualization: { requires: "data" }
+};
+
+function cleanStrings(raw) {
+  return Array.isArray(raw) ? raw.map(str).filter(Boolean) : [];
+}
+
+function cleanCards(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((card) => {
+    const title = str(card?.title);
+    if (!title) return null;
+    const desc = str(card?.desc);
+    return desc ? { title, desc } : { title };
+  }).filter(Boolean);
+}
+
+function cleanColumns(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((column) => {
+    const title = str(column?.title);
+    if (!title) return null;
+    const points = cleanStrings(column?.points);
+    return points.length ? { title, points } : { title };
+  }).filter(Boolean);
+}
+
+function cleanMetrics(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((metric) => {
+    const value = str(metric?.value);
+    if (!value) return null;
+    return { value, label: str(metric?.label) };
+  }).filter(Boolean);
+}
+
+function cleanData(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((point) => {
+    const label = str(point?.label);
+    const value = Number(point?.value);
+    if (!label || !Number.isFinite(value)) return null;
+    return { label, value };
+  }).filter(Boolean);
+}
+
 function sanitizeSlide(raw) {
-  if (!raw || typeof raw !== "object") return { ok: false, reason: "slide tidak ada." };
+  if (!raw || typeof raw !== "object") return { ok: false, reason: "objek slide tidak ada." };
   const type = str(raw.type);
-  if (!SLIDE_TYPES.includes(type)) return { ok: false, reason: `type "${type}" tidak dikenal.` };
+  if (!TYPE_RULES[type]) return { ok: false, reason: `type slide "${type}" tidak dikenal.` };
+
+  const headline = str(raw.headline);
+  const quote = str(raw.quote);
+  if (type === "quote") {
+    if (!headline && !quote) return { ok: false, reason: "slide quote butuh \"quote\" atau \"headline\"." };
+  } else if (!headline) {
+    return { ok: false, reason: `slide ${type} butuh "headline".` };
+  }
+
   const slide = { type };
-  if (str(raw.headline)) slide.headline = str(raw.headline);
-  if (Array.isArray(raw.bullets)) slide.bullets = raw.bullets.map(str).filter(Boolean);
+  if (headline) slide.headline = headline;
+  if (quote) slide.quote = quote;
+  if (str(raw.subhead)) slide.subhead = str(raw.subhead);
+
+  // Drop invalid nested entries FIRST, then check emptiness — an array that
+  // only contained malformed entries must reject the slide, not render blank.
+  const bullets = cleanStrings(raw.bullets);
+  const cards = cleanCards(raw.cards);
+  const columns = cleanColumns(raw.columns);
+  const metrics = cleanMetrics(raw.metrics);
+  const data = cleanData(raw.data);
+  if (bullets.length) slide.bullets = bullets;
+  if (cards.length) slide.cards = cards;
+  if (columns.length) slide.columns = columns;
+  if (metrics.length) slide.metrics = metrics;
+  if (data.length) slide.data = data;
+  if (type === "visualization" && str(raw.chartType)) {
+    slide.chartType = str(raw.chartType).toLowerCase();
+  }
+
+  const required = TYPE_RULES[type].requires;
+  if (required && !(slide[required] || []).length) {
+    return { ok: false, reason: `slide ${type} butuh "${required}" yang tidak kosong.` };
+  }
   return { ok: true, slide };
 }
