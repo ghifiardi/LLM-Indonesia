@@ -618,29 +618,63 @@ test("the reported intent is the one actually applied", () => {
   );
 });
 
-test("content units count the text boxes on BOTH sides, the way pptxBuilder emits them", () => {
-  assert.equal(countSourceUnits("Judul\nPoin satu\nPoin dua\n\nPoin tiga"), 4);
+test("content units count CONTENT on BOTH sides — never the headline or the footer", () => {
+  // Line 1 is the headline, the brand/footer line is chrome: 3 content lines.
+  assert.equal(countSourceUnits("Judul\nPoin satu\nPoin dua\n\nPoin tiga"), 3);
+  assert.equal(countSourceUnits("Judul\nSatu\nDua\nTantular Deck Studio · 2/8"), 2);
+  assert.equal(countSourceUnits("Judul\nSatu\nDua\nAcme Corp · 2/8"), 2);
+  assert.equal(countSourceUnits("Judul"), 0);
   assert.equal(countSourceUnits(""), 0);
-  // bullets + headline + footer line
-  assert.equal(countSpecUnits({ type: "bullets", headline: "H", bullets: ["a", "b", "c"] }), 5);
+  // bullets only — the headline and the footer are chrome on this side too
+  assert.equal(countSpecUnits({ type: "bullets", headline: "H", bullets: ["a", "b", "c"] }), 3);
   // each card emits a title box AND a desc box
   assert.equal(countSpecUnits({
     type: "cards", headline: "H",
     cards: [{ title: "a", desc: "d" }, { title: "b", desc: "e" }]
-  }), 6);
-  assert.equal(countSpecUnits({ type: "cards", headline: "H", cards: [{ title: "a" }, { title: "b" }] }), 4);
+  }), 4);
+  assert.equal(countSpecUnits({ type: "cards", headline: "H", cards: [{ title: "a" }, { title: "b" }] }), 2);
   assert.equal(countSpecUnits({
     type: "columns", headline: "H",
     columns: [{ title: "A", points: ["1", "2"] }, { title: "B", points: ["3"] }]
-  }), 7);
+  }), 5);
   // A column with no points still carries its title.
-  assert.equal(countSpecUnits({ type: "columns", headline: "H", columns: [{ title: "A" }] }), 3);
+  assert.equal(countSpecUnits({ type: "columns", headline: "H", columns: [{ title: "A" }] }), 1);
   // each metric emits a value box AND a label box
-  assert.equal(countSpecUnits({ type: "metrics", headline: "H", metrics: [{ value: "9%", label: "L" }] }), 4);
-  assert.equal(countSpecUnits({ type: "metrics", headline: "H", metrics: [{ value: "9%" }] }), 3);
-  assert.equal(countSpecUnits({ type: "title", headline: "Judul", subhead: "Sub" }), 3);
+  assert.equal(countSpecUnits({ type: "metrics", headline: "H", metrics: [{ value: "9%", label: "L" }] }), 2);
+  assert.equal(countSpecUnits({ type: "metrics", headline: "H", metrics: [{ value: "9%" }] }), 1);
+  // The subhead is content on BOTH sides: it cannot be told apart from a real
+  // line in extracted text, so it is never treated as chrome on the spec side.
+  assert.equal(countSpecUnits({ type: "title", headline: "Judul", subhead: "Sub" }), 1);
+  assert.equal(countSpecUnits({ type: "title", headline: "Judul" }), 0);
   assert.equal(countSpecUnits(null), 0);
   assert.equal(countSpecUnits({ type: "bullets" }), 0);
+});
+
+test("spec units respect pptxBuilder's render caps instead of counting invisible items", () => {
+  // drawBullets slices to 7 — 12 bullets render as 7, so 12 must not measure 12.
+  const twelve = Array.from({ length: 12 }, (_, i) => `Poin ${i + 1}`);
+  assert.equal(countSpecUnits({ type: "bullets", headline: "H", bullets: twelve }), 7);
+  // drawVisualization slices its insight bullets to 5 and its data to 8.
+  assert.equal(countSpecUnits({ type: "visualization", headline: "H", bullets: twelve }), 5);
+  assert.equal(countSpecUnits({
+    type: "visualization", headline: "H",
+    data: Array.from({ length: 10 }, (_, i) => ({ value: i + 1, label: `L${i}` }))
+  }), 16);
+  // drawCards slices to 8, drawMetrics to 4, drawColumns to 3 columns × 6 points.
+  assert.equal(countSpecUnits({
+    type: "cards", headline: "H",
+    cards: Array.from({ length: 10 }, (_, i) => ({ title: `T${i}` }))
+  }), 8);
+  assert.equal(countSpecUnits({
+    type: "metrics", headline: "H",
+    metrics: Array.from({ length: 6 }, (_, i) => ({ value: `${i}`, label: `L${i}` }))
+  }), 8);
+  assert.equal(countSpecUnits({
+    type: "columns", headline: "H",
+    columns: Array.from({ length: 5 }, (_, i) => ({
+      title: `K${i}`, points: Array.from({ length: 9 }, (_, j) => `p${j}`)
+    }))
+  }), 21);
 });
 
 test("a FAITHFUL rewrite of a Tantular-built cards slide is not severe", () => {
@@ -655,7 +689,9 @@ test("a FAITHFUL rewrite of a Tantular-built cards slide is not severe", () => {
     "Tantular Deck Studio · 2/8"
   ].join("\n");
   const source = countSourceUnits(extracted);
-  assert.equal(source, 11);
+  // 11 extracted lines minus the headline and the footer = 9 content units
+  // (the subhead counts as content on both sides).
+  assert.equal(source, 9);
   const faithful = countSpecUnits({
     type: "cards", headline: "Empat Pilar", subhead: "Ringkasan program",
     cards: [
@@ -665,7 +701,7 @@ test("a FAITHFUL rewrite of a Tantular-built cards slide is not severe", () => {
       { title: "Pilar Empat", desc: "Penjelasan lebih ringkas" }
     ]
   });
-  assert.equal(faithful, 11);
+  assert.equal(faithful, 9);
   assert.equal(isSevereContentLoss(source, faithful), false);
   assert.equal(decideImproveWrite(source, faithful, 1), "accept");
   assert.equal(contentLossNote(source, faithful), "");
@@ -688,7 +724,7 @@ test("a FAITHFUL rewrite of a Tantular-built metrics slide is not severe", () =>
     "Tantular Deck Studio · 3/8"
   ].join("\n");
   const source = countSourceUnits(extracted);
-  assert.equal(source, 10);
+  assert.equal(source, 8);
   const faithful = countSpecUnits({
     type: "metrics", headline: "Kinerja Kuartal",
     metrics: [
@@ -698,7 +734,7 @@ test("a FAITHFUL rewrite of a Tantular-built metrics slide is not severe", () =>
       { value: "Rp 4,2 M", label: "Pendapatan" }
     ]
   });
-  assert.equal(faithful, 10);
+  assert.equal(faithful, 8);
   assert.equal(isSevereContentLoss(source, faithful), false);
   assert.equal(decideImproveWrite(source, faithful, 1), "accept");
   // Dropping three of four metrics is severe.
@@ -712,15 +748,115 @@ test("a FAITHFUL rewrite of a bullets slide is not severe, the live 7 to 1 gutti
   const extracted = ["Tujuh Langkah", "Satu", "Dua", "Tiga", "Empat", "Lima", "Enam", "Tujuh",
     "Tantular Deck Studio · 2/8"].join("\n");
   const source = countSourceUnits(extracted);
-  assert.equal(source, 9);
+  assert.equal(source, 7);
   const faithful = countSpecUnits({
     type: "bullets", headline: "Tujuh Langkah",
     bullets: ["Satu", "Dua", "Tiga", "Empat", "Lima", "Enam", "Tujuh"]
   });
+  assert.equal(faithful, 7);
   assert.equal(decideImproveWrite(source, faithful, 1), "accept");
   const gutted = countSpecUnits({ type: "bullets", headline: "Tujuh Langkah", bullets: ["Satu"] });
   assert.equal(decideImproveWrite(source, gutted, 1), "retry");
   assert.equal(decideImproveWrite(source, gutted, 2), "refuse");
+});
+
+// REGRESSION GUARD. A previous calibration put the chrome (headline, optional
+// subhead, footer/brand line) on BOTH sides of the ratio test. Every spec then
+// earned ~3 free units however empty it was, and a 6-bullet slide gutted to one
+// column with one point measured 8 -> 4 and was ACCEPTED — the exact live
+// failure the gate exists for. The old columns test asserted only raw counts, so
+// nothing caught it. These three drive the whole chain instead:
+// countSourceUnits -> countSpecUnits -> decideImproveWrite.
+const SIX_BULLET_SLIDE = [
+  "Enam Poin Utama",
+  "Poin satu", "Poin dua", "Poin tiga", "Poin empat", "Poin lima", "Poin enam",
+  "Tantular Deck Studio · 2/8"
+].join("\n");
+
+const TWO_BY_THREE_COLUMNS = [
+  "Sebelum dan Sesudah",
+  "Sebelum", "Lama satu", "Lama dua", "Lama tiga",
+  "Sesudah", "Baru satu", "Baru dua", "Baru tiga",
+  "Tantular Deck Studio · 4/8"
+].join("\n");
+
+test("a COLUMNS-shaped gutting is refused end to end, not merely counted", () => {
+  // THE LIVE FAILURE: six bullets rewritten as one column holding one point.
+  const source = countSourceUnits(SIX_BULLET_SLIDE);
+  assert.equal(source, 6);
+  const gutted = countSpecUnits({
+    type: "columns", headline: "Enam Poin Utama",
+    columns: [{ title: "Ringkasan", points: ["Poin satu"] }]
+  });
+  assert.equal(gutted, 2);
+  assert.equal(isSevereContentLoss(source, gutted), true);
+  assert.equal(decideImproveWrite(source, gutted, 1), "retry");
+  assert.equal(decideImproveWrite(source, gutted, 2), "refuse");
+  assert.deepEqual(runImproveDecision(source, [gutted, gutted]), { wrote: false, retried: true, kept: 2 });
+  assert.match(improveRefusedLine(2, source, gutted), /6 poin → 2 poin/);
+
+  // Same shape, one rung less obvious: a real 2x3 columns slide flattened to
+  // 2x1. Four of its six points are destroyed and it lands exactly on half.
+  const wide = countSourceUnits(TWO_BY_THREE_COLUMNS);
+  assert.equal(wide, 8);
+  const flattened = countSpecUnits({
+    type: "columns", headline: "Sebelum dan Sesudah",
+    columns: [{ title: "Sebelum", points: ["Lama satu"] }, { title: "Sesudah", points: ["Baru satu"] }]
+  });
+  assert.equal(flattened, 4);
+  assert.equal(decideImproveWrite(wide, flattened, 1), "retry");
+  assert.equal(decideImproveWrite(wide, flattened, 2), "refuse");
+
+  // And the faithful rewrite of that same slide still writes on the first try.
+  const faithful = countSpecUnits({
+    type: "columns", headline: "Sebelum dan Sesudah",
+    columns: [
+      { title: "Sebelum", points: ["Lama satu", "Lama dua", "Lama tiga"] },
+      { title: "Sesudah", points: ["Baru satu", "Baru dua", "Baru tiga"] }
+    ]
+  });
+  assert.equal(faithful, 8);
+  assert.equal(decideImproveWrite(wide, faithful, 1), "accept");
+  assert.deepEqual(runImproveDecision(wide, [faithful]), { wrote: true, retried: false, kept: 8 });
+});
+
+test("a CARDS-shaped gutting is refused end to end while a faithful cards rewrite is written", () => {
+  const source = countSourceUnits(SIX_BULLET_SLIDE);
+  // Six bullets collapsed into a single card (title + desc).
+  const oneCard = countSpecUnits({
+    type: "cards", headline: "Enam Poin Utama",
+    cards: [{ title: "Ringkasan", desc: "Semua poin digabung" }]
+  });
+  assert.equal(oneCard, 2);
+  assert.equal(decideImproveWrite(source, oneCard, 1), "retry");
+  assert.deepEqual(runImproveDecision(source, [oneCard, oneCard]), { wrote: false, retried: true, kept: 2 });
+
+  // Inventing a subhead must not buy the model its way past the gate.
+  const oneBulletPlusSubhead = countSpecUnits({
+    type: "bullets", headline: "Enam Poin Utama", subhead: "Ringkasan", bullets: ["Poin satu"]
+  });
+  assert.equal(oneBulletPlusSubhead, 2);
+  assert.equal(decideImproveWrite(source, oneBulletPlusSubhead, 1), "retry");
+
+  // The rewrite that keeps every fact, only in card form, is written at once.
+  const faithful = countSpecUnits({
+    type: "cards", headline: "Enam Poin Utama",
+    cards: [
+      { title: "Poin satu", desc: "Ringkas" }, { title: "Poin dua", desc: "Ringkas" },
+      { title: "Poin tiga", desc: "Ringkas" }, { title: "Poin empat", desc: "Ringkas" },
+      { title: "Poin lima", desc: "Ringkas" }, { title: "Poin enam", desc: "Ringkas" }
+    ]
+  });
+  assert.equal(faithful, 12);
+  assert.equal(isSevereContentLoss(source, faithful), false);
+  assert.deepEqual(runImproveDecision(source, [faithful]), { wrote: true, retried: false, kept: 12 });
+  // A genuine tightening — six points to four cards — is written too.
+  const tightened = countSpecUnits({
+    type: "cards", headline: "Enam Poin Utama",
+    cards: [{ title: "A" }, { title: "B" }, { title: "C" }, { title: "D" }]
+  });
+  assert.equal(tightened, 4);
+  assert.equal(decideImproveWrite(source, tightened, 1), "accept");
 });
 
 test("carriage returns from the in-host read do not collapse a slide to one line", () => {
@@ -729,7 +865,8 @@ test("carriage returns from the in-host read do not collapse a slide to one line
   assert.equal(normalizeSlideText(null), "");
   // Without normalization this counted 1 and fell under the 3-unit floor, so a
   // real gutting was neither warned about nor refused.
-  assert.equal(countSourceUnits("Judul\rSatu\rDua\rTiga\rEmpat\rLima"), 6);
+  // Six paragraphs = a headline plus five content lines.
+  assert.equal(countSourceUnits("Judul\rSatu\rDua\rTiga\rEmpat\rLima"), 5);
 });
 
 test("content loss is reported when severe and stays quiet when modest", () => {
@@ -740,7 +877,9 @@ test("content loss is reported when severe and stays quiet when modest", () => {
   );
   // Real tightening, not gutting: no warning.
   assert.equal(contentLossNote(6, 4), "");
-  assert.equal(contentLossNote(6, 3), "");
+  // Exactly half kept IS loss: half the content of the slide is gone, and a
+  // 2x3 columns slide flattened to 2x1 lands precisely here.
+  assert.notEqual(contentLossNote(6, 3), "");
   // Too small to judge.
   assert.equal(contentLossNote(2, 1), "");
   assert.equal(contentLossNote(0, 0), "");
@@ -817,14 +956,14 @@ test("severe twice writes NOTHING and says so honestly", () => {
 });
 
 test("the retry decision uses the SAME severity threshold as the reported note", () => {
-  // Boundary: exactly half is kept -> not severe, no retry, no note.
-  assert.equal(isSevereContentLoss(6, 3), false);
-  assert.equal(decideImproveWrite(6, 3, 1), "accept");
-  assert.equal(contentLossNote(6, 3), "");
-  // One below half -> severe on both.
-  assert.equal(isSevereContentLoss(6, 2), true);
-  assert.equal(decideImproveWrite(6, 2, 1), "retry");
-  assert.notEqual(contentLossNote(6, 2), "");
+  // Boundary: exactly half kept -> severe on both, retry, and a note.
+  assert.equal(isSevereContentLoss(6, 3), true);
+  assert.equal(decideImproveWrite(6, 3, 1), "retry");
+  assert.notEqual(contentLossNote(6, 3), "");
+  // One above half -> quiet on both.
+  assert.equal(isSevereContentLoss(6, 4), false);
+  assert.equal(decideImproveWrite(6, 4, 1), "accept");
+  assert.equal(contentLossNote(6, 4), "");
   // Below the minimum source size nothing is ever severe.
   assert.equal(isSevereContentLoss(2, 0), false);
   assert.equal(decideImproveWrite(2, 0, 2), "accept");

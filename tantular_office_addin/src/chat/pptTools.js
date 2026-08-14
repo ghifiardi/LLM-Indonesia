@@ -1,4 +1,5 @@
-// Tantular PowerPoint chat tools — deck reading, action validation, execution.
+// Tantular PowerPoint chat tools — deck reading, action validation, planning,
+// and (only after the user confirms) execution.
 // All Office/PowerPoint access for the PPT chat lives here so pptChat.js can
 // stay a pure UI module (mirrors the excelChat.js / excelTools.js split).
 
@@ -275,9 +276,18 @@ const OP_RANK = { add_slide: 0, replace_slide: 1, improve_slide: 1, delete_slide
 export const PER_SLIDE_CHARS = 400;
 export const TOTAL_SNAPSHOT_CHARS = 9000;
 
-// A confirmed delete must hit the slide the user saw in the proposal. If the
-// deck moved between proposal and confirmation, warn instead of deleting
-// whatever now sits at that position.
+// A confirmed write must hit the slide the user saw in the proposal. If the deck
+// moved between proposal and confirmation, warn instead of rewriting or deleting
+// whatever now sits at that position. Every confirmed action goes through this,
+// not just deletes: plan and confirm are separated by an unbounded amount of
+// human time, and the user can reorder the deck in that window.
+const STALE_VERB = {
+  delete_slide: "penghapusan",
+  improve_slide: "perbaikan",
+  replace_slide: "penggantian",
+  add_slide: "penyisipan"
+};
+
 export function resolveDeleteTarget(liveIds, descriptor) {
   const ids = Array.isArray(liveIds) ? liveIds.map((id) => String(id || "")) : [];
   const wanted = str(descriptor?.id);
@@ -293,17 +303,18 @@ export function resolveDeleteTarget(liveIds, descriptor) {
     }
     if (position < 0) {
       const title = str(descriptor?.title);
+      const verb = STALE_VERB[str(descriptor?.op)] || "penghapusan";
       return {
         ok: false,
-        reason: `Deck sudah berubah sejak penghapusan diusulkan${title ? ` (slide "${title}")` : ""}. ` +
-          "Tidak ada yang dihapus. Minta ulang jika masih ingin menghapusnya."
+        reason: `Deck sudah berubah sejak ${verb} diusulkan${title ? ` (slide "${title}")` : ""}. ` +
+          "Tidak ada yang diubah. Minta ulang jika masih diinginkan."
       };
     }
     return { ok: true, id: ids[position], index: position + 1 };
   }
 
   if (!Number.isInteger(index) || index < 1 || index > ids.length) {
-    return { ok: false, reason: `Slide ${index || "?"} tidak ada lagi di deck aktif. Tidak ada yang dihapus.` };
+    return { ok: false, reason: `Slide ${index || "?"} tidak ada lagi di deck aktif. Tidak ada yang diubah.` };
   }
   return { ok: true, id: ids[index - 1], index };
 }
@@ -573,51 +584,92 @@ export function normalizeSlideText(text) {
 // facts and calling it success is the worst failure this product has. We do not
 // block or retry the write — we measure it and say so.
 //
-// The unit is "one information-bearing line/point": a source line, a bullet, a
-// card, a point inside a column, a metric, a data point. It is crude on purpose —
-// it must be pure, testable, and never wrong in a way that hides loss.
+// The unit is "one information-bearing line/point": a bullet, a card title or
+// desc, a column title, a point inside a column, a metric value or label, a data
+// point. It is crude on purpose — it must be pure, testable, and never wrong in
+// a way that hides loss.
+//
+// BOTH SIDES MEASURE CONTENT, NOT CHROME. A previous calibration let each side
+// add its own chrome (headline + footer, +1 more for a subhead) and then compared
+// them through a RATIO. Chrome in the numerator is a floor of ~3 units that every
+// spec earns for free however empty it is, so a 6-unit source could no longer
+// reach severity: 6 bullets rewritten into ONE column with ONE point measured
+// 8 → 4 and was ACCEPTED — the exact live failure this gate exists to catch.
+// So chrome is now excluded from both counts and only content is compared.
+//
+// The source side is extracted slide text, so its chrome cannot be identified
+// perfectly. Two elements are structurally identifiable and both are dropped:
+//   * the FIRST line — pptxBuilder emits the headline first and every extractor
+//     reads shapes in order, so line 1 is the headline. On a slide with no
+//     title this drops one real content line instead; that under-counts the
+//     source, which can only make the gate quieter, never falsely severe.
+//   * the footer / brand line — matched by the built footer's own shape
+//     ("Tantular Deck Studio", optionally "· 3/8") and by any trailing
+//     "… · n/m" numbering a non-Tantular deck carries.
+// The subhead is NOT identifiable in extracted text (line 2 is a subhead on one
+// deck and a real bullet on the next), so rather than leave an asymmetry we
+// count the subhead as CONTENT on BOTH sides. It is information the reader sees;
+// treating it as content keeps the two counts measuring the same thing, and the
+// most a rewrite can gain by inventing one is a single unit.
 export function countSourceUnits(text) {
-  return normalizeSlideText(text)
+  const lines = normalizeSlideText(text)
     .split("\n")
     .map(str)
-    .filter((line) => line.length >= 3)
-    .length;
+    .filter((line) => line.length >= 3 && !isSlideChromeLine(line));
+  // Line 1 is the headline; the rest is content.
+  return Math.max(0, lines.length - 1);
 }
 
-// CALIBRATION (review finding, and it matters now that this gates a WRITE):
-// the source side counts extracted TEXT BOXES, so the spec side must count the
-// boxes pptxBuilder would emit — not the abstract "items". drawCards writes one
-// box per card title AND per desc, drawMetrics one per value AND per label,
-// drawColumns one per column title AND per point, and every slide also carries
-// headline, optional subhead and the footer/brand line. Counting cards as 1
-// each made a LOSSLESS 4-card rewrite (4) look like a 64% loss against its own
-// 11-line extraction, which under the retry/refuse gate would have refused a
-// perfectly good improve. The chrome line is added unconditionally, which
-// slightly inflates the spec side for non-Tantular source slides — deliberately
-// so: the safe direction for a gate with no undo is to under-report loss (a
-// missed warning) rather than to refuse work the user asked for.
+// The built footer is `Tantular Deck Studio` or `Tantular Deck Studio · 3/8`.
+function isSlideChromeLine(line) {
+  return /^tantular deck studio\b/i.test(line) || /·\s*\d+\s*\/\s*\d+$/.test(line);
+}
+
+// CALIBRATION: the spec side counts the CONTENT boxes pptxBuilder would emit —
+// not the abstract "items", and not the chrome. drawCards writes one box per card
+// title AND per desc, drawMetrics one per value AND per label, drawColumns one
+// per column title AND per point. Counting cards as 1 each made a LOSSLESS 4-card
+// rewrite look like a 64% loss against its own extraction; counting the chrome
+// made a 6→1 gutting look acceptable. Content-only on both sides is the only
+// version that gets both right.
+//
+// Render caps are applied here too (drawBullets slices 7, drawCards 8,
+// drawColumns 3 columns × 6 points, drawMetrics 4, drawVisualization 8 data and
+// 5 insight bullets). Without them a 12-bullet spec counted 12 while the deck
+// renders 7 — an over-count on the KEPT side, i.e. a bias toward accepting a
+// write that silently drops the tail.
 export function countSpecUnits(slide) {
   if (!slide || typeof slide !== "object") return 0;
-  const list = (value) => (Array.isArray(value) ? value : []);
+  const cap = (value, max) => (Array.isArray(value) ? value.slice(0, max) : []);
   const box = (value) => (str(value) ? 1 : 0);
   const pair = (a, b) => Math.max(1, box(a) + box(b));
-  const content = list(slide.bullets).filter((b) => str(b)).length
-    + list(slide.cards).reduce((sum, card) => sum + pair(card?.title, card?.desc), 0)
-    + list(slide.columns)
-      .reduce((sum, col) => sum + 1 + list(col?.points).filter((p) => str(p)).length, 0)
-    + list(slide.metrics).reduce((sum, m) => sum + pair(m?.value, m?.label), 0)
-    + list(slide.data).reduce((sum, d) => sum + pair(
+  const isViz = slide.type === "visualization";
+  return cap(slide.bullets, isViz ? 5 : 7).filter((b) => str(b)).length
+    + cap(slide.cards, 8).reduce((sum, card) => sum + pair(card?.title, card?.desc), 0)
+    + cap(slide.columns, 3)
+      .reduce((sum, col) => sum + 1 + cap(col?.points, 6).filter((p) => str(p)).length, 0)
+    + cap(slide.metrics, 4).reduce((sum, m) => sum + pair(m?.value, m?.label), 0)
+    + cap(slide.data, 8).reduce((sum, d) => sum + pair(
       d?.value === 0 || d?.value ? String(d.value) : "", d?.label
-    ), 0);
-  const chrome = box(slide.headline) + box(slide.subhead) + box(slide.quote);
-  if (!content && !chrome) return 0;
-  // + 1 for the footer / brand line every built slide carries.
-  return content + chrome + 1;
+    ), 0)
+    // Counted as content on both sides — see countSourceUnits. The headline and
+    // the footer/brand line are chrome and are counted on neither.
+    + box(slide.subhead) + box(slide.quote);
 }
 
 // THRESHOLD (documented so it can be argued with): warn only when the source had
-// at least 3 units AND the result keeps less than half of them. A 6→4 tightening
-// is what "ringkas" means and must stay quiet; 6→1 is content being thrown away.
+// at least 3 CONTENT units AND the result keeps AT MOST half of them. A 6→4
+// tightening is what "ringkas" means and must stay quiet; 6→1 is content being
+// thrown away.
+//
+// The comparison is `<=`, not `<`. With chrome excluded the counts are smaller
+// and the exact-half boundary is now landed on by real guttings rather than by
+// rounding noise: a 2×3-column slide rewritten to 2×1 points destroys four of its
+// six points (67% of the points, half of all content) and measures exactly
+// 8 → 4. Keeping half of a slide's content is loss, not tightening — and the two
+// error directions are not symmetric. A false severe costs one extra local model
+// call and, at worst, an honest refusal the user can retry; a false accept
+// destroys content in a deck with NO UNDO.
 export const CONTENT_LOSS_MIN_SOURCE_UNITS = 3;
 export const CONTENT_LOSS_RATIO = 0.5;
 
@@ -625,7 +677,7 @@ export function contentLossNote(sourceUnits, keptUnits) {
   const before = Number(sourceUnits) || 0;
   const after = Number(keptUnits) || 0;
   if (before < CONTENT_LOSS_MIN_SOURCE_UNITS) return "";
-  if (after >= before * CONTENT_LOSS_RATIO) return "";
+  if (after > before * CONTENT_LOSS_RATIO) return "";
   return `(${before} poin → ${after} poin — banyak isi dihilangkan; periksa hasilnya)`;
 }
 
@@ -694,49 +746,187 @@ export function deckPositionFor(ctx, position, added = 0) {
   return { startIndex: position, deckTotal: total };
 }
 
+// --- Plan / confirm split -------------------------------------------------
+// THE LIVE DEFECT: the user clicked the chip "Ringkas isi deck ini" — a QUESTION —
+// and the local 9B answered with replace_slide for slides 1..7. The executor
+// applied every one of them and reported "✅ Slide 7 diganti." seven times over
+// the user's real presentation. Slides 8 and 9 survived only because of the
+// 8-actions-per-turn cap. The system prompt already said "kosongkan actions jika
+// pengguna hanya bertanya"; the model ignored it, and no wording will reliably
+// fix a model this small.
+//
+// So the safety moved out of the prompt and into the executor: planning and
+// writing are now two separate steps, and NOTHING in this module writes to the
+// deck until the user has seen the plan and clicked confirm. Deletes already
+// worked exactly this way and were the only action never observed to destroy
+// anything, so the other three ops were brought onto the same path rather than
+// given a second, parallel one.
+
+export const PENDING_OP_VERBS = {
+  improve_slide: "perbaiki",
+  replace_slide: "ganti",
+  add_slide: "tambah",
+  delete_slide: "hapus"
+};
+
+// One line per planned change, in the user's language, naming the slide it
+// touches and saying plainly what it costs. Someone who typed a question must be
+// able to read "Ganti slide 3 — seluruh isi lama hilang" and press Batal.
+export function describePendingChange(descriptor) {
+  const op = str(descriptor?.op);
+  const index = Number(descriptor?.slideIndex) || 0;
+  const title = str(descriptor?.title);
+  const named = title ? ` ("${title}")` : "";
+  if (op === "add_slide") {
+    return `Tambah slide baru "${str(descriptor?.newTitle) || "tanpa judul"}" setelah slide ${index}`;
+  }
+  if (op === "improve_slide") return `Perbaiki slide ${index}${named} — isinya ditulis ulang`;
+  if (op === "replace_slide") return `Ganti slide ${index}${named} — seluruh isi lama hilang`;
+  if (op === "delete_slide") return `Hapus slide ${index}${named}`;
+  return `${op || "aksi tidak dikenal"} pada slide ${index}`;
+}
+
+// Pure: the whole confirmation UI is derived from the planned list alone.
+export function summarizePendingChanges(pending) {
+  const list = (Array.isArray(pending) ? pending : []).filter(Boolean);
+  const count = list.length;
+  const slideNumbers = [...new Set(
+    list
+      .filter((entry) => str(entry.op) !== "add_slide")
+      .map((entry) => Number(entry.slideIndex) || 0)
+      .filter((value) => value > 0)
+  )].sort((a, b) => a - b);
+  const inserts = list.filter((entry) => str(entry.op) === "add_slide").length;
+
+  // Displayed low-to-high, which is how the user reads their deck. Execution
+  // order stays high-to-low (orderPptActions) and is not this list's business.
+  const lines = list
+    .slice()
+    .sort((a, b) => (Number(a.slideIndex) || 0) - (Number(b.slideIndex) || 0))
+    .map(describePendingChange);
+
+  const parts = [];
+  if (slideNumbers.length) {
+    parts.push(`${slideNumbers.length} slide yang sudah ada (slide ${slideNumbers.join(", ")})`);
+  }
+  if (inserts) parts.push(`${inserts} slide baru`);
+  const scope = parts.join(" dan ") || `${count} aksi`;
+
+  return {
+    count,
+    slideNumbers,
+    inserts,
+    lines,
+    headline: `⚠️ Tantular akan MENGUBAH deck ini: ${scope}. `
+      + "Tidak ada undo. Periksa daftar di bawah, lalu setujui atau batalkan.",
+    confirmLabel: count === 1 ? "Terapkan 1 perubahan" : `Terapkan ${count} perubahan`,
+    cancelLabel: "Batal",
+    cancelledLine: "⏹ Dibatalkan. Tidak ada slide yang diubah."
+  };
+}
+
+// A genuine question plans nothing and must stay frictionless: no confirmation
+// UI at all. Confirmation appears if and ONLY if the deck would change.
+export function needsPptConfirmation(pending) {
+  return (Array.isArray(pending) ? pending : []).filter(Boolean).length > 0;
+}
+
 // ctx is IMMUTABLE for the whole turn: every target is resolved from the
-// original snapshot before anything executes, so no action ever reads a deck
-// state that a sibling action just changed.
-export async function executePptActions(actions, ctx, hooks = {}) {
+// original snapshot up front, so no action ever reads a deck state that a
+// sibling action just changed.
+//
+// This function NO LONGER MUTATES THE DECK. It plans, resolves targets against
+// the snapshot, and returns descriptors of what WOULD change. Actions that
+// cannot be planned at all still report ❌ immediately — refusing to plan is not
+// a mutation, and hiding it behind a confirmation would only delay the truth.
+export function executePptActions(actions, ctx) {
+  const lines = [];
+  const pending = [];
+  const list = Array.isArray(actions) ? actions : [];
+  if (!list.length) return { lines, pending };
+
+  for (const action of orderPptActions(list)) {
+    const target = resolveActionTarget(
+      ctx, action.op === "add_slide" ? action.afterIndex : action.slideIndex
+    );
+    if (!target) {
+      lines.push(`❌ ${action.op}: slide tidak ada di snapshot deck.`);
+      continue;
+    }
+    if (action.op === "improve_slide" && !target.text) {
+      lines.push(`❌ Slide ${target.index} tidak punya teks yang bisa dibaca untuk diperbaiki.`);
+      continue;
+    }
+    if (action.op === "add_slide" && !target.id) {
+      lines.push(`❌ Slide ${target.index} tidak punya id, jadi posisi sisipan tidak bisa dipastikan.`);
+      continue;
+    }
+    pending.push({
+      op: action.op,
+      slideIndex: target.index,
+      id: target.id,
+      title: target.title,
+      // Carried from the snapshot so the confirmed write improves the text the
+      // user was actually shown.
+      ...(action.op === "improve_slide" ? { text: target.text, instruction: action.instruction || "" } : {}),
+      ...(action.slide ? { slide: action.slide, newTitle: str(action.slide.headline) } : {})
+    });
+  }
+
+  return { lines, pending, summary: summarizePendingChanges(pending) };
+}
+
+// The confirmed writes. This is the previously-reviewed execution logic, moved
+// behind the confirmation unchanged in substance: the improve retry-then-refuse
+// gate, the abort re-checks after every model call, verified insert/replace/
+// delete, one cache invalidation after the turn's writes, the build tag on
+// writes only, and an honest ✅/❌ per action.
+//
+// What is new is staleness. Plan and confirm are separated by human time, so the
+// live deck is re-read before EACH action and the descriptor's id is re-resolved
+// against it. If the slide the user approved is gone, that action refuses
+// honestly instead of rewriting whatever now sits at that position.
+export async function executeConfirmedPptPlan(pending, hooks = {}) {
   const {
     onProgress = () => {}, signal, tone = "", instruction = "",
     styleId = "nusantara", userRequest = ""
   } = hooks;
   const lines = [];
-  const pendingDeletes = [];
-  if (!actions.length) return { lines, pendingDeletes };
-
-  const planned = orderPptActions(actions).map((action) => ({
-    action,
-    target: resolveActionTarget(ctx, action.op === "add_slide" ? action.afterIndex : action.slideIndex)
-  }));
+  const planned = (Array.isArray(pending) ? pending : []).filter(Boolean);
+  if (!planned.length) return { lines };
 
   let wrote = false;
   for (let position = 0; position < planned.length; position += 1) {
-    const { action, target } = planned[position];
+    const descriptor = planned[position];
     if (signal?.aborted) {
       lines.push(abortReportLine(planned.length - position));
       break;
     }
-    if (!target) {
-      lines.push(`❌ ${action.op}: slide tidak ada di snapshot deck.`);
+
+    let target;
+    let deckTotal = 0;
+    try {
+      const liveIds = await readLiveSlideIds();
+      const resolved = resolveDeleteTarget(liveIds, descriptor);
+      if (!resolved.ok) { lines.push(`❌ ${resolved.reason}`); continue; }
+      target = { id: resolved.id, index: resolved.index, title: str(descriptor.title), text: str(descriptor.text) };
+      deckTotal = Array.isArray(liveIds) ? liveIds.length : 0;
+    } catch (error) {
+      lines.push(`❌ ${descriptor.op} slide ${descriptor.slideIndex}: ${error?.message || error}`);
       continue;
     }
 
+    const action = descriptor;
     try {
       if (action.op === "delete_slide") {
-        pendingDeletes.push({
-          op: "delete_slide", slideIndex: target.index, id: target.id, title: target.title
-        });
-        lines.push(`⏸ Hapus slide ${target.index} ("${target.title}") menunggu konfirmasi.`);
+        const outcome = await deleteSlidesInActivePresentation([target.id]);
+        if (!outcome.deleted) { lines.push(`❌ Slide ${target.index}: ${outcome.reason}`); continue; }
+        wrote = true;
+        lines.push(`✅ Slide ${target.index} ("${target.title}") dihapus.`);
         continue;
       }
 
       if (action.op === "improve_slide") {
-        if (!target.text) {
-          lines.push(`❌ Slide ${target.index} tidak punya teks yang bisa dibaca untuk diperbaiki.`);
-          continue;
-        }
         onProgress(`Menyusun versi lebih baik untuk slide ${target.index}...`);
         const intent = resolveImproveIntent(action.instruction, userRequest);
         const baseInstruction = composeImproveInstruction(instruction, intent);
@@ -789,7 +979,7 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         onProgress(`Mengganti slide ${target.index}...`);
         const outcome = await replaceSlideInActivePresentation(
           buildDeckPptxBase64(
-            { ...result.spec, ...deckPositionFor(ctx, target.index) },
+            { ...result.spec, ...deckPositionFor(deckTotal, target.index) },
             styleId,
             instruction
           ),
@@ -807,7 +997,7 @@ export async function executePptActions(actions, ctx, hooks = {}) {
       if (action.op === "replace_slide") {
         onProgress(`Mengganti slide ${target.index}...`);
         const outcome = await replaceSlideInActivePresentation(
-          buildDeckPptxBase64(specFor(action.slide, deckPositionFor(ctx, target.index)), styleId, instruction),
+          buildDeckPptxBase64(specFor(action.slide, deckPositionFor(deckTotal, target.index)), styleId, instruction),
           { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
         );
         if (outcome.replaced) { wrote = true; lines.push(`✅ Slide ${target.index} diganti.`); }
@@ -815,19 +1005,16 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         continue;
       }
 
-      // add_slide
-      if (!target.id) {
-        lines.push(`❌ Slide ${target.index} tidak punya id, jadi posisi sisipan tidak bisa dipastikan.`);
-        continue;
-      }
+      // add_slide. An anchor with no id was already refused at plan time, but
+      // the live re-resolution above can only ever hand back an id it found.
       onProgress(`Menyisipkan slide setelah slide ${target.index}...`);
-      const title = str(action.slide.headline) || "tanpa judul";
+      const title = str(action.slide?.headline) || "tanpa judul";
       // Verified insert: reads the deck before and after inside one context and
       // refuses to claim success unless exactly one slide landed right after the
       // anchor — the same contract replace and delete already honor.
       const inserted = await insertSlideAfterInActivePresentation(
         buildDeckPptxBase64(
-          specFor(action.slide, deckPositionFor(ctx, target.index + 1, 1)),
+          specFor(action.slide, deckPositionFor(deckTotal, target.index + 1, 1)),
           styleId,
           instruction
         ),
@@ -844,20 +1031,10 @@ export async function executePptActions(actions, ctx, hooks = {}) {
     }
   }
 
-  // Clear once, after the turn's writes. A pending delete is not a write.
+  // Clear once, after the turn's writes. A refused or stale action is not a write.
   if (wrote) {
     invalidateDeckContext();
     lines.push(`(${PPT_CHAT_BUILD})`);
   }
-  return { lines, pendingDeletes };
-}
-
-export async function executeConfirmedDelete(descriptor) {
-  const liveIds = await readLiveSlideIds();
-  const target = resolveDeleteTarget(liveIds, descriptor);
-  if (!target.ok) return `❌ ${target.reason}`;
-  const outcome = await deleteSlidesInActivePresentation([target.id]);
-  if (!outcome.deleted) return `❌ Slide ${target.index}: ${outcome.reason}`;
-  invalidateDeckContext();
-  return `✅ Slide ${target.index} ("${str(descriptor?.title)}") dihapus. (${PPT_CHAT_BUILD})`;
+  return { lines };
 }
