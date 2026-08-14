@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -12,6 +12,39 @@ test("extractRequestedSlideIndex finds slide numbers in Indonesian and English",
   assert.equal(extractRequestedSlideIndex("slide 0"), 0);
   assert.equal(extractRequestedSlideIndex(""), 0);
   assert.equal(extractRequestedSlideIndex(null), 0);
+});
+
+test("deckReadErrorMessage forwards an actionable error message", () => {
+  const error = new Error("Document extractor belum berjalan. Jalankan di terminal: npm run doc-server");
+  assert.equal(
+    deckReadErrorMessage(error),
+    "Document extractor belum berjalan. Jalankan di terminal: npm run doc-server"
+  );
+});
+
+test("deckReadErrorMessage falls back to the generic message for an empty error message", () => {
+  const error = new Error("");
+  assert.equal(
+    deckReadErrorMessage(error),
+    "Tantular tidak bisa membaca deck aktif. Pastikan Tantular Companion berjalan, " +
+    "lalu klik Muat ulang deck."
+  );
+});
+
+test("deckReadErrorMessage falls back to the generic message for null/undefined", () => {
+  const generic =
+    "Tantular tidak bisa membaca deck aktif. Pastikan Tantular Companion berjalan, " +
+    "lalu klik Muat ulang deck.";
+  assert.equal(deckReadErrorMessage(null), generic);
+  assert.equal(deckReadErrorMessage(undefined), generic);
+});
+
+test("deckReadErrorMessage falls back to the generic message for a non-Error thrown value", () => {
+  const generic =
+    "Tantular tidak bisa membaca deck aktif. Pastikan Tantular Companion berjalan, " +
+    "lalu klik Muat ulang deck.";
+  assert.equal(deckReadErrorMessage("some string thrown"), generic);
+  assert.equal(deckReadErrorMessage({ code: "ENOENT" }), generic);
 });
 
 test("extractPptxSlides parses labelled extractor output", () => {

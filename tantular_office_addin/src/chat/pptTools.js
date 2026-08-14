@@ -358,25 +358,38 @@ async function readDeckViaExtractor() {
   return buildDeckSlidesFromExtractor(extracted?.text || "");
 }
 
+const DECK_READ_GENERIC_MESSAGE =
+  "Tantular tidak bisa membaca deck aktif. Pastikan Tantular Companion berjalan, " +
+  "lalu klik Muat ulang deck.";
+
+// Pure decision: prefer the underlying error's own actionable message (e.g. from
+// extractDocumentFile or getActivePresentationPptxFile), falling back to the
+// generic message only when there is no useful message to forward.
+export function deckReadErrorMessage(error) {
+  if (error && typeof error.message === "string" && error.message.trim().length > 0) {
+    return error.message;
+  }
+  return DECK_READ_GENERIC_MESSAGE;
+}
+
 export async function getDeckContext({ force = false } = {}) {
   if (deckCache && force !== true) return deckCache;
 
   let slides = await readDeckViaHost();
   let source = "host";
+  let extractorError = null;
   if (!slides?.length) {
     try {
       slides = await readDeckViaExtractor();
       source = "extractor";
     } catch (error) {
       console.warn("[TantularChat/PPT] extractor deck read failed", error);
+      extractorError = error;
       slides = [];
     }
   }
   if (!slides?.length) {
-    throw new Error(
-      "Tantular tidak bisa membaca deck aktif. Pastikan Tantular Companion berjalan, " +
-      "lalu klik Muat ulang deck."
-    );
+    throw new Error(deckReadErrorMessage(extractorError));
   }
 
   deckCache = {
