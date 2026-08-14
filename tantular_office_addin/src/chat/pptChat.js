@@ -24,8 +24,10 @@ Anda menerima snapshot deck aktif (daftar slide beserta teksnya) dan permintaan 
 
 Aksi yang tersedia di "actions" (kosongkan jika pengguna hanya bertanya):
 - {"op":"improve_slide","slideIndex":4}  → perbaiki slide yang sudah ada; JANGAN sertakan konten, Tantular yang menyusunnya dari teks slide asli.
-  Tambahkan "instruction" (opsional, maksimal 200 karakter) berisi maksud pengguna untuk slide itu — hanya niat, bukan konten slide.
+  SELALU sertakan "instruction" (maksimal 200 karakter) berisi maksud pengguna untuk slide itu — hanya niat, bukan konten slide.
+  Jika pengguna menulis "perbaiki slide 4 supaya lebih ringkas", maka instruction-nya "supaya lebih ringkas".
   Contoh: {"op":"improve_slide","slideIndex":4,"instruction":"buat lebih ringkas"}
+  Jika pengguna tidak menyebut maksud khusus, tulis instruction singkat yang menggambarkan permintaannya, misalnya "rapikan dan perjelas".
 - {"op":"replace_slide","slideIndex":3,"slide":{...}}  → ganti slide dengan konten yang Anda tulis sendiri.
 - {"op":"add_slide","afterIndex":5,"slide":{...}}  → sisipkan slide baru setelah slide 5.
 - {"op":"delete_slide","slideIndex":7}  → usulkan penghapusan; pengguna harus mengonfirmasi.
@@ -47,6 +49,7 @@ Aturan WAJIB:
 - Snapshot bisa terpotong. Jangan menyimpulkan sebuah slide kosong hanya karena teksnya tidak terlihat penuh.
 - Jangan mengarang angka, nama, atau fakta yang tidak ada di deck.
 - Setiap slide harus punya "headline" (kecuali quote, yang boleh hanya "quote"), dan type berkonten harus punya arraynya (bullets/cards/columns/metrics/data) yang tidak kosong.
+- Slide type "columns" minimal 2 kolom, dan setiap kolom wajib punya "title" asli (bukan "Kolom 1"). Kalau hanya ada satu kelompok poin, pakai type "bullets".
 - Menyisipkan di posisi paling depan belum didukung; afterIndex minimal 1.
 - Maksimum 8 aksi per giliran. Jika permintaan lebih besar, kerjakan yang terpenting dan jelaskan sisanya di "reply".
 - Jika permintaan tidak bisa dipenuhi dengan aksi yang tersedia, actions kosong dan jelaskan alasannya di "reply".
@@ -221,7 +224,12 @@ export function mountPptChatPane() {
         signal: state.abort.signal,
         tone,
         instruction,
-        styleId
+        styleId,
+        // The planner usually omits the optional per-action "instruction", so the
+        // raw request travels here too and pptTools uses it as the fallback intent
+        // for improve_slide. Without it the user's "supaya lebih ringkas" never
+        // reaches the improve prompt at all.
+        userRequest: message
       });
 
       answer.textContent = [parsed.reply, "", ...lines, ...rejected.map((r) => `⚠️ ${r}`)]

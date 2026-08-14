@@ -238,6 +238,13 @@ function sanitizeSlide(raw) {
   const bullets = cleanStrings(raw.bullets);
   const cards = cleanCards(raw.cards);
   const columns = cleanColumns(raw.columns);
+  // A one-column "columns" slide is never what anyone meant: pptxBuilder lays it
+  // out as a single full-width panel and, when the model omitted the title, prints
+  // its "Kolom 1" placeholder on the deck. Reject it with a reason the user sees,
+  // rather than rendering nonsense that cannot be undone.
+  if (type === "columns" && columns.length === 1) {
+    return { ok: false, reason: "slide columns butuh minimal 2 kolom (1 kolom akan tampil sebagai \"Kolom 1\")." };
+  }
   const metrics = cleanMetrics(raw.metrics);
   const data = cleanData(raw.data);
   if (bullets.length) slide.bullets = bullets;
@@ -541,12 +548,68 @@ export function composeImproveInstruction(projectInstruction, actionInstruction)
   return project ? `${head}\n\nStyle guide / instruksi project:\n${project}` : head;
 }
 
+// MEASURED: the local planner does NOT emit the optional per-action
+// `instruction`, so the intent channel added for it sat empty and every improve
+// fell back to the project style guide alone. The pane always has the raw user
+// message, so use it as the intent when the planner omits one. The planner's own
+// per-action text still wins when present — in a multi-slide turn it is the more
+// precise per-slide intent. Same 200-char clamp either way: this text is steering,
+// not content.
+export function resolveImproveIntent(actionInstruction, userRequest) {
+  return sanitizeActionInstruction(actionInstruction) || sanitizeActionInstruction(userRequest);
+}
+
+// --- Content loss ---------------------------------------------------------
+// Improve rewrote a 6-bullet slide into a single-column, single-bullet slide and
+// reported a bare ✅. With no undo in this add-in, silently discarding five of six
+// facts and calling it success is the worst failure this product has. We do not
+// block or retry the write — we measure it and say so.
+//
+// The unit is "one information-bearing line/point": a source line, a bullet, a
+// card, a point inside a column, a metric, a data point. It is crude on purpose —
+// it must be pure, testable, and never wrong in a way that hides loss.
+export function countSourceUnits(text) {
+  return str(text)
+    .split("\n")
+    .map(str)
+    .filter((line) => line.length >= 3)
+    .length;
+}
+
+export function countSpecUnits(slide) {
+  if (!slide || typeof slide !== "object") return 0;
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const columnUnits = list(slide.columns)
+    .reduce((sum, column) => sum + Math.max(1, list(column?.points).length), 0);
+  const units = list(slide.bullets).length
+    + list(slide.cards).length
+    + columnUnits
+    + list(slide.metrics).length
+    + list(slide.data).length;
+  // A title/quote/closing slide carries its message in the headline itself.
+  return units || (str(slide.headline) || str(slide.quote) ? 1 : 0);
+}
+
+// THRESHOLD (documented so it can be argued with): warn only when the source had
+// at least 3 units AND the result keeps less than half of them. A 6→4 tightening
+// is what "ringkas" means and must stay quiet; 6→1 is content being thrown away.
+export const CONTENT_LOSS_MIN_SOURCE_UNITS = 3;
+export const CONTENT_LOSS_RATIO = 0.5;
+
+export function contentLossNote(sourceUnits, keptUnits) {
+  const before = Number(sourceUnits) || 0;
+  const after = Number(keptUnits) || 0;
+  if (before < CONTENT_LOSS_MIN_SOURCE_UNITS) return "";
+  if (after >= before * CONTENT_LOSS_RATIO) return "";
+  return `(${before} poin → ${after} poin — banyak isi dihilangkan; periksa hasilnya)`;
+}
+
 // Composable with improveResultNote: the ✅ must say what was actually asked,
-// and still qualify a fallback result.
-export function improveSuccessLine(index, actionInstruction, source) {
+// still qualify a fallback result, and never hide that most of the slide is gone.
+export function improveSuccessLine(index, actionInstruction, source, lossNote = "") {
   const asked = str(actionInstruction);
   const requested = asked ? ` (diminta: "${asked}")` : "";
-  return `✅ Slide ${index} diperbaiki di tempat${requested}${improveResultNote(source)}.`;
+  return `✅ Slide ${index} diperbaiki di tempat${requested}${str(lossNote) ? ` ${str(lossNote)}` : ""}${improveResultNote(source)}.`;
 }
 
 // The real footer numbers for a one-slide spec written into an existing deck.
@@ -564,7 +627,10 @@ export function deckPositionFor(ctx, position, added = 0) {
 // original snapshot before anything executes, so no action ever reads a deck
 // state that a sibling action just changed.
 export async function executePptActions(actions, ctx, hooks = {}) {
-  const { onProgress = () => {}, signal, tone = "", instruction = "", styleId = "nusantara" } = hooks;
+  const {
+    onProgress = () => {}, signal, tone = "", instruction = "",
+    styleId = "nusantara", userRequest = ""
+  } = hooks;
   const lines = [];
   const pendingDeletes = [];
   if (!actions.length) return { lines, pendingDeletes };
@@ -601,10 +667,11 @@ export async function executePptActions(actions, ctx, hooks = {}) {
           continue;
         }
         onProgress(`Menyusun versi lebih baik untuk slide ${target.index}...`);
+        const intent = resolveImproveIntent(action.instruction, userRequest);
         const result = await improveExistingSlide({
           slideText: target.text,
           tone,
-          instruction: composeImproveInstruction(instruction, action.instruction),
+          instruction: composeImproveInstruction(instruction, intent),
           signal
         });
         // improveExistingSlide catches EVERY failure — including the AbortError
@@ -631,7 +698,11 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         );
         if (outcome.replaced) {
           wrote = true;
-          lines.push(improveSuccessLine(target.index, action.instruction, result.source));
+          const loss = contentLossNote(
+            countSourceUnits(target.text),
+            countSpecUnits(result.spec?.slides?.[0])
+          );
+          lines.push(improveSuccessLine(target.index, intent, result.source, loss));
         } else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penggantian gagal."}`);
         continue;
       }

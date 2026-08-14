@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget, snapshotIndexSpace, abortReportLine, improveResultNote, SNAPSHOT_CEILING_CHARS, MAX_ACTION_INSTRUCTION_CHARS, composeImproveInstruction, improveSuccessLine, deckPositionFor } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget, snapshotIndexSpace, abortReportLine, improveResultNote, SNAPSHOT_CEILING_CHARS, MAX_ACTION_INSTRUCTION_CHARS, composeImproveInstruction, improveSuccessLine, deckPositionFor, resolveImproveIntent, countSourceUnits, countSpecUnits, contentLossNote } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -585,4 +585,91 @@ test("deckPositionFor reports the real deck position and size from the snapshot"
   assert.deepEqual(deckPositionFor(ctx, 2), { startIndex: 2, deckTotal: 6 });
   assert.deepEqual(deckPositionFor(ctx, 3, 1), { startIndex: 3, deckTotal: 7 });
   assert.deepEqual(deckPositionFor(ctx, 9), { startIndex: 9, deckTotal: 9 });
+});
+
+test("improve intent falls back to the raw user message when the planner omits instruction", () => {
+  // Planner cooperated: its per-slide intent is the more precise one and wins.
+  assert.equal(
+    resolveImproveIntent("fokuskan ke biaya", "perbaiki slide 2 dan 5"),
+    "fokuskan ke biaya"
+  );
+  // Planner omitted it (the measured local-model behaviour): use the raw message.
+  assert.equal(
+    resolveImproveIntent(undefined, "perbaiki slide 2 supaya lebih ringkas"),
+    "perbaiki slide 2 supaya lebih ringkas"
+  );
+  assert.equal(resolveImproveIntent("", "  "), "");
+  assert.equal(resolveImproveIntent(null, null), "");
+  // The raw message is clamped like any other intent — it is steering, not content.
+  assert.equal(resolveImproveIntent("", "x".repeat(400)).length, MAX_ACTION_INSTRUCTION_CHARS);
+});
+
+test("the reported intent is the one actually applied", () => {
+  const applied = resolveImproveIntent(undefined, "buat slide 2 lebih ringkas");
+  assert.equal(
+    improveSuccessLine(2, applied, "model-grounded"),
+    '✅ Slide 2 diperbaiki di tempat (diminta: "buat slide 2 lebih ringkas").'
+  );
+  const both = resolveImproveIntent("fokuskan ke biaya", "buat slide 2 lebih ringkas");
+  assert.match(improveSuccessLine(2, both, "model-grounded"), /diminta: "fokuskan ke biaya"/);
+  assert.equal(
+    improveSuccessLine(2, resolveImproveIntent("", ""), "model-grounded"),
+    "✅ Slide 2 diperbaiki di tempat."
+  );
+});
+
+test("content units count information-bearing lines and spec points", () => {
+  assert.equal(countSourceUnits("Judul\nPoin satu\nPoin dua\n\nPoin tiga"), 4);
+  assert.equal(countSourceUnits(""), 0);
+  assert.equal(countSpecUnits({ type: "bullets", headline: "H", bullets: ["a", "b", "c"] }), 3);
+  assert.equal(countSpecUnits({ type: "cards", headline: "H", cards: [{ title: "a" }, { title: "b" }] }), 2);
+  assert.equal(countSpecUnits({
+    type: "columns", headline: "H",
+    columns: [{ title: "A", points: ["1", "2"] }, { title: "B", points: ["3"] }]
+  }), 3);
+  // A column with no points still carries its title.
+  assert.equal(countSpecUnits({ type: "columns", headline: "H", columns: [{ title: "A" }] }), 1);
+  assert.equal(countSpecUnits({ type: "metrics", headline: "H", metrics: [{ value: "9%" }] }), 1);
+  assert.equal(countSpecUnits({ type: "title", headline: "Judul" }), 1);
+  assert.equal(countSpecUnits(null), 0);
+});
+
+test("content loss is reported when severe and stays quiet when modest", () => {
+  // The live defect: 6 source lines became one column with one point.
+  assert.equal(
+    contentLossNote(6, 1),
+    "(6 poin → 1 poin — banyak isi dihilangkan; periksa hasilnya)"
+  );
+  // Real tightening, not gutting: no warning.
+  assert.equal(contentLossNote(6, 4), "");
+  assert.equal(contentLossNote(6, 3), "");
+  // Too small to judge.
+  assert.equal(contentLossNote(2, 1), "");
+  assert.equal(contentLossNote(0, 0), "");
+  assert.equal(contentLossNote(8, 8), "");
+});
+
+test("the improve report carries the loss note alongside intent and fallback notes", () => {
+  const line = improveSuccessLine(2, "buat lebih ringkas", "fallback", contentLossNote(6, 1));
+  assert.match(line, /diminta: "buat lebih ringkas"/);
+  assert.match(line, /6 poin → 1 poin/);
+  assert.match(line, /versi fallback/);
+  assert.equal(
+    improveSuccessLine(2, "", "model-grounded", contentLossNote(6, 4)),
+    "✅ Slide 2 diperbaiki di tempat."
+  );
+});
+
+test("a columns slide with only one column is rejected with a visible reason", () => {
+  const one = addSlide({
+    type: "columns", headline: "Banding",
+    columns: [{ title: "Sebelum", points: ["a", "b"] }]
+  });
+  assert.equal(one.actions.length, 0);
+  assert.match(one.rejected[0], /minimal 2 kolom/);
+  // Two columns still pass.
+  assert.equal(addSlide({
+    type: "columns", headline: "Banding",
+    columns: [{ title: "Sebelum", points: ["a"] }, { title: "Sesudah", points: ["b"] }]
+  }).actions.length, 1);
 });
