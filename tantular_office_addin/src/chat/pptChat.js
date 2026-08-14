@@ -96,9 +96,11 @@ export function mountPptChatPane() {
   }
 
   function renderChips() {
+    // Chips must not hardcode a slide number: "slide 2" is arbitrary for a deck
+    // the user actually has, and reads as "two slides" in Indonesian — ambiguity
+    // that goes to a weak local model as its instruction.
     const prompts = [
       "Ringkas isi deck ini",
-      "Perbaiki slide 2 supaya lebih ringkas",
       "Tambahkan slide penutup dengan next step",
       "Slide mana yang paling padat teksnya?"
     ];
