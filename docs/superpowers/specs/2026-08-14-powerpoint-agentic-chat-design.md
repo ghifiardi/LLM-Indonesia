@@ -122,8 +122,28 @@ Four ops:
 {"op":"delete_slide",   "slideIndex":7}
 ```
 
-`slide` is one Deck Studio slide object: `{ type, headline, subhead?, bullets?, cards?,
-columns?, chartType? }`, `type` drawn from `SLIDE_TYPES` in `deckPlanner.js`.
+`slide` is one Deck Studio slide object with `type` drawn from `SLIDE_TYPES` in `deckPlanner.js`.
+The allowlist is exactly the set of fields `pptxBuilder` consumes, so a stripped field never
+silently blanks a slide:
+
+| Field | Shape | Used by |
+|---|---|---|
+| `type` | one of `SLIDE_TYPES` | all |
+| `headline` | string | all except `quote` (optional there) |
+| `subhead` | string | `title`, and as the attribution on `quote` |
+| `quote` | string | `quote` |
+| `bullets` | `string[]` | `bullets`, `agenda`, `visualization` |
+| `cards` | `[{ title, desc }]` | `cards` |
+| `columns` | `[{ title, points: string[] }]` | `columns` |
+| `metrics` | `[{ value, label }]` | `metrics` |
+| `data` | `[{ label, value }]` | `visualization` |
+| `chartType` | `"bar" \| "line" \| "heatmap"` | normalized by `deckPlanner`; `pptxBuilder` ignores it |
+
+The sanitizer validates **per type**: a `metrics` slide must carry a non-empty `metrics` array,
+a `visualization` slide a non-empty `data` array, `cards` a non-empty `cards` array, `columns` a
+non-empty `columns` array. A slide whose type-required field is missing or malformed is rejected
+with a reason rather than passed through to render as an empty frame. Nested objects are
+validated field by field; entries missing their required key are dropped.
 
 `improve_slide` is content-free by design. The executor pulls that slide's text from the
 snapshot and calls `improveExistingSlide({ slideText, tone, instruction, signal })` — the tuned
@@ -135,7 +155,13 @@ and skips the second model call.
 
 - `op` must be one of the four.
 - `slideIndex` must be an integer in `1..slideCount`. Strings and non-integers are rejected.
-- `afterIndex` must be an integer in `0..slideCount`; `0` means insert at the front.
+- `afterIndex` must be an integer in `1..slideCount`. **`0` is rejected in v1.**
+  `insertDeckIntoActivePresentation` omits `targetSlideId` entirely when it is absent
+  (`officeClient.js:424`), and where a no-anchor insert actually lands on this host is unproven.
+  Rather than guess, the sanitizer rejects `afterIndex: 0` with: "Menyisipkan slide di posisi
+  paling depan belum didukung. Sisipkan setelah slide 1, lalu geser di panel thumbnail."
+  The probe step below measures where a no-anchor insert lands; enabling `0` is a follow-up,
+  not part of this spec.
 - `replace_slide` and `add_slide` must carry a `slide` with a valid `type` and a non-empty
   `headline`. Unknown slide fields are stripped so `pptxBuilder` only sees shapes it handles.
 - Maximum 8 actions per turn. Extras become rejections.
@@ -157,6 +183,13 @@ sanitizer does not exist as far as the executor is concerned.
    - **Same-anchor inserts run in reverse model order.** `insertSlidesFromBase64` places a slide
      immediately after its anchor, so inserting A then B after slide 5 yields `5, B, A`. Reversing
      the execution order makes the final deck order match the model's intent.
+   - **An insert anchored on a slide that is also being replaced runs before that replace.**
+     `replaceSlideInActivePresentation` inserts after the original and then deletes the original
+     (`officeClient.js:603`, `:645`), so once the replace completes the anchor id no longer exists
+     and the insert would fail with "no safe anchor". Tie-break at equal index:
+     `add_slide` → `replace_slide` → `delete_slide`.
+     The inserted slide therefore sits between the replacement and the following slide, which is
+     where the model asked for it.
 3. Execute sequentially. Each action reports `✅` or `❌ <reason>` on its own line; a failure does
    not stop the remaining actions. Partial success is reported as partial.
 4. Clear the snapshot cache **once**, after the first successful write. The turn's report is
@@ -227,12 +260,18 @@ identifies the code version.
 New `tests/pptTools.test.mjs`, modelled on `tests/excelTools.test.mjs`. All pure, no Office mocking.
 
 - **`sanitizePptActions`** — each valid op survives; unknown op rejected with a reason;
-  `slideIndex` of `0`, `slideCount + 1`, `"3"`, and `3.5` rejected; `afterIndex: 0` accepted;
-  slide with unknown `type` rejected; slide missing `headline` rejected; unknown slide fields
-  stripped; 9 actions → 8 kept plus 1 rejection.
+  `slideIndex` of `0`, `slideCount + 1`, `"3"`, and `3.5` rejected; **`afterIndex: 0` rejected
+  with the front-insert message**; slide with unknown `type` rejected; slide missing `headline`
+  rejected; unknown slide fields stripped; 9 actions → 8 kept plus 1 rejection.
+- **Per-type slide validation** — a `metrics` slide without `metrics` rejected; a `visualization`
+  slide without `data` rejected; `cards` without `cards` and `columns` without `columns` rejected;
+  a valid `metrics` slide keeps every `{ value, label }` entry; a valid `visualization` slide keeps
+  its `data` and `chartType`; a `cards` entry missing `title` is dropped while its siblings survive.
 - **`orderPptActions`** — replaces and deletes descending; inserts descending by anchor;
   **three same-anchor inserts land in model order in the final deck** (guards against pairwise-only
-  logic); two same-anchor inserts likewise; a mixed list produces one deterministic sequence.
+  logic); two same-anchor inserts likewise; **an `add_slide afterIndex: 5` paired with a
+  `replace_slide slideIndex: 5` orders the insert first**, so the anchor still exists when the
+  insert runs; a mixed list produces one deterministic sequence.
 - **`deckContextToPromptText`** — slide count line present; global truncation notice present;
   `[dipotong]` only on slides actually cut; total ceiling respected.
 - **`resolveDeleteTarget`** — id match wins over index; id absent from the live deck yields a
@@ -246,13 +285,18 @@ executor.
 
 ### Implementation step one: the host-read probe
 
-Before building the chat, run a temporary in-host read of the active deck
-(`presentation.slides` + `shape.textFrame.textRange.text`) in real PowerPoint on the Mac host and
-report slide count and characters read.
+Before building the chat, run two temporary measurements in real PowerPoint on the Mac host.
+
+**Probe A — in-host read.** Read the active deck via `presentation.slides` +
+`shape.textFrame.textRange.text`, reporting slide count and characters read.
 
 - **Works** → the fast path is real; the extractor is a genuine fallback.
 - **Throws** → the fast path is dead code on the host that matters. Delete that branch and ship
   extractor-only behind the same `getDeckContext()` interface.
+
+**Probe B — no-anchor insert.** Call `insertSlidesFromBase64` with no `targetSlideId` on a
+multi-slide deck and record where the slide lands. The result decides whether `afterIndex: 0`
+can be enabled in a follow-up; it stays rejected in this spec either way.
 
 Building the chat before knowing which is guessing.
 
