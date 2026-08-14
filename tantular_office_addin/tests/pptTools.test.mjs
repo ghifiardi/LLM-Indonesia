@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions } from "../src/chat/pptTools.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
   assert.equal(extractRequestedSlideIndex("perbaiki slide 4"), 4);
@@ -36,4 +36,61 @@ test("extractPptxSlides tolerates missing ids and returns empty for junk", () =>
   assert.equal(slides.length, 1);
   assert.equal(slides[0].id, "");
   assert.deepEqual(extractPptxSlides("tidak ada label slide"), []);
+});
+
+const bulletsSlide = { type: "bullets", headline: "Judul", bullets: ["satu", "dua"] };
+
+test("sanitize accepts one valid action of every op", () => {
+  const { actions, rejected } = sanitizePptActions([
+    { op: "improve_slide", slideIndex: 4 },
+    { op: "replace_slide", slideIndex: 3, slide: bulletsSlide },
+    { op: "add_slide", afterIndex: 5, slide: bulletsSlide },
+    { op: "delete_slide", slideIndex: 7 }
+  ], 10);
+  assert.equal(rejected.length, 0);
+  assert.equal(actions.length, 4);
+  assert.deepEqual(actions.map((a) => a.op),
+    ["improve_slide", "replace_slide", "add_slide", "delete_slide"]);
+});
+
+test("sanitize rejects unknown ops and out-of-range indexes", () => {
+  const { actions, rejected } = sanitizePptActions([
+    { op: "reorder_slide", slideIndex: 2 },
+    { op: "improve_slide", slideIndex: 0 },
+    { op: "improve_slide", slideIndex: 11 },
+    { op: "improve_slide", slideIndex: "3" },
+    { op: "improve_slide", slideIndex: 3.5 }
+  ], 10);
+  assert.equal(actions.length, 0);
+  assert.equal(rejected.length, 5);
+  assert.match(rejected[0], /reorder_slide/);
+});
+
+test("sanitize rejects afterIndex 0 with the front-insert message", () => {
+  const { actions, rejected } = sanitizePptActions(
+    [{ op: "add_slide", afterIndex: 0, slide: bulletsSlide }], 10);
+  assert.equal(actions.length, 0);
+  assert.match(rejected[0], /paling depan belum didukung/);
+});
+
+test("sanitize caps a turn at 8 actions", () => {
+  const raw = Array.from({ length: 9 }, (_, i) => ({ op: "improve_slide", slideIndex: i + 1 }));
+  const { actions, rejected } = sanitizePptActions(raw, 20);
+  assert.equal(actions.length, 8);
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0], /maksimum 8/i);
+});
+
+test("sanitize strips unknown slide fields", () => {
+  const { actions } = sanitizePptActions([{
+    op: "add_slide",
+    afterIndex: 1,
+    slide: { ...bulletsSlide, animation: "fade", notes: "rahasia" }
+  }], 10);
+  assert.deepEqual(Object.keys(actions[0].slide).sort(), ["bullets", "headline", "type"]);
+});
+
+test("sanitize tolerates non-array input", () => {
+  assert.deepEqual(sanitizePptActions(null, 10), { actions: [], rejected: [] });
+  assert.deepEqual(sanitizePptActions("bukan array", 10), { actions: [], rejected: [] });
 });
