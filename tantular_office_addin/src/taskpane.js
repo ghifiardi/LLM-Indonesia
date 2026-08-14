@@ -47,6 +47,7 @@ import { planWorkbook } from "./workbook/workbookPlanner.js";
 import { buildWorkbookXlsxBase64 } from "./workbook/xlsxBuilder.js";
 import { hostUiConfig } from "./hostUi.js";
 import { putContext, shouldAdoptServerContext } from "./workspaceClient.js";
+import { extractPptxSlides, extractRequestedSlideIndex } from "./chat/pptTools.js";
 
 const DECK_STUDIO_BUILD = "0.10.9-deselect-before-delete";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
@@ -1263,30 +1264,6 @@ async function activeDeckSlideTextFallback(selectedContext, instruction = "") {
   return "";
 }
 
-function extractRequestedSlideIndex(text) {
-  const value = String(text || "");
-  const match = value.match(/\b(?:slide|page|halaman|hlm|deck\s*page)\s*#?\s*(\d{1,3})\b/i)
-    || value.match(/#\s*(\d{1,3})\b/);
-  if (!match) return 0;
-  const index = Number(match[1]);
-  return Number.isInteger(index) && index > 0 ? index : 0;
-}
-
-function extractPptxSlides(text) {
-  const value = String(text || "");
-  const re = /^\[Slide\s+(\d+)(?:\s+\|\s+id\s+([^\]]+))?\]\s*\n([\s\S]*?)(?=^\[Slide\s+\d+(?:\s+\|\s+id\s+[^\]]+)?\]\s*\n|\s*$)/gm;
-  const slides = [];
-  let match;
-  while ((match = re.exec(value))) {
-    slides.push({
-      label: `Slide ${match[1]}${match[2] ? ` | id ${match[2]}` : ""}`,
-      index: match[1],
-      id: match[2] || "",
-      text: match[3].trim()
-    });
-  }
-  return slides;
-}
 
 function refineInstructionBundle() {
   return [
