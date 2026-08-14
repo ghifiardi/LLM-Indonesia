@@ -2,8 +2,6 @@
 // All Office/PowerPoint access for the PPT chat lives here so pptChat.js can
 // stay a pure UI module (mirrors the excelChat.js / excelTools.js split).
 
-import { SLIDE_TYPES } from "../deck/deckPlanner.js";
-
 const MAX_ACTIONS_PER_TURN = 8;
 const OPS = ["improve_slide", "replace_slide", "add_slide", "delete_slide"];
 const FRONT_INSERT_REJECTION =
@@ -92,7 +90,7 @@ export function sanitizePptActions(raw, slideCount) {
 
 // Field allowlist = exactly what pptxBuilder consumes. Anything else is
 // stripped so a hallucinated field can never reach the renderer.
-const TYPE_RULES = {
+export const TYPE_RULES = {
   title:         { requires: null },
   closing:       { requires: null },
   quote:         { requires: null },

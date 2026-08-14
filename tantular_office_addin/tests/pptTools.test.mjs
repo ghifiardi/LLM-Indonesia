@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES } from "../src/chat/pptTools.js";
+import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
   assert.equal(extractRequestedSlideIndex("perbaiki slide 4"), 4);
@@ -175,4 +176,12 @@ test("dropping every nested entry rejects the slide", () => {
 
   const metrics = addSlide({ type: "metrics", headline: "M", metrics: [{ label: "tanpa nilai" }] });
   assert.equal(metrics.actions.length, 0);
+});
+
+test("TYPE_RULES stays in sync with SLIDE_TYPES", () => {
+  const ruleKeys = Object.keys(TYPE_RULES).sort();
+  const slideTypes = [...SLIDE_TYPES].sort();
+  assert.deepEqual(ruleKeys, slideTypes,
+    `TYPE_RULES keys and SLIDE_TYPES have drifted: TYPE_RULES has ${JSON.stringify(ruleKeys)}, ` +
+    `SLIDE_TYPES has ${JSON.stringify(slideTypes)}`);
 });
