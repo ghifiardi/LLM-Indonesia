@@ -428,6 +428,94 @@ export async function insertDeckIntoActivePresentation(base64, options = {}) {
   });
 }
 
+// Pure verdict for a single-slide insert: given the deck's slide ids before and
+// after the insert plus the anchor's live id, decide whether EXACTLY one slide
+// was added AND whether it sits immediately after the anchor. Splitting this out
+// keeps the check testable without an Office mock, and keeps the caller from
+// claiming a success it never observed.
+export function verifyInsertAfter(beforeIds, afterIds, anchorId) {
+  const before = (Array.isArray(beforeIds) ? beforeIds : []).map((id) => String(id || ""));
+  const after = (Array.isArray(afterIds) ? afterIds : []).map((id) => String(id || ""));
+  const deckChanged = after.length !== before.length;
+  const added = after.filter((id) => id && !before.includes(id));
+
+  if (after.length !== before.length + 1 || added.length !== 1) {
+    return {
+      inserted: false,
+      deckChanged,
+      index: 0,
+      reason: `PowerPoint menambahkan ${added.length} slide (deck ${before.length} → ${after.length}); ` +
+        "penyisipan tidak bisa dipastikan. Periksa deck sebelum melanjutkan."
+    };
+  }
+
+  const anchorPos = after.findIndex((id) => id === String(anchorId || ""));
+  if (anchorPos < 0) {
+    return {
+      inserted: false,
+      deckChanged,
+      index: 0,
+      reason: "Slide acuan tidak ditemukan lagi setelah penyisipan, jadi posisi slide baru tidak bisa dipastikan."
+    };
+  }
+  if (after[anchorPos + 1] !== added[0]) {
+    return {
+      inserted: false,
+      deckChanged,
+      index: after.indexOf(added[0]) + 1,
+      reason: `Slide baru mendarat di posisi ${after.indexOf(added[0]) + 1}, bukan tepat setelah slide acuan. ` +
+        "Periksa dan geser sendiri di panel thumbnail."
+    };
+  }
+  return { inserted: true, deckChanged, index: anchorPos + 2, reason: "" };
+}
+
+// Insert ONE generated slide immediately after an existing slide, then verify it
+// really landed there before reporting success. Separate from
+// insertDeckIntoActivePresentation on purpose: that one inserts a whole Deck
+// Studio deck and must keep its current fire-and-forget behavior for its caller.
+export async function insertSlideAfterInActivePresentation(base64, { slideId = "", slideIndex = 0, formatting = "UseDestinationTheme" } = {}) {
+  if (!globalThis.PowerPoint?.run) {
+    throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
+  }
+  return PowerPoint.run(async (context) => {
+    if (typeof context.presentation.insertSlidesFromBase64 !== "function") {
+      throw new Error("Host PowerPoint ini belum mendukung insertSlidesFromBase64.");
+    }
+
+    const readSlideIds = async () => {
+      const collection = context.presentation.slides;
+      collection.load("items");
+      await context.sync();
+      for (const slide of collection.items || []) slide.load("id");
+      await context.sync();
+      return (collection.items || []).map((slide) => String(slide.id || ""));
+    };
+
+    // Read → insert → sync → read again, all inside ONE run context, so the
+    // "after" list is the real post-insert deck rather than a stale proxy.
+    const before = await readSlideIds();
+    const { targetLiveId } = resolveReplaceTarget(before, { slideId, slideIndex });
+    if (!targetLiveId) {
+      return {
+        inserted: false,
+        deckChanged: false,
+        index: 0,
+        reason: "Slide acuan tidak ditemukan lagi di deck aktif, jadi tidak ada yang disisipkan."
+      };
+    }
+
+    context.presentation.insertSlidesFromBase64(base64, {
+      formatting,
+      targetSlideId: toInsertTargetSlideId(targetLiveId)
+    });
+    await context.sync();
+
+    const after = await readSlideIds();
+    return verifyInsertAfter(before, after, targetLiveId);
+  });
+}
+
 // PowerPoint target IDs can appear as "257#", "#creationId", or
 // "257#creationId". The Common API may return only "257". Match either
 // non-empty component so IDs from different PowerPoint API surfaces resolve

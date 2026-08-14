@@ -5,7 +5,8 @@ import {
   resolveReplaceTarget,
   pickOriginalIndex,
   toInsertTargetSlideId,
-  replaceSlideInActivePresentation
+  replaceSlideInActivePresentation,
+  verifyInsertAfter
 } from "../src/officeClient.js";
 
 test("sameSlideId matches on the numeric part across id formats", () => {
@@ -263,4 +264,40 @@ test("replaceSlideInActivePresentation rolls back if imported pptx unexpectedly 
   } finally {
     mock.restore();
   }
+});
+
+test("verifyInsertAfter confirms exactly one slide landed right after the anchor", () => {
+  const result = verifyInsertAfter(["257", "258", "259"], ["257", "258", "900", "259"], "258");
+  assert.equal(result.inserted, true);
+  assert.equal(result.index, 3);
+  assert.equal(result.reason, "");
+});
+
+test("verifyInsertAfter refuses to claim success when nothing was added", () => {
+  const result = verifyInsertAfter(["257", "258"], ["257", "258"], "257");
+  assert.equal(result.inserted, false);
+  assert.equal(result.deckChanged, false);
+  assert.match(result.reason, /tidak bisa dipastikan/);
+});
+
+test("verifyInsertAfter refuses to claim success when more than one slide appeared", () => {
+  const result = verifyInsertAfter(["257"], ["257", "900", "901"], "257");
+  assert.equal(result.inserted, false);
+  assert.equal(result.deckChanged, true);
+  assert.match(result.reason, /2 slide/);
+});
+
+test("verifyInsertAfter reports a slide that landed somewhere other than after the anchor", () => {
+  const result = verifyInsertAfter(["257", "258"], ["900", "257", "258"], "258");
+  assert.equal(result.inserted, false);
+  assert.equal(result.index, 1);
+  assert.match(result.reason, /bukan tepat setelah slide acuan/);
+});
+
+test("verifyInsertAfter refuses to guess when the anchor id is not in the post-insert deck", () => {
+  // Exact identity only: an anchor id in a different format is not evidence
+  // that the new slide landed in the right place.
+  const result = verifyInsertAfter(["257", "258"], ["257", "258", "900"], "258#creationId");
+  assert.equal(result.inserted, false);
+  assert.match(result.reason, /acuan tidak ditemukan/);
 });

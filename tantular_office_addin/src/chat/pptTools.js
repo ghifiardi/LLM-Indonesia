@@ -6,10 +6,9 @@ import {
   sameSlideId,
   getActivePresentationPptxFile,
   deleteSlidesInActivePresentation,
-  insertDeckIntoActivePresentation,
+  insertSlideAfterInActivePresentation,
   readLiveSlideIds,
-  replaceSlideInActivePresentation,
-  toInsertTargetSlideId
+  replaceSlideInActivePresentation
 } from "../officeClient.js";
 import { extractDocumentFile } from "../deck/documentExtract.js";
 import { buildDeckPptxBase64 } from "../deck/pptxBuilder.js";
@@ -54,9 +53,40 @@ export function extractPptxSlides(text) {
   return slides;
 }
 
-export function sanitizePptActions(raw, slideCount) {
+// The snapshot's index space is NOT 1..slides.length. `slide.index` is a TRUE
+// DECK POSITION: the extractor skips slides it cannot read text from (image-only
+// slides) while its counter keeps advancing, so a 60-slide deck can produce 30
+// entries whose indexes run to 60. Bounding on the array length would reject the
+// very indexes the prompt just printed. Accepts a snapshot (or slide array) for
+// the real space, and still accepts a plain count for callers that only have one.
+export function snapshotIndexSpace(bounds) {
+  const list = Array.isArray(bounds)
+    ? bounds
+    : (bounds && typeof bounds === "object" && Array.isArray(bounds.slides) ? bounds.slides : null);
+  if (list) {
+    const set = new Set(
+      list
+        .map((entry) => Number(entry?.index ?? entry))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    );
+    return { known: true, has: (n) => set.has(n), max: set.size ? Math.max(...set) : 0 };
+  }
+  const total = Number.isFinite(Number(bounds)) ? Math.floor(Number(bounds)) : 0;
+  const max = total > 0 ? total : 0;
+  return { known: false, has: (n) => n >= 1 && n <= max, max };
+}
+
+function rangeRejection(space, op, field, value) {
+  if (space.known && isIndex(value) && value >= 1 && value <= space.max && !space.has(value)) {
+    return `${op} dengan ${field} ${value}: slide itu tidak ada di snapshot deck ` +
+      "(slide tanpa teks yang bisa dibaca tidak ikut terbaca).";
+  }
+  return `${op} dengan ${field} "${value}" di luar jangkauan 1-${space.max}.`;
+}
+
+export function sanitizePptActions(raw, bounds) {
   if (!Array.isArray(raw)) return { actions: [], rejected: [] };
-  const total = Number(slideCount) || 0;
+  const space = snapshotIndexSpace(bounds);
   const actions = [];
   const rejected = [];
 
@@ -74,8 +104,8 @@ export function sanitizePptActions(raw, slideCount) {
     if (op === "add_slide") {
       const afterIndex = item?.afterIndex;
       if (afterIndex === 0) { rejected.push(FRONT_INSERT_REJECTION); continue; }
-      if (!isIndex(afterIndex) || afterIndex < 1 || afterIndex > total) {
-        rejected.push(`add_slide dengan afterIndex "${afterIndex}" di luar jangkauan 1-${total}.`);
+      if (!isIndex(afterIndex) || !space.has(afterIndex)) {
+        rejected.push(rangeRejection(space, "add_slide", "afterIndex", afterIndex));
         continue;
       }
       const slide = sanitizeSlide(item?.slide);
@@ -85,8 +115,8 @@ export function sanitizePptActions(raw, slideCount) {
     }
 
     const slideIndex = item?.slideIndex;
-    if (!isIndex(slideIndex) || slideIndex < 1 || slideIndex > total) {
-      rejected.push(`${op} dengan slideIndex "${slideIndex}" di luar jangkauan 1-${total}.`);
+    if (!isIndex(slideIndex) || !space.has(slideIndex)) {
+      rejected.push(rangeRejection(space, op, "slideIndex", slideIndex));
       continue;
     }
     if (op === "replace_slide") {
@@ -152,7 +182,13 @@ function cleanData(raw) {
   if (!Array.isArray(raw)) return [];
   return raw.map((point) => {
     const label = str(point?.label);
-    const value = Number(point?.value);
+    // Number(null) is 0, so a hallucinated `value: null` would otherwise draw a
+    // confident zero bar. "Jangan mengarang angka": drop the point instead.
+    const rawValue = point?.value;
+    const numeric = typeof rawValue === "number"
+      || (typeof rawValue === "string" && rawValue.trim() !== "");
+    if (!numeric) return null;
+    const value = Number(rawValue);
     if (!label || !Number.isFinite(value)) return null;
     return { label, value };
   }).filter(Boolean);
@@ -244,27 +280,43 @@ export function resolveDeleteTarget(liveIds, descriptor) {
   return { ok: true, id: ids[index - 1], index };
 }
 
+// EVERY readable slide appears, always — dropping the tail of a large deck let
+// the model plan a replace_slide on a slide whose text it never saw, destroying
+// the original with no confirmation. Instead the per-slide body budget shrinks
+// as the deck grows: a big deck gives every slide a short body rather than
+// giving some slides a long body and others nothing at all.
+export const SNAPSHOT_TITLE_CHARS = 60;
+export const SNAPSHOT_CEILING_CHARS = TOTAL_SNAPSHOT_CHARS + 1500;
+
+function clip(value, limit) {
+  const text = str(value);
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
 export function deckContextToPromptText(ctx) {
   const slides = Array.isArray(ctx?.slides) ? ctx.slides : [];
   const lines = [
-    `Deck aktif: ${slides.length} slide. Sumber pembacaan: ${str(ctx?.source) || "tidak diketahui"}.`,
+    `Deck aktif: ${slides.length} slide terbaca (slide tanpa teks yang bisa dibaca tidak muncul di daftar ini). ` +
+      `Sumber pembacaan: ${str(ctx?.source) || "tidak diketahui"}.`,
     "Konten slide dipotong untuk konteks; jangan anggap bagian yang tidak terlihat kosong.",
     ""
   ];
-  let budget = TOTAL_SNAPSHOT_CHARS;
-  for (const slide of slides) {
-    const header = `[Slide ${slide.index}${slide.id ? ` | id ${slide.id}` : ""}]`;
-    const room = Math.max(0, Math.min(PER_SLIDE_CHARS, budget));
-    const body = str(slide.text);
-    const cut = body.length > room;
-    const shown = cut ? `${body.slice(0, room)} [dipotong]` : body;
-    lines.push(`${header} ${shown}`.trim());
-    budget -= Math.min(body.length, room);
-    if (budget <= 0) {
-      lines.push(`[… ${slides.length - slide.index} slide berikutnya tidak ditampilkan karena batas konteks]`);
-      break;
-    }
-  }
+
+  const headers = slides.map((slide) => {
+    const title = clip(slide?.title, SNAPSHOT_TITLE_CHARS);
+    return `[Slide ${slide?.index}${slide?.id ? ` | id ${slide.id}` : ""}${title ? ` | ${title}` : ""}]`;
+  });
+  const headerCost = headers.reduce((sum, header) => sum + header.length + 1, 0);
+  const bodyBudget = Math.max(0, TOTAL_SNAPSHOT_CHARS - headerCost);
+  const room = slides.length
+    ? Math.max(0, Math.min(PER_SLIDE_CHARS, Math.floor(bodyBudget / slides.length)))
+    : 0;
+
+  slides.forEach((slide, position) => {
+    const body = str(slide?.text);
+    const shown = body.length > room ? `${body.slice(0, room)} [dipotong]` : body;
+    lines.push(`${headers[position]} ${shown}`.trim());
+  });
   return lines.join("\n");
 }
 
@@ -436,6 +488,26 @@ function specFor(slide, title) {
 // in taskpane.js — a screenshot of the chat then identifies the code version.
 export const PPT_CHAT_BUILD = "0.1.0-ppt-chat";
 
+// Stop must be honest about what it left undone: say how many planned actions
+// never ran, instead of a bare "dihentikan" that hides the size of the gap.
+export function abortReportLine(skipped) {
+  const count = Number.isInteger(skipped) && skipped > 0 ? skipped : 0;
+  return count
+    ? `⏹ Dihentikan oleh pengguna; ${count} aksi berikutnya tidak dijalankan.`
+    : "⏹ Dihentikan oleh pengguna; tidak ada aksi lain yang tersisa.";
+}
+
+// improveExistingSlide silently degrades to a mechanical re-chunk of the source
+// text when the companion is down or the model emits unparseable JSON. A bare ✅
+// would sell that as a model improvement, so the report names it.
+export function improveResultNote(source) {
+  const value = str(source);
+  if (value === "model-grounded") return "";
+  if (value === "fallback") return " (versi fallback — model lokal tidak menjawab)";
+  if (value === "fallback-grounded") return " (versi fallback — jawaban model tidak bisa dipakai)";
+  return value ? ` (versi ${value})` : " (versi fallback)";
+}
+
 // ctx is IMMUTABLE for the whole turn: every target is resolved from the
 // original snapshot before anything executes, so no action ever reads a deck
 // state that a sibling action just changed.
@@ -451,8 +523,12 @@ export async function executePptActions(actions, ctx, hooks = {}) {
   }));
 
   let wrote = false;
-  for (const { action, target } of planned) {
-    if (signal?.aborted) { lines.push("⏹ Dihentikan oleh pengguna."); break; }
+  for (let position = 0; position < planned.length; position += 1) {
+    const { action, target } = planned[position];
+    if (signal?.aborted) {
+      lines.push(abortReportLine(planned.length - position));
+      break;
+    }
     if (!target) {
       lines.push(`❌ ${action.op}: slide tidak ada di snapshot deck.`);
       continue;
@@ -476,6 +552,15 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         const result = await improveExistingSlide({
           slideText: target.text, tone, instruction, signal
         });
+        // improveExistingSlide catches EVERY failure — including the AbortError
+        // raised by Stop — and answers with a truthy mechanical fallback spec.
+        // Without this re-check the deck would be rewritten by the very click
+        // the user made to prevent it. Nothing below here is reversible.
+        if (signal?.aborted) {
+          lines.push(`⏹ Slide ${target.index} TIDAK diubah — dihentikan sebelum ditulis ke deck.`);
+          lines.push(abortReportLine(planned.length - position - 1));
+          break;
+        }
         if (!result?.spec) {
           lines.push(`❌ Slide ${target.index}: model tidak mengembalikan slide yang valid.`);
           continue;
@@ -485,8 +570,10 @@ export async function executePptActions(actions, ctx, hooks = {}) {
           buildDeckPptxBase64(result.spec, styleId, instruction),
           { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
         );
-        if (outcome.replaced) { wrote = true; lines.push(`✅ Slide ${target.index} diperbaiki di tempat.`); }
-        else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penggantian gagal."}`);
+        if (outcome.replaced) {
+          wrote = true;
+          lines.push(`✅ Slide ${target.index} diperbaiki di tempat${improveResultNote(result.source)}.`);
+        } else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penggantian gagal."}`);
         continue;
       }
 
@@ -507,12 +594,20 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         continue;
       }
       onProgress(`Menyisipkan slide setelah slide ${target.index}...`);
-      await insertDeckIntoActivePresentation(
+      const title = str(action.slide.headline) || "tanpa judul";
+      // Verified insert: reads the deck before and after inside one context and
+      // refuses to claim success unless exactly one slide landed right after the
+      // anchor — the same contract replace and delete already honor.
+      const inserted = await insertSlideAfterInActivePresentation(
         buildDeckPptxBase64(specFor(action.slide), styleId, instruction),
-        { formatting: "UseDestinationTheme", targetSlideId: toInsertTargetSlideId(target.id) }
+        { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
       );
-      wrote = true;
-      lines.push(`✅ Slide baru "${str(action.slide.headline) || "tanpa judul"}" disisipkan setelah slide ${target.index}.`);
+      if (inserted.inserted || inserted.deckChanged) wrote = true;
+      if (inserted.inserted) {
+        lines.push(`✅ Slide baru "${title}" disisipkan setelah slide ${target.index}.`);
+      } else {
+        lines.push(`❌ Slide baru "${title}": ${inserted.reason || "penyisipan tidak bisa diverifikasi."}`);
+      }
     } catch (error) {
       lines.push(`❌ ${action.op} slide ${target.index}: ${error?.message || error}`);
     }

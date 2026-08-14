@@ -135,7 +135,17 @@ export function mountPptChatPane() {
       confirm.disabled = true;
       cancel.disabled = true;
       confirm.textContent = "Menghapus...";
-      const line = await executeConfirmedDelete(descriptor);
+      // executeConfirmedDelete throws outright when the PowerPoint API is
+      // unavailable or an Office call rejects. Unhandled, the row would stay
+      // frozen on "Menghapus..." and the user could not tell whether their
+      // slide was deleted. Report it in the bubble like every other path.
+      let line;
+      try {
+        line = await executeConfirmedDelete(descriptor);
+      } catch (error) {
+        console.error("[TantularChat/PPT] delete gagal", error);
+        line = `❌ Slide ${descriptor.slideIndex} gagal dihapus: ${error?.message || error}`;
+      }
       row.remove();
       bubble.textContent = `${bubble.textContent}\n${line}`;
     });
@@ -197,7 +207,9 @@ export function mountPptChatPane() {
         throw new Error("Model tidak mengembalikan rencana JSON yang valid. Coba ulangi atau perjelas permintaannya.");
       }
 
-      const { actions, rejected } = sanitizePptActions(parsed.actions, ctx.slides.length);
+      // Bound on the snapshot itself, not its length: slide.index is a true deck
+      // position and the extractor skips unreadable slides, so the two differ.
+      const { actions, rejected } = sanitizePptActions(parsed.actions, ctx);
       answer.textContent = actions.length
         ? `${parsed.reply}\n\nMenjalankan ${actions.length} aksi...`
         : parsed.reply;
@@ -218,8 +230,15 @@ export function mountPptChatPane() {
       history.add("assistant", parsed.reply);
     } catch (error) {
       console.error("[TantularChat/PPT]", error, error?.debugInfo);
-      answer.textContent = String(error?.message || error || "Terjadi kesalahan.");
-      answer.classList.add("error");
+      // tantularClient turns any AbortError into a "model terlalu lama" timeout
+      // message. Telling a user who just pressed Stop that their model is slow
+      // is wrong — same guard chatPane.js uses for Word.
+      if (state.abort?.signal?.aborted || String(error?.message) === "dihentikan") {
+        answer.textContent = "⏹ Dihentikan oleh pengguna.";
+      } else {
+        answer.textContent = String(error?.message || error || "Terjadi kesalahan.");
+        answer.classList.add("error");
+      }
     } finally {
       state.busy = false;
       state.abort = null;

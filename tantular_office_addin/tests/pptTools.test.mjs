@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget, snapshotIndexSpace, abortReportLine, improveResultNote, SNAPSHOT_CEILING_CHARS } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -349,8 +349,23 @@ test("deckContextToPromptText states slide count and the global truncation notic
   });
   assert.match(text, /2 slide/);
   assert.match(text, /Konten slide dipotong untuk konteks/);
-  assert.match(text, /\[Slide 1 \| id 257\]/);
-  assert.match(text, /\[Slide 2 \| id 258\]/);
+  assert.match(text, /\[Slide 1 \| id 257 \| Judul\]/);
+  assert.match(text, /\[Slide 2 \| id 258 \| Agenda\]/);
+});
+
+test("deckContextToPromptText says the count is of READABLE slides, not deck length", () => {
+  // Extractor skips image-only slides while its counter keeps advancing: 2
+  // entries whose indexes reach 5. The header must not claim the deck has 2.
+  const text = deckContextToPromptText({
+    source: "extractor",
+    slides: [
+      { index: 1, id: "257", title: "Judul", text: "Judul", truncated: false },
+      { index: 5, id: "261", title: "Penutup", text: "Terima kasih", truncated: false }
+    ]
+  });
+  assert.match(text, /2 slide terbaca/);
+  assert.match(text, /tidak muncul di daftar ini/);
+  assert.match(text, /\[Slide 5 \| id 261 \| Penutup\]/);
 });
 
 test("deckContextToPromptText marks only the slides it actually cut", () => {
@@ -367,14 +382,105 @@ test("deckContextToPromptText marks only the slides it actually cut", () => {
   assert.match(second, /\[dipotong\]/);
 });
 
-test("deckContextToPromptText respects the total ceiling", () => {
+test("deckContextToPromptText keeps EVERY slide in a 60-slide deck under the ceiling", () => {
+  // The old behavior stopped emitting slides once the budget ran out, so the
+  // model could plan a replace_slide on a slide it had never read. Now the
+  // per-slide body shrinks instead and no slide is ever dropped.
   const slides = Array.from({ length: 60 }, (_, i) => ({
     index: i + 1, id: String(257 + i), title: `Slide ${i + 1}`,
     text: "y".repeat(500), truncated: false
   }));
   const text = deckContextToPromptText({ source: "extractor", slides });
-  assert.ok(text.length < 11000, `snapshot too long: ${text.length}`);
+  assert.ok(text.length <= SNAPSHOT_CEILING_CHARS, `snapshot too long: ${text.length}`);
   assert.match(text, /60 slide/);
+  for (const slide of slides) {
+    assert.ok(
+      text.includes(`[Slide ${slide.index} | id ${slide.id} | Slide ${slide.index}]`),
+      `slide ${slide.index} missing from the snapshot`
+    );
+  }
+  // No tail line about omitted slides can exist any more, so it can never print
+  // a negative count.
+  assert.equal(/tidak ditampilkan karena batas konteks/.test(text), false);
+  assert.equal(/-\d+ slide/.test(text), false);
+});
+
+test("snapshotIndexSpace uses the snapshot's real deck positions, not its length", () => {
+  const space = snapshotIndexSpace({ slides: [{ index: 1 }, { index: 44 }, { index: 60 }] });
+  assert.equal(space.has(44), true);
+  assert.equal(space.has(2), false);
+  assert.equal(space.max, 60);
+  const byCount = snapshotIndexSpace(10);
+  assert.equal(byCount.has(10), true);
+  assert.equal(byCount.has(11), false);
+});
+
+const gappySnapshot = {
+  source: "extractor",
+  slides: [
+    { index: 1, id: "257", title: "Judul", text: "a", truncated: false },
+    { index: 44, id: "300", title: "Data", text: "b", truncated: false }
+  ]
+};
+
+test("sanitize accepts a true deck position beyond the snapshot's array length", () => {
+  const { actions, rejected } = sanitizePptActions(
+    [{ op: "improve_slide", slideIndex: 44 }], gappySnapshot);
+  assert.equal(rejected.length, 0);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].slideIndex, 44);
+});
+
+test("sanitize rejects an index inside the deck but absent from the snapshot, and says why", () => {
+  const { actions, rejected } = sanitizePptActions(
+    [{ op: "replace_slide", slideIndex: 12, slide: bulletsSlide }], gappySnapshot);
+  assert.equal(actions.length, 0);
+  assert.match(rejected[0], /tidak ada di snapshot deck/);
+  assert.equal(/di luar jangkauan 1-2\b/.test(rejected[0]), false);
+});
+
+test("sanitize still rejects an index beyond the deck entirely", () => {
+  const { rejected } = sanitizePptActions(
+    [{ op: "improve_slide", slideIndex: 61 }], gappySnapshot);
+  assert.match(rejected[0], /di luar jangkauan 1-44/);
+});
+
+test("cleanData drops points with a null or non-numeric value instead of charting a fake zero", () => {
+  const { actions } = addSlide({
+    type: "visualization", headline: "Tren", chartType: "bar",
+    data: [
+      { label: "Q1", value: 10 },
+      { label: "Q2", value: null },
+      { label: "Q3" },
+      { label: "Q4", value: "tidak ada data" },
+      { label: "Q5", value: "" },
+      { label: "Q6", value: true },
+      { label: "Q7", value: "20" }
+    ]
+  });
+  assert.deepEqual(actions[0].slide.data, [{ label: "Q1", value: 10 }, { label: "Q7", value: 20 }]);
+});
+
+test("cleanData rejects the slide when every data point was fabricated", () => {
+  const { actions, rejected } = addSlide({
+    type: "visualization", headline: "Tren",
+    data: [{ label: "Q1", value: null }, { label: "Q2" }]
+  });
+  assert.equal(actions.length, 0);
+  assert.match(rejected[0], /data/);
+});
+
+test("abortReportLine names how many actions were skipped", () => {
+  assert.match(abortReportLine(3), /3 aksi berikutnya tidak dijalankan/);
+  assert.match(abortReportLine(0), /tidak ada aksi lain yang tersisa/);
+  assert.match(abortReportLine(undefined), /tidak ada aksi lain yang tersisa/);
+});
+
+test("improveResultNote qualifies a fallback and stays silent for a real model result", () => {
+  assert.equal(improveResultNote("model-grounded"), "");
+  assert.match(improveResultNote("fallback"), /fallback — model lokal tidak menjawab/);
+  assert.match(improveResultNote("fallback-grounded"), /fallback/);
+  assert.match(improveResultNote(""), /fallback/);
 });
 
 test("buildDeckSlidesFromExtractor turns labelled text into snapshot slides", () => {
