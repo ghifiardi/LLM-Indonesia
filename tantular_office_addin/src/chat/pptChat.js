@@ -24,6 +24,8 @@ Anda menerima snapshot deck aktif (daftar slide beserta teksnya) dan permintaan 
 
 Aksi yang tersedia di "actions" (kosongkan jika pengguna hanya bertanya):
 - {"op":"improve_slide","slideIndex":4}  → perbaiki slide yang sudah ada; JANGAN sertakan konten, Tantular yang menyusunnya dari teks slide asli.
+  Tambahkan "instruction" (opsional, maksimal 200 karakter) berisi maksud pengguna untuk slide itu — hanya niat, bukan konten slide.
+  Contoh: {"op":"improve_slide","slideIndex":4,"instruction":"buat lebih ringkas"}
 - {"op":"replace_slide","slideIndex":3,"slide":{...}}  → ganti slide dengan konten yang Anda tulis sendiri.
 - {"op":"add_slide","afterIndex":5,"slide":{...}}  → sisipkan slide baru setelah slide 5.
 - {"op":"delete_slide","slideIndex":7}  → usulkan penghapusan; pengguna harus mengonfirmasi.

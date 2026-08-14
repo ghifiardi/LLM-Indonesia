@@ -84,6 +84,22 @@ function rangeRejection(space, op, field, value) {
   return `${op} dengan ${field} "${value}" di luar jangkauan 1-${space.max}.`;
 }
 
+// improve_slide stays content-free, but it may carry the user's INTENT for that
+// slide ("buat lebih ringkas", "fokuskan ke biaya"). Without it every improve is
+// the same generic rewrite while the reply narrates the user's request as done —
+// a false claim. Intent is short by nature, so anything longer than this is
+// either slide content smuggled in or a rambling model: truncate it.
+export const MAX_ACTION_INSTRUCTION_CHARS = 200;
+
+function sanitizeActionInstruction(raw) {
+  if (typeof raw !== "string") return "";
+  const value = raw.trim();
+  if (!value) return "";
+  return value.length > MAX_ACTION_INSTRUCTION_CHARS
+    ? value.slice(0, MAX_ACTION_INSTRUCTION_CHARS).trim()
+    : value;
+}
+
 export function sanitizePptActions(raw, bounds) {
   if (!Array.isArray(raw)) return { actions: [], rejected: [] };
   const space = snapshotIndexSpace(bounds);
@@ -123,6 +139,11 @@ export function sanitizePptActions(raw, bounds) {
       const slide = sanitizeSlide(item?.slide);
       if (!slide.ok) { rejected.push(`replace_slide ditolak: ${slide.reason}`); continue; }
       actions.push({ op, slideIndex, slide: slide.slide });
+      continue;
+    }
+    if (op === "improve_slide") {
+      const instruction = sanitizeActionInstruction(item?.instruction);
+      actions.push(instruction ? { op, slideIndex, instruction } : { op, slideIndex });
       continue;
     }
     actions.push({ op, slideIndex });
@@ -480,8 +501,8 @@ export function resolveActionTarget(ctx, index) {
   return { id: str(slide.id), index: slide.index, title: str(slide.title), text: str(slide.text) };
 }
 
-function specFor(slide, title) {
-  return { title: title || str(slide.headline) || "Tantular", slides: [slide] };
+function specFor(slide, position) {
+  return { title: str(slide.headline) || "Tantular", slides: [slide], ...(position || {}) };
 }
 
 // Stamped onto every write confirmation, same convention as DECK_STUDIO_BUILD
@@ -506,6 +527,37 @@ export function improveResultNote(source) {
   if (value === "fallback") return " (versi fallback — model lokal tidak menjawab)";
   if (value === "fallback-grounded") return " (versi fallback — jawaban model tidak bisa dipakai)";
   return value ? ` (versi ${value})` : " (versi fallback)";
+}
+
+// The tuned improve prompt reads `instruction` as its steering text. The per-
+// action intent is the ACTUAL request and goes first, explicitly prioritized;
+// the project instructions stay below it as the style guide they are. Neither is
+// dropped.
+export function composeImproveInstruction(projectInstruction, actionInstruction) {
+  const project = str(projectInstruction);
+  const asked = str(actionInstruction);
+  if (!asked) return project;
+  const head = `Permintaan pengguna untuk slide ini (UTAMAKAN ini): ${asked}`;
+  return project ? `${head}\n\nStyle guide / instruksi project:\n${project}` : head;
+}
+
+// Composable with improveResultNote: the ✅ must say what was actually asked,
+// and still qualify a fallback result.
+export function improveSuccessLine(index, actionInstruction, source) {
+  const asked = str(actionInstruction);
+  const requested = asked ? ` (diminta: "${asked}")` : "";
+  return `✅ Slide ${index} diperbaiki di tempat${requested}${improveResultNote(source)}.`;
+}
+
+// The real footer numbers for a one-slide spec written into an existing deck.
+// The snapshot's index space IS the deck's position space (see
+// snapshotIndexSpace), so its max is the real deck size.
+// `added` covers an insert, which grows the deck by one before the new slide is
+// numbered.
+export function deckPositionFor(ctx, position, added = 0) {
+  const space = snapshotIndexSpace(ctx);
+  const total = Math.max(space.max + added, Number(position) || 0);
+  return { startIndex: position, deckTotal: total };
 }
 
 // ctx is IMMUTABLE for the whole turn: every target is resolved from the
@@ -550,7 +602,10 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         }
         onProgress(`Menyusun versi lebih baik untuk slide ${target.index}...`);
         const result = await improveExistingSlide({
-          slideText: target.text, tone, instruction, signal
+          slideText: target.text,
+          tone,
+          instruction: composeImproveInstruction(instruction, action.instruction),
+          signal
         });
         // improveExistingSlide catches EVERY failure — including the AbortError
         // raised by Stop — and answers with a truthy mechanical fallback spec.
@@ -567,12 +622,16 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         }
         onProgress(`Mengganti slide ${target.index}...`);
         const outcome = await replaceSlideInActivePresentation(
-          buildDeckPptxBase64(result.spec, styleId, instruction),
+          buildDeckPptxBase64(
+            { ...result.spec, ...deckPositionFor(ctx, target.index) },
+            styleId,
+            instruction
+          ),
           { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
         );
         if (outcome.replaced) {
           wrote = true;
-          lines.push(`✅ Slide ${target.index} diperbaiki di tempat${improveResultNote(result.source)}.`);
+          lines.push(improveSuccessLine(target.index, action.instruction, result.source));
         } else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penggantian gagal."}`);
         continue;
       }
@@ -580,7 +639,7 @@ export async function executePptActions(actions, ctx, hooks = {}) {
       if (action.op === "replace_slide") {
         onProgress(`Mengganti slide ${target.index}...`);
         const outcome = await replaceSlideInActivePresentation(
-          buildDeckPptxBase64(specFor(action.slide), styleId, instruction),
+          buildDeckPptxBase64(specFor(action.slide, deckPositionFor(ctx, target.index)), styleId, instruction),
           { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
         );
         if (outcome.replaced) { wrote = true; lines.push(`✅ Slide ${target.index} diganti.`); }
@@ -599,7 +658,11 @@ export async function executePptActions(actions, ctx, hooks = {}) {
       // refuses to claim success unless exactly one slide landed right after the
       // anchor — the same contract replace and delete already honor.
       const inserted = await insertSlideAfterInActivePresentation(
-        buildDeckPptxBase64(specFor(action.slide), styleId, instruction),
+        buildDeckPptxBase64(
+          specFor(action.slide, deckPositionFor(ctx, target.index + 1, 1)),
+          styleId,
+          instruction
+        ),
         { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
       );
       if (inserted.inserted || inserted.deckChanged) wrote = true;

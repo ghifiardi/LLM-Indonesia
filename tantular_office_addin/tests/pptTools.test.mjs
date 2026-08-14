@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget, snapshotIndexSpace, abortReportLine, improveResultNote, SNAPSHOT_CEILING_CHARS } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget, snapshotIndexSpace, abortReportLine, improveResultNote, SNAPSHOT_CEILING_CHARS, MAX_ACTION_INSTRUCTION_CHARS, composeImproveInstruction, improveSuccessLine, deckPositionFor } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -525,4 +525,64 @@ test("resolveActionTarget still resolves a slide with no id", () => {
 test("resolveActionTarget returns null outside the snapshot", () => {
   assert.equal(resolveActionTarget(ctx, 0), null);
   assert.equal(resolveActionTarget(ctx, 9), null);
+});
+
+test("sanitizePptActions keeps a short improve_slide instruction", () => {
+  const { actions } = sanitizePptActions(
+    [{ op: "improve_slide", slideIndex: 2, instruction: "  buat lebih ringkas  " }], 6
+  );
+  assert.deepEqual(actions, [{ op: "improve_slide", slideIndex: 2, instruction: "buat lebih ringkas" }]);
+});
+
+test("sanitizePptActions truncates an over-long improve_slide instruction", () => {
+  const long = "a".repeat(MAX_ACTION_INSTRUCTION_CHARS + 50);
+  const { actions } = sanitizePptActions([{ op: "improve_slide", slideIndex: 1, instruction: long }], 6);
+  assert.equal(actions[0].instruction.length, MAX_ACTION_INSTRUCTION_CHARS);
+});
+
+test("sanitizePptActions drops a non-string, empty, or absent improve_slide instruction", () => {
+  const bad = sanitizePptActions([
+    { op: "improve_slide", slideIndex: 1, instruction: { text: "ringkas" } },
+    { op: "improve_slide", slideIndex: 2, instruction: 42 },
+    { op: "improve_slide", slideIndex: 3, instruction: "   " },
+    { op: "improve_slide", slideIndex: 4 }
+  ], 6);
+  assert.equal(bad.actions.length, 4);
+  for (const action of bad.actions) assert.equal("instruction" in action, false);
+});
+
+test("sanitizePptActions ignores an instruction field on other ops", () => {
+  const { actions } = sanitizePptActions([
+    { op: "delete_slide", slideIndex: 2, instruction: "buat ringkas" },
+    { op: "replace_slide", slideIndex: 3, instruction: "buat ringkas", slide: { type: "bullets", headline: "H", bullets: ["a"] } }
+  ], 6);
+  assert.equal("instruction" in actions[0], false);
+  assert.equal("instruction" in actions[1], false);
+});
+
+test("composeImproveInstruction puts the user's intent first and keeps the project style guide", () => {
+  const combined = composeImproveInstruction("Pakai warna #112233.", "buat lebih ringkas");
+  assert.match(combined, /UTAMAKAN ini\): buat lebih ringkas/);
+  assert.ok(combined.includes("Pakai warna #112233."));
+  assert.ok(combined.indexOf("buat lebih ringkas") < combined.indexOf("Pakai warna"));
+  assert.equal(composeImproveInstruction("Pakai warna #112233.", ""), "Pakai warna #112233.");
+  assert.match(composeImproveInstruction("", "fokuskan ke biaya"), /fokuskan ke biaya/);
+});
+
+test("improveSuccessLine names what was requested and stays composable with improveResultNote", () => {
+  assert.equal(
+    improveSuccessLine(2, "buat lebih ringkas", "model-grounded"),
+    '✅ Slide 2 diperbaiki di tempat (diminta: "buat lebih ringkas").'
+  );
+  assert.equal(improveSuccessLine(2, "", "model-grounded"), "✅ Slide 2 diperbaiki di tempat.");
+  const fallback = improveSuccessLine(2, "buat lebih ringkas", "fallback");
+  assert.match(fallback, /diminta: "buat lebih ringkas"/);
+  assert.match(fallback, /versi fallback/);
+});
+
+test("deckPositionFor reports the real deck position and size from the snapshot", () => {
+  const ctx = { slides: [{ index: 1 }, { index: 2 }, { index: 5 }, { index: 6 }] };
+  assert.deepEqual(deckPositionFor(ctx, 2), { startIndex: 2, deckTotal: 6 });
+  assert.deepEqual(deckPositionFor(ctx, 3, 1), { startIndex: 3, deckTotal: 7 });
+  assert.deepEqual(deckPositionFor(ctx, 9), { startIndex: 9, deckTotal: 9 });
 });

@@ -191,3 +191,24 @@ test("custom_freeform renders a valid deck and keeps honoring explicit-hex overr
   assert.ok(raw.includes("112233"));
   assert.ok(raw.includes("445566"));
 });
+
+test("footer numbering: a one-slide spec stamps its real deck position when supplied", () => {
+  const one = { title: "Satu", slides: [{ type: "bullets", headline: "H", bullets: ["a"] }] };
+  const plain = Buffer.from(buildDeckPptxBase64(one, "nusantara"), "base64").toString("latin1");
+  assert.match(plain, /Deck Studio[^<]*1\/1/);
+
+  const placed = Buffer.from(
+    buildDeckPptxBase64({ ...one, startIndex: 2, deckTotal: 6 }, "nusantara"), "base64"
+  ).toString("latin1");
+  assert.match(placed, /Deck Studio[^<]*2\/6/);
+  assert.ok(!/Deck Studio[^<]*1\/1/.test(placed));
+});
+
+test("footer numbering: a multi-slide spec without position is unchanged", () => {
+  const raw = Buffer.from(buildDeckPptxBase64(SPEC, "nusantara"), "base64").toString("latin1");
+  const total = SPEC.slides.length;
+  for (let i = 1; i <= total; i += 1) {
+    if (["title", "quote"].includes(SPEC.slides[i - 1].type)) continue;
+    assert.match(raw, new RegExp(`Deck Studio[^<]*${i}/${total}`));
+  }
+});
