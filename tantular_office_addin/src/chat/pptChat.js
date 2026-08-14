@@ -1,7 +1,8 @@
 // Agentic PowerPoint chat: freestyle instructions over the active deck.
 // One model call plans JSON actions (improve/replace/add/delete slide) grounded
-// in a deck snapshot; pptTools sanitizes, orders, and executes them. Deletes are
-// proposed here and only run after the user clicks confirm.
+// in a deck snapshot; pptTools sanitizes and orders them into a PLAN. Nothing is
+// written to the deck until the user reads that plan and confirms it — a live
+// "Ringkas isi deck ini" (a question) once had seven slides rewritten under it.
 // This file must never touch an Office/PowerPoint API directly.
 
 import { runTantular } from "../tantularClient.js";
@@ -9,10 +10,12 @@ import { extractJsonObject } from "../deck/deckPlanner.js";
 import { createHistory } from "./history.js";
 import {
   deckContextToPromptText,
-  executeConfirmedDelete,
+  executeConfirmedPptPlan,
   executePptActions,
   getDeckContext,
-  sanitizePptActions
+  needsPptConfirmation,
+  sanitizePptActions,
+  summarizePendingChanges
 } from "./pptTools.js";
 
 const PPT_CHAT_SYSTEM = `Anda adalah Tantular, asisten PowerPoint agentic berbahasa Indonesia.
@@ -30,7 +33,8 @@ Aksi yang tersedia di "actions" (kosongkan jika pengguna hanya bertanya):
   Jika pengguna tidak menyebut maksud khusus, tulis instruction singkat yang menggambarkan permintaannya, misalnya "rapikan dan perjelas".
 - {"op":"replace_slide","slideIndex":3,"slide":{...}}  → ganti slide dengan konten yang Anda tulis sendiri.
 - {"op":"add_slide","afterIndex":5,"slide":{...}}  → sisipkan slide baru setelah slide 5.
-- {"op":"delete_slide","slideIndex":7}  → usulkan penghapusan; pengguna harus mengonfirmasi.
+- {"op":"delete_slide","slideIndex":7}  → usulkan penghapusan.
+Semua aksi di atas hanya USULAN: pengguna harus mengonfirmasi sebelum deck benar-benar berubah.
 
 Bentuk objek "slide" (pilih type sesuai isi):
 - {"type":"title","headline":"...","subhead":"..."}
@@ -130,39 +134,74 @@ export function mountPptChatPane() {
     return div;
   }
 
-  function addDeleteConfirm(descriptor, bubble) {
+  // ONE confirmation per turn, covering every planned change — improve, replace,
+  // add and delete alike. `turnSignal` is the planning turn's abort signal: a
+  // confirmation may never fire a write for a turn the user already stopped.
+  function addPlanConfirm(pending, bubble, turnSignal, writeHooks) {
+    const summary = summarizePendingChanges(pending);
+    bubble.textContent = [
+      bubble.textContent,
+      "",
+      summary.headline,
+      ...summary.lines.map((line) => `• ${line}`)
+    ].join("\n").trim();
+    const base = bubble.textContent;
+
     const row = document.createElement("div");
     row.className = "chat-actions";
     const confirm = document.createElement("button");
     confirm.type = "button";
     confirm.className = "primary";
-    confirm.textContent = `Hapus slide ${descriptor.slideIndex}`;
+    confirm.textContent = summary.confirmLabel;
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "secondary";
-    cancel.textContent = "Batal";
+    cancel.textContent = summary.cancelLabel;
 
     confirm.addEventListener("click", async () => {
+      if (state.busy) return;
       confirm.disabled = true;
       cancel.disabled = true;
-      confirm.textContent = "Menghapus...";
-      // executeConfirmedDelete throws outright when the PowerPoint API is
-      // unavailable or an Office call rejects. Unhandled, the row would stay
-      // frozen on "Menghapus..." and the user could not tell whether their
-      // slide was deleted. Report it in the bubble like every other path.
-      let line;
-      try {
-        line = await executeConfirmedDelete(descriptor);
-      } catch (error) {
-        console.error("[TantularChat/PPT] delete gagal", error);
-        line = `❌ Slide ${descriptor.slideIndex} gagal dihapus: ${error?.message || error}`;
-      }
       row.remove();
-      bubble.textContent = `${bubble.textContent}\n${line}`;
+      // Stop was pressed while this turn was still planning. The plan on screen
+      // belongs to that aborted turn, so it must never be written.
+      if (turnSignal?.aborted) {
+        bubble.textContent = `${base}\n⏹ Giliran ini dihentikan; tidak ada yang ditulis ke deck.`;
+        return;
+      }
+
+      // The confirmed writes call the model again (improve_slide), so Stop has
+      // to work here too — on a fresh controller for the write phase.
+      state.busy = true;
+      state.abort = new AbortController();
+      els.stop.classList.remove("hidden");
+      const signal = state.abort.signal;
+      let lines;
+      try {
+        const result = await executeConfirmedPptPlan(pending, {
+          ...writeHooks,
+          signal,
+          onProgress: (text) => { bubble.textContent = `${base}\n${text}`; }
+        });
+        lines = result.lines;
+      } catch (error) {
+        // executeConfirmedPptPlan throws outright when the PowerPoint API is
+        // missing. Unhandled, the bubble would freeze mid-progress and the user
+        // could not tell whether their deck was touched. Report it like
+        // everything else.
+        console.error("[TantularChat/PPT] konfirmasi gagal", error);
+        lines = [`❌ Perubahan gagal dijalankan: ${error?.message || error}`];
+      } finally {
+        state.busy = false;
+        state.abort = null;
+        els.stop.classList.add("hidden");
+      }
+      bubble.textContent = [base, "", ...lines].join("\n").trim();
+      els.messages.scrollTop = els.messages.scrollHeight;
     });
     cancel.addEventListener("click", () => {
       row.remove();
-      bubble.textContent = `${bubble.textContent}\n⏹ Penghapusan slide ${descriptor.slideIndex} dibatalkan.`;
+      bubble.textContent = `${base}\n${summary.cancelledLine}`;
     });
 
     row.appendChild(confirm);
@@ -221,26 +260,26 @@ export function mountPptChatPane() {
       // Bound on the snapshot itself, not its length: slide.index is a true deck
       // position and the extractor skips unreadable slides, so the two differ.
       const { actions, rejected } = sanitizePptActions(parsed.actions, ctx);
-      answer.textContent = actions.length
-        ? `${parsed.reply}\n\nMenjalankan ${actions.length} aksi...`
-        : parsed.reply;
+      answer.textContent = parsed.reply;
 
-      const { lines, pendingDeletes } = await executePptActions(actions, ctx, {
-        onProgress: (text) => { answer.textContent = `${parsed.reply}\n\n${text}`; },
-        signal: state.abort.signal,
-        tone,
-        instruction,
-        styleId,
-        // The planner usually omits the optional per-action "instruction", so the
-        // raw request travels here too and pptTools uses it as the fallback intent
-        // for improve_slide. Without it the user's "supaya lebih ringkas" never
-        // reaches the improve prompt at all.
-        userRequest: message
-      });
-
+      // Planning only — this call cannot touch the deck.
+      const { lines, pending } = executePptActions(actions, ctx);
       answer.textContent = [parsed.reply, "", ...lines, ...rejected.map((r) => `⚠️ ${r}`)]
         .join("\n").trim();
-      for (const descriptor of pendingDeletes) addDeleteConfirm(descriptor, answer);
+
+      // A genuine question plans nothing, so it never sees a confirmation.
+      if (needsPptConfirmation(pending)) {
+        addPlanConfirm(pending, answer, state.abort.signal, {
+          tone,
+          instruction,
+          styleId,
+          // The planner usually omits the optional per-action "instruction", so
+          // the raw request travels here too and pptTools uses it as the fallback
+          // intent for improve_slide. Without it the user's "supaya lebih ringkas"
+          // never reaches the improve prompt at all.
+          userRequest: message
+        });
+      }
 
       history.add("user", message);
       history.add("assistant", parsed.reply);
