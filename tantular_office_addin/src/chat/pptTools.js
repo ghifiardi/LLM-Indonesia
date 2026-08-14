@@ -298,8 +298,19 @@ export function buildDeckSlidesFromExtractor(text) {
 }
 
 // Fast path: read the deck through the PowerPoint API. Requires Shape.textFrame
-// (PowerPointApi 1.4), which is NOT confirmed on the Mac workshop host — this
-// returns null rather than throwing so the caller falls back cleanly.
+// (PowerPointApi 1.4).
+//
+// MEASURED 2026-08-14: this path does NOT work on the Mac workshop host — a probe
+// there returned source "extractor", i.e. this returned null. Mac always falls
+// back to the companion extractor below.
+//
+// It is kept anyway, for Windows attendees: the workshop ships a Windows
+// installer, and Windows PowerPoint generally does support Shape.textFrame, so
+// deleting this would make chat there depend entirely on the Python companion
+// running. Treat it as unproven rather than working — nobody has run the probe
+// on Windows yet. Re-measure before relying on it.
+//
+// Returns null rather than throwing, so the caller falls back cleanly.
 async function readDeckViaHost() {
   if (!globalThis.PowerPoint?.run) return null;
   try {

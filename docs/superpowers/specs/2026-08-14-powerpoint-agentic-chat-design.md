@@ -313,6 +313,21 @@ Before building the chat, run two temporary measurements in real PowerPoint on t
 multi-slide deck and record where the slide lands. The result decides whether `afterIndex: 0`
 can be enabled in a follow-up; it stays rejected in this spec either way.
 
+### Measured results
+
+**Probe A — 2026-08-14, Mac PowerPoint: `source: "extractor"`.** The in-host read path does not
+work on this host, consistent with `Shape.textFrame` requiring PowerPointApi 1.4 while the host
+lacks even 1.5-era APIs. Every deck read on Mac goes through the companion extractor.
+
+`readDeckViaHost` is nevertheless **retained**, against this spec's original "delete the branch"
+instruction. The reason emerged after that instruction was written: the workshop ships a Windows
+installer (`setup.ps1` / `tantular-workshop.zip`), and Windows PowerPoint generally does support
+`Shape.textFrame`. Deleting the branch would make chat on Windows depend entirely on the Python
+companion running. It stays, marked in code as measured-dead on Mac and unproven on Windows —
+an honest state, not a proven one. Re-measure on a Windows host before treating it as working.
+
+**Probe B — pending.**
+
 Building the chat before knowing which is guessing.
 
 ### Manual verification in PowerPoint
