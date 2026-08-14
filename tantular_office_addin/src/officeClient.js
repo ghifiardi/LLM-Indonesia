@@ -768,6 +768,22 @@ export async function deleteSlidesInActivePresentation(ids) {
   });
 }
 
+// Live slide ids in visual order. Used to detect a deck that moved between a
+// delete proposal and its confirmation.
+export async function readLiveSlideIds() {
+  if (!globalThis.PowerPoint?.run) {
+    throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
+  }
+  return PowerPoint.run(async (context) => {
+    const collection = context.presentation.slides;
+    collection.load("items");
+    await context.sync();
+    for (const slide of collection.items || []) slide.load("id");
+    await context.sync();
+    return (collection.items || []).map((slide) => String(slide.id || ""));
+  });
+}
+
 // Common-API selection info: works on hosts WITHOUT PowerPointApi 1.5
 // getSelectedSlides() (e.g. older desktop builds). Returns 1-based indexes and
 // numeric slide ids (the {id} part accepted by insertSlidesFromBase64).

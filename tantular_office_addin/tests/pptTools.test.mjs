@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -397,4 +397,26 @@ test("buildDeckSlidesFromExtractor titles an empty slide honestly", () => {
   const slides = buildDeckSlidesFromExtractor("[Slide 1 | id 257]\n\n");
   assert.equal(slides[0].title, "(tanpa teks)");
   assert.equal(slides[0].text, "");
+});
+
+const ctx = {
+  source: "extractor",
+  slides: [
+    { index: 1, id: "257", title: "Judul", text: "a", truncated: false },
+    { index: 2, id: "258", title: "Agenda", text: "b", truncated: false },
+    { index: 3, id: "", title: "Tanpa id", text: "c", truncated: false }
+  ]
+};
+
+test("resolveActionTarget maps an index to the snapshot id", () => {
+  assert.deepEqual(resolveActionTarget(ctx, 2), { id: "258", index: 2, title: "Agenda", text: "b" });
+});
+
+test("resolveActionTarget still resolves a slide with no id", () => {
+  assert.deepEqual(resolveActionTarget(ctx, 3), { id: "", index: 3, title: "Tanpa id", text: "c" });
+});
+
+test("resolveActionTarget returns null outside the snapshot", () => {
+  assert.equal(resolveActionTarget(ctx, 0), null);
+  assert.equal(resolveActionTarget(ctx, 9), null);
 });

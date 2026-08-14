@@ -2,8 +2,18 @@
 // All Office/PowerPoint access for the PPT chat lives here so pptChat.js can
 // stay a pure UI module (mirrors the excelChat.js / excelTools.js split).
 
-import { sameSlideId, getActivePresentationPptxFile } from "../officeClient.js";
+import {
+  sameSlideId,
+  getActivePresentationPptxFile,
+  deleteSlidesInActivePresentation,
+  insertDeckIntoActivePresentation,
+  readLiveSlideIds,
+  replaceSlideInActivePresentation,
+  toInsertTargetSlideId
+} from "../officeClient.js";
 import { extractDocumentFile } from "../deck/documentExtract.js";
+import { buildDeckPptxBase64 } from "../deck/pptxBuilder.js";
+import { improveExistingSlide } from "../deck/deckPlanner.js";
 
 const MAX_ACTIONS_PER_TURN = 8;
 const OPS = ["improve_slide", "replace_slide", "add_slide", "delete_slide"];
@@ -409,4 +419,119 @@ export async function getDeckContext({ force = false } = {}) {
     meta: `${slides.length} slide terbaca (${source}).`
   };
   return deckCache;
+}
+
+export function resolveActionTarget(ctx, index) {
+  const slides = Array.isArray(ctx?.slides) ? ctx.slides : [];
+  const slide = slides.find((entry) => entry.index === index);
+  if (!slide) return null;
+  return { id: str(slide.id), index: slide.index, title: str(slide.title), text: str(slide.text) };
+}
+
+function specFor(slide, title) {
+  return { title: title || str(slide.headline) || "Tantular", slides: [slide] };
+}
+
+// Stamped onto every write confirmation, same convention as DECK_STUDIO_BUILD
+// in taskpane.js — a screenshot of the chat then identifies the code version.
+export const PPT_CHAT_BUILD = "0.1.0-ppt-chat";
+
+// ctx is IMMUTABLE for the whole turn: every target is resolved from the
+// original snapshot before anything executes, so no action ever reads a deck
+// state that a sibling action just changed.
+export async function executePptActions(actions, ctx, hooks = {}) {
+  const { onProgress = () => {}, signal, tone = "", instruction = "", styleId = "nusantara" } = hooks;
+  const lines = [];
+  const pendingDeletes = [];
+  if (!actions.length) return { lines, pendingDeletes };
+
+  const planned = orderPptActions(actions).map((action) => ({
+    action,
+    target: resolveActionTarget(ctx, action.op === "add_slide" ? action.afterIndex : action.slideIndex)
+  }));
+
+  let wrote = false;
+  for (const { action, target } of planned) {
+    if (signal?.aborted) { lines.push("⏹ Dihentikan oleh pengguna."); break; }
+    if (!target) {
+      lines.push(`❌ ${action.op}: slide tidak ada di snapshot deck.`);
+      continue;
+    }
+
+    try {
+      if (action.op === "delete_slide") {
+        pendingDeletes.push({
+          op: "delete_slide", slideIndex: target.index, id: target.id, title: target.title
+        });
+        lines.push(`⏸ Hapus slide ${target.index} ("${target.title}") menunggu konfirmasi.`);
+        continue;
+      }
+
+      if (action.op === "improve_slide") {
+        if (!target.text) {
+          lines.push(`❌ Slide ${target.index} tidak punya teks yang bisa dibaca untuk diperbaiki.`);
+          continue;
+        }
+        onProgress(`Menyusun versi lebih baik untuk slide ${target.index}...`);
+        const result = await improveExistingSlide({
+          slideText: target.text, tone, instruction, signal
+        });
+        if (!result?.spec) {
+          lines.push(`❌ Slide ${target.index}: model tidak mengembalikan slide yang valid.`);
+          continue;
+        }
+        onProgress(`Mengganti slide ${target.index}...`);
+        const outcome = await replaceSlideInActivePresentation(
+          buildDeckPptxBase64(result.spec, styleId, instruction),
+          { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
+        );
+        if (outcome.replaced) { wrote = true; lines.push(`✅ Slide ${target.index} diperbaiki di tempat.`); }
+        else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penggantian gagal."}`);
+        continue;
+      }
+
+      if (action.op === "replace_slide") {
+        onProgress(`Mengganti slide ${target.index}...`);
+        const outcome = await replaceSlideInActivePresentation(
+          buildDeckPptxBase64(specFor(action.slide), styleId, instruction),
+          { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
+        );
+        if (outcome.replaced) { wrote = true; lines.push(`✅ Slide ${target.index} diganti.`); }
+        else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penggantian gagal."}`);
+        continue;
+      }
+
+      // add_slide
+      if (!target.id) {
+        lines.push(`❌ Slide ${target.index} tidak punya id, jadi posisi sisipan tidak bisa dipastikan.`);
+        continue;
+      }
+      onProgress(`Menyisipkan slide setelah slide ${target.index}...`);
+      await insertDeckIntoActivePresentation(
+        buildDeckPptxBase64(specFor(action.slide), styleId, instruction),
+        { formatting: "UseDestinationTheme", targetSlideId: toInsertTargetSlideId(target.id) }
+      );
+      wrote = true;
+      lines.push(`✅ Slide baru "${str(action.slide.headline) || "tanpa judul"}" disisipkan setelah slide ${target.index}.`);
+    } catch (error) {
+      lines.push(`❌ ${action.op} slide ${target.index}: ${error?.message || error}`);
+    }
+  }
+
+  // Clear once, after the turn's writes. A pending delete is not a write.
+  if (wrote) {
+    invalidateDeckContext();
+    lines.push(`(${PPT_CHAT_BUILD})`);
+  }
+  return { lines, pendingDeletes };
+}
+
+export async function executeConfirmedDelete(descriptor) {
+  const liveIds = await readLiveSlideIds();
+  const target = resolveDeleteTarget(liveIds, descriptor);
+  if (!target.ok) return `❌ ${target.reason}`;
+  const outcome = await deleteSlidesInActivePresentation([target.id]);
+  if (!outcome.deleted) return `❌ Slide ${target.index}: ${outcome.reason}`;
+  invalidateDeckContext();
+  return `✅ Slide ${target.index} ("${str(descriptor?.title)}") dihapus. (${PPT_CHAT_BUILD})`;
 }
