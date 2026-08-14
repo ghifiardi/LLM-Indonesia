@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -342,4 +342,26 @@ test("deckContextToPromptText respects the total ceiling", () => {
   const text = deckContextToPromptText({ source: "extractor", slides });
   assert.ok(text.length < 11000, `snapshot too long: ${text.length}`);
   assert.match(text, /60 slide/);
+});
+
+test("buildDeckSlidesFromExtractor turns labelled text into snapshot slides", () => {
+  const slides = buildDeckSlidesFromExtractor([
+    "[Slide 1 | id 257]",
+    "Judul Deck",
+    "Baris kedua",
+    "[Slide 2 | id 258]",
+    "Agenda",
+    ""
+  ].join("\n"));
+  assert.equal(slides.length, 2);
+  assert.deepEqual(slides[0], {
+    index: 1, id: "257", title: "Judul Deck", text: "Judul Deck\nBaris kedua", truncated: false
+  });
+  assert.equal(slides[1].title, "Agenda");
+});
+
+test("buildDeckSlidesFromExtractor titles an empty slide honestly", () => {
+  const slides = buildDeckSlidesFromExtractor("[Slide 1 | id 257]\n\n");
+  assert.equal(slides[0].title, "(tanpa teks)");
+  assert.equal(slides[0].text, "");
 });

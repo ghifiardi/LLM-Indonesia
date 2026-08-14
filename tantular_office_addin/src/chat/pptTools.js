@@ -2,7 +2,8 @@
 // All Office/PowerPoint access for the PPT chat lives here so pptChat.js can
 // stay a pure UI module (mirrors the excelChat.js / excelTools.js split).
 
-import { sameSlideId } from "../officeClient.js";
+import { sameSlideId, getActivePresentationPptxFile } from "../officeClient.js";
+import { extractDocumentFile } from "../deck/documentExtract.js";
 
 const MAX_ACTIONS_PER_TURN = 8;
 const OPS = ["improve_slide", "replace_slide", "add_slide", "delete_slide"];
@@ -273,4 +274,110 @@ export function orderPptActions(actions) {
       return a.position - b.position;
     })
     .map((entry) => entry.action);
+}
+
+let deckCache = null;
+
+export function invalidateDeckContext() {
+  deckCache = null;
+}
+
+function titleOf(text) {
+  const first = str(text).split("\n").map(str).find(Boolean);
+  return first || "(tanpa teks)";
+}
+
+export function buildDeckSlidesFromExtractor(text) {
+  return extractPptxSlides(text).map((slide, position) => ({
+    index: Number(slide.index) || position + 1,
+    id: str(slide.id),
+    title: titleOf(slide.text),
+    text: str(slide.text),
+    truncated: false
+  }));
+}
+
+// Fast path: read the deck through the PowerPoint API. Requires Shape.textFrame
+// (PowerPointApi 1.4), which is NOT confirmed on the Mac workshop host — this
+// returns null rather than throwing so the caller falls back cleanly.
+async function readDeckViaHost() {
+  if (!globalThis.PowerPoint?.run) return null;
+  try {
+    return await PowerPoint.run(async (context) => {
+      const collection = context.presentation.slides;
+      collection.load("items");
+      await context.sync();
+      const items = collection.items || [];
+      if (!items.length) return null;
+
+      for (const slide of items) {
+        slide.load("id");
+        try { slide.shapes.load("items"); } catch (_) { /* older hosts */ }
+      }
+      await context.sync();
+
+      const perSlide = items.map((slide) => {
+        const ranges = [];
+        for (const shape of slide.shapes?.items || []) {
+          try {
+            const range = shape.textFrame.textRange;
+            range.load("text");
+            ranges.push(range);
+          } catch (_) { /* non-text shapes are expected */ }
+        }
+        return ranges;
+      });
+      await context.sync();
+
+      const slides = items.map((slide, position) => {
+        const text = perSlide[position]
+          .map((range) => str(range.text))
+          .filter(Boolean)
+          .join("\n");
+        return {
+          index: position + 1,
+          id: String(slide.id || ""),
+          title: titleOf(text),
+          text,
+          truncated: false
+        };
+      });
+      // A deck where every slide reads empty means textFrame silently gave us
+      // nothing. Treat it as a failed read, not an empty deck.
+      return slides.some((slide) => slide.text) ? slides : null;
+    });
+  } catch (error) {
+    console.warn("[TantularChat/PPT] in-host deck read failed", error);
+    return null;
+  }
+}
+
+async function readDeckViaExtractor() {
+  const file = await getActivePresentationPptxFile();
+  const extracted = await extractDocumentFile(file);
+  return buildDeckSlidesFromExtractor(extracted?.text || "");
+}
+
+export async function getDeckContext({ force = false } = {}) {
+  if (deckCache && force !== true) return deckCache;
+
+  let slides = await readDeckViaHost();
+  let source = "host";
+  if (!slides?.length) {
+    slides = await readDeckViaExtractor();
+    source = "extractor";
+  }
+  if (!slides?.length) {
+    throw new Error(
+      "Tantular tidak bisa membaca deck aktif. Pastikan Tantular Companion berjalan, " +
+      "lalu klik Muat ulang deck."
+    );
+  }
+
+  deckCache = {
+    slides,
+    source,
+    meta: `${slides.length} slide terbaca (${source}).`
+  };
+  return deckCache;
 }
