@@ -96,13 +96,17 @@ export function mountPptChatPane() {
   }
 
   function renderChips() {
-    // Chips must not hardcode a slide number: "slide 2" is arbitrary for a deck
-    // the user actually has, and reads as "two slides" in Indonesian — ambiguity
-    // that goes to a weak local model as its instruction.
+    // Chips are READ-ONLY on purpose. They are one click away for someone who
+    // has not yet worked out what this pane does, and a deck has no undo here —
+    // so nothing that mutates slides belongs in them. Writing stays available by
+    // typing, which takes a deliberate sentence.
+    // They also must not hardcode a slide number: it is arbitrary against the
+    // user's real deck, and "slide 2" reads as "two slides" in Indonesian —
+    // ambiguity handed straight to a weak local model as its instruction.
     const prompts = [
       "Ringkas isi deck ini",
-      "Tambahkan slide penutup dengan next step",
-      "Slide mana yang paling padat teksnya?"
+      "Apa pesan utama deck ini?",
+      "Apa yang kurang dari deck ini?"
     ];
     for (const prompt of prompts) {
       const chip = document.createElement("button");
