@@ -432,7 +432,7 @@ async function readDeckViaHost() {
 
       const slides = items.map((slide, position) => {
         const text = perSlide[position]
-          .map((range) => str(range.text))
+          .map((range) => str(normalizeSlideText(range.text)))
           .filter(Boolean)
           .join("\n");
         return {
@@ -559,6 +559,14 @@ export function resolveImproveIntent(actionInstruction, userRequest) {
   return sanitizeActionInstruction(actionInstruction) || sanitizeActionInstruction(userRequest);
 }
 
+// PowerPoint's in-host textRange.text separates PARAGRAPHS with "\r", so an
+// unnormalized 6-bullet body shape reads as one line and every line-based
+// measurement below silently collapses to 1. The companion/extractor path
+// already normalizes; the host path (Windows) did not.
+export function normalizeSlideText(text) {
+  return String(text ?? "").replace(/\r\n?/g, "\n");
+}
+
 // --- Content loss ---------------------------------------------------------
 // Improve rewrote a 6-bullet slide into a single-column, single-bullet slide and
 // reported a bare ✅. With no undo in this add-in, silently discarding five of six
@@ -569,25 +577,42 @@ export function resolveImproveIntent(actionInstruction, userRequest) {
 // card, a point inside a column, a metric, a data point. It is crude on purpose —
 // it must be pure, testable, and never wrong in a way that hides loss.
 export function countSourceUnits(text) {
-  return str(text)
+  return normalizeSlideText(text)
     .split("\n")
     .map(str)
     .filter((line) => line.length >= 3)
     .length;
 }
 
+// CALIBRATION (review finding, and it matters now that this gates a WRITE):
+// the source side counts extracted TEXT BOXES, so the spec side must count the
+// boxes pptxBuilder would emit — not the abstract "items". drawCards writes one
+// box per card title AND per desc, drawMetrics one per value AND per label,
+// drawColumns one per column title AND per point, and every slide also carries
+// headline, optional subhead and the footer/brand line. Counting cards as 1
+// each made a LOSSLESS 4-card rewrite (4) look like a 64% loss against its own
+// 11-line extraction, which under the retry/refuse gate would have refused a
+// perfectly good improve. The chrome line is added unconditionally, which
+// slightly inflates the spec side for non-Tantular source slides — deliberately
+// so: the safe direction for a gate with no undo is to under-report loss (a
+// missed warning) rather than to refuse work the user asked for.
 export function countSpecUnits(slide) {
   if (!slide || typeof slide !== "object") return 0;
   const list = (value) => (Array.isArray(value) ? value : []);
-  const columnUnits = list(slide.columns)
-    .reduce((sum, column) => sum + Math.max(1, list(column?.points).length), 0);
-  const units = list(slide.bullets).length
-    + list(slide.cards).length
-    + columnUnits
-    + list(slide.metrics).length
-    + list(slide.data).length;
-  // A title/quote/closing slide carries its message in the headline itself.
-  return units || (str(slide.headline) || str(slide.quote) ? 1 : 0);
+  const box = (value) => (str(value) ? 1 : 0);
+  const pair = (a, b) => Math.max(1, box(a) + box(b));
+  const content = list(slide.bullets).filter((b) => str(b)).length
+    + list(slide.cards).reduce((sum, card) => sum + pair(card?.title, card?.desc), 0)
+    + list(slide.columns)
+      .reduce((sum, col) => sum + 1 + list(col?.points).filter((p) => str(p)).length, 0)
+    + list(slide.metrics).reduce((sum, m) => sum + pair(m?.value, m?.label), 0)
+    + list(slide.data).reduce((sum, d) => sum + pair(
+      d?.value === 0 || d?.value ? String(d.value) : "", d?.label
+    ), 0);
+  const chrome = box(slide.headline) + box(slide.subhead) + box(slide.quote);
+  if (!content && !chrome) return 0;
+  // + 1 for the footer / brand line every built slide carries.
+  return content + chrome + 1;
 }
 
 // THRESHOLD (documented so it can be argued with): warn only when the source had
@@ -606,10 +631,56 @@ export function contentLossNote(sourceUnits, keptUnits) {
 
 // Composable with improveResultNote: the ✅ must say what was actually asked,
 // still qualify a fallback result, and never hide that most of the slide is gone.
-export function improveSuccessLine(index, actionInstruction, source, lossNote = "") {
+export function improveSuccessLine(index, actionInstruction, source, lossNote = "", retried = false) {
   const asked = str(actionInstruction);
   const requested = asked ? ` (diminta: "${asked}")` : "";
-  return `✅ Slide ${index} diperbaiki di tempat${requested}${str(lossNote) ? ` ${str(lossNote)}` : ""}${improveResultNote(source)}.`;
+  const second = retried ? " (perlu percobaan kedua)" : "";
+  return `✅ Slide ${index} diperbaiki di tempat${requested}${second}${str(lossNote) ? ` ${str(lossNote)}` : ""}${improveResultNote(source)}.`;
+}
+
+// --- Write decision -------------------------------------------------------
+// Warning was not enough. Live testing produced a 7-point slide rewritten to ONE
+// point three times in a row, and this add-in has NO UNDO: by the time the user
+// reads the warning the deck is already damaged. So the destructive write must
+// not happen at all. Severity is EXACTLY the threshold behind contentLossNote —
+// one notion of "severe", not two.
+export function isSevereContentLoss(sourceUnits, keptUnits) {
+  return Boolean(contentLossNote(sourceUnits, keptUnits));
+}
+
+// Pure decision the executor merely obeys: "accept" (write), "retry" (ask the
+// model once more, write nothing yet), "refuse" (write nothing at all, ever).
+// The retry is a second local model call, so it is offered ONLY on severe loss
+// and only on the first attempt.
+export function decideImproveWrite(sourceUnits, keptUnits, attempt = 1) {
+  if (!isSevereContentLoss(sourceUnits, keptUnits)) return "accept";
+  return Number(attempt) >= 2 ? "refuse" : "retry";
+}
+
+// The model is a weak local 9B/4B: nuance in IMPROVE_SLIDE_SYSTEM demonstrably
+// did not change its behaviour, so the retry instruction is blunt, concrete and
+// numeric, and rides on top of whatever intent was already resolved.
+export function composeImproveRetryInstruction(baseInstruction, sourceUnits) {
+  const minimal = Math.max(1, Number(sourceUnits) || 1);
+  const blunt = [
+    "PERCOBAAN KEDUA — WAJIB DIPATUHI:",
+    `Percobaan pertama membuang sebagian besar isi slide. Slide sumber punya ${minimal} poin.`,
+    `Tulis ulang dengan JUMLAH POIN YANG SAMA, minimal ${minimal} poin. Jangan menggabungkan poin. Jangan menghapus poin.`,
+    "Pertahankan SETIAP fakta, angka, nama, dan tanggal dari slide sumber.",
+    "Yang boleh diubah HANYA kalimatnya: buat tiap poin lebih pendek dan lebih jelas."
+  ].join("\n");
+  const base = str(baseInstruction);
+  return base ? `${blunt}\n\n${base}` : blunt;
+}
+
+// Honest refusal: the user must know the deck was PROTECTED, not that the
+// feature quietly did nothing.
+export function improveRefusedLine(index, sourceUnits, keptUnits) {
+  const before = Number(sourceUnits) || 0;
+  const after = Number(keptUnits) || 0;
+  return `⛔ Slide ${index} TIDAK diubah — tidak ada perubahan yang ditulis ke deck. `
+    + `Model lokal dua kali mengembalikan hasil yang membuang sebagian besar isi (${before} poin → ${after} poin), `
+    + "jadi slide sengaja dibiarkan apa adanya. Coba lagi dengan permintaan yang lebih spesifik.";
 }
 
 // The real footer numbers for a one-slide spec written into an existing deck.
@@ -668,11 +739,9 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         }
         onProgress(`Menyusun versi lebih baik untuk slide ${target.index}...`);
         const intent = resolveImproveIntent(action.instruction, userRequest);
-        const result = await improveExistingSlide({
-          slideText: target.text,
-          tone,
-          instruction: composeImproveInstruction(instruction, intent),
-          signal
+        const baseInstruction = composeImproveInstruction(instruction, intent);
+        let result = await improveExistingSlide({
+          slideText: target.text, tone, instruction: baseInstruction, signal
         });
         // improveExistingSlide catches EVERY failure — including the AbortError
         // raised by Stop — and answers with a truthy mechanical fallback spec.
@@ -687,6 +756,36 @@ export async function executePptActions(actions, ctx, hooks = {}) {
           lines.push(`❌ Slide ${target.index}: model tidak mengembalikan slide yang valid.`);
           continue;
         }
+
+        // No undo: on severe loss we do not write and then apologise. We retry
+        // once with a blunt instruction, and if that is bad too we write nothing.
+        const sourceUnits = countSourceUnits(target.text);
+        let keptUnits = countSpecUnits(result.spec?.slides?.[0]);
+        let retried = false;
+        if (decideImproveWrite(sourceUnits, keptUnits, 1) === "retry") {
+          retried = true;
+          onProgress(`Hasil pertama membuang terlalu banyak isi — mencoba sekali lagi untuk slide ${target.index}...`);
+          const second = await improveExistingSlide({
+            slideText: target.text,
+            tone,
+            instruction: composeImproveRetryInstruction(baseInstruction, sourceUnits),
+            signal
+          });
+          if (signal?.aborted) {
+            lines.push(`⏹ Slide ${target.index} TIDAK diubah — dihentikan sebelum ditulis ke deck.`);
+            lines.push(abortReportLine(planned.length - position - 1));
+            break;
+          }
+          if (second?.spec) {
+            result = second;
+            keptUnits = countSpecUnits(second.spec?.slides?.[0]);
+          }
+          if (decideImproveWrite(sourceUnits, keptUnits, 2) === "refuse") {
+            lines.push(improveRefusedLine(target.index, sourceUnits, keptUnits));
+            continue;
+          }
+        }
+
         onProgress(`Mengganti slide ${target.index}...`);
         const outcome = await replaceSlideInActivePresentation(
           buildDeckPptxBase64(
@@ -698,11 +797,9 @@ export async function executePptActions(actions, ctx, hooks = {}) {
         );
         if (outcome.replaced) {
           wrote = true;
-          const loss = contentLossNote(
-            countSourceUnits(target.text),
-            countSpecUnits(result.spec?.slides?.[0])
-          );
-          lines.push(improveSuccessLine(target.index, intent, result.source, loss));
+          lines.push(improveSuccessLine(
+            target.index, intent, result.source, contentLossNote(sourceUnits, keptUnits), retried
+          ));
         } else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penggantian gagal."}`);
         continue;
       }

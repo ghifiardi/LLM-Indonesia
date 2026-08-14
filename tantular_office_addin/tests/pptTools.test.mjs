@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget, snapshotIndexSpace, abortReportLine, improveResultNote, SNAPSHOT_CEILING_CHARS, MAX_ACTION_INSTRUCTION_CHARS, composeImproveInstruction, improveSuccessLine, deckPositionFor, resolveImproveIntent, countSourceUnits, countSpecUnits, contentLossNote } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions, resolveDeleteTarget, deckContextToPromptText, buildDeckSlidesFromExtractor, deckReadErrorMessage, resolveActionTarget, snapshotIndexSpace, abortReportLine, improveResultNote, SNAPSHOT_CEILING_CHARS, MAX_ACTION_INSTRUCTION_CHARS, composeImproveInstruction, improveSuccessLine, deckPositionFor, resolveImproveIntent, countSourceUnits, countSpecUnits, contentLossNote, isSevereContentLoss, decideImproveWrite, composeImproveRetryInstruction, improveRefusedLine, normalizeSlideText } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -618,20 +618,118 @@ test("the reported intent is the one actually applied", () => {
   );
 });
 
-test("content units count information-bearing lines and spec points", () => {
+test("content units count the text boxes on BOTH sides, the way pptxBuilder emits them", () => {
   assert.equal(countSourceUnits("Judul\nPoin satu\nPoin dua\n\nPoin tiga"), 4);
   assert.equal(countSourceUnits(""), 0);
-  assert.equal(countSpecUnits({ type: "bullets", headline: "H", bullets: ["a", "b", "c"] }), 3);
-  assert.equal(countSpecUnits({ type: "cards", headline: "H", cards: [{ title: "a" }, { title: "b" }] }), 2);
+  // bullets + headline + footer line
+  assert.equal(countSpecUnits({ type: "bullets", headline: "H", bullets: ["a", "b", "c"] }), 5);
+  // each card emits a title box AND a desc box
+  assert.equal(countSpecUnits({
+    type: "cards", headline: "H",
+    cards: [{ title: "a", desc: "d" }, { title: "b", desc: "e" }]
+  }), 6);
+  assert.equal(countSpecUnits({ type: "cards", headline: "H", cards: [{ title: "a" }, { title: "b" }] }), 4);
   assert.equal(countSpecUnits({
     type: "columns", headline: "H",
     columns: [{ title: "A", points: ["1", "2"] }, { title: "B", points: ["3"] }]
-  }), 3);
+  }), 7);
   // A column with no points still carries its title.
-  assert.equal(countSpecUnits({ type: "columns", headline: "H", columns: [{ title: "A" }] }), 1);
-  assert.equal(countSpecUnits({ type: "metrics", headline: "H", metrics: [{ value: "9%" }] }), 1);
-  assert.equal(countSpecUnits({ type: "title", headline: "Judul" }), 1);
+  assert.equal(countSpecUnits({ type: "columns", headline: "H", columns: [{ title: "A" }] }), 3);
+  // each metric emits a value box AND a label box
+  assert.equal(countSpecUnits({ type: "metrics", headline: "H", metrics: [{ value: "9%", label: "L" }] }), 4);
+  assert.equal(countSpecUnits({ type: "metrics", headline: "H", metrics: [{ value: "9%" }] }), 3);
+  assert.equal(countSpecUnits({ type: "title", headline: "Judul", subhead: "Sub" }), 3);
   assert.equal(countSpecUnits(null), 0);
+  assert.equal(countSpecUnits({ type: "bullets" }), 0);
+});
+
+test("a FAITHFUL rewrite of a Tantular-built cards slide is not severe", () => {
+  // Exactly what the extractor reads back from a 4-card built slide:
+  // headline + subhead + 4 titles + 4 descs + footer.
+  const extracted = [
+    "Empat Pilar", "Ringkasan program",
+    "Pilar Satu", "Penjelasan pilar satu",
+    "Pilar Dua", "Penjelasan pilar dua",
+    "Pilar Tiga", "Penjelasan pilar tiga",
+    "Pilar Empat", "Penjelasan pilar empat",
+    "Tantular Deck Studio · 2/8"
+  ].join("\n");
+  const source = countSourceUnits(extracted);
+  assert.equal(source, 11);
+  const faithful = countSpecUnits({
+    type: "cards", headline: "Empat Pilar", subhead: "Ringkasan program",
+    cards: [
+      { title: "Pilar Satu", desc: "Penjelasan lebih ringkas" },
+      { title: "Pilar Dua", desc: "Penjelasan lebih ringkas" },
+      { title: "Pilar Tiga", desc: "Penjelasan lebih ringkas" },
+      { title: "Pilar Empat", desc: "Penjelasan lebih ringkas" }
+    ]
+  });
+  assert.equal(faithful, 11);
+  assert.equal(isSevereContentLoss(source, faithful), false);
+  assert.equal(decideImproveWrite(source, faithful, 1), "accept");
+  assert.equal(contentLossNote(source, faithful), "");
+  // A genuine gutting of the same slide is still caught.
+  const gutted = countSpecUnits({
+    type: "cards", headline: "Empat Pilar", cards: [{ title: "Pilar Satu" }]
+  });
+  assert.equal(isSevereContentLoss(source, gutted), true);
+  assert.equal(decideImproveWrite(source, gutted, 1), "retry");
+  assert.equal(decideImproveWrite(source, gutted, 2), "refuse");
+});
+
+test("a FAITHFUL rewrite of a Tantular-built metrics slide is not severe", () => {
+  const extracted = [
+    "Kinerja Kuartal",
+    "92%", "Tingkat keberhasilan",
+    "1.4 detik", "Waktu respons",
+    "18 ribu", "Pengguna aktif",
+    "Rp 4,2 M", "Pendapatan",
+    "Tantular Deck Studio · 3/8"
+  ].join("\n");
+  const source = countSourceUnits(extracted);
+  assert.equal(source, 10);
+  const faithful = countSpecUnits({
+    type: "metrics", headline: "Kinerja Kuartal",
+    metrics: [
+      { value: "92%", label: "Keberhasilan" },
+      { value: "1.4 detik", label: "Respons" },
+      { value: "18 ribu", label: "Pengguna aktif" },
+      { value: "Rp 4,2 M", label: "Pendapatan" }
+    ]
+  });
+  assert.equal(faithful, 10);
+  assert.equal(isSevereContentLoss(source, faithful), false);
+  assert.equal(decideImproveWrite(source, faithful, 1), "accept");
+  // Dropping three of four metrics is severe.
+  const gutted = countSpecUnits({
+    type: "metrics", headline: "Kinerja Kuartal", metrics: [{ value: "92%", label: "Keberhasilan" }]
+  });
+  assert.equal(isSevereContentLoss(source, gutted), true);
+});
+
+test("a FAITHFUL rewrite of a bullets slide is not severe, the live 7 to 1 gutting is", () => {
+  const extracted = ["Tujuh Langkah", "Satu", "Dua", "Tiga", "Empat", "Lima", "Enam", "Tujuh",
+    "Tantular Deck Studio · 2/8"].join("\n");
+  const source = countSourceUnits(extracted);
+  assert.equal(source, 9);
+  const faithful = countSpecUnits({
+    type: "bullets", headline: "Tujuh Langkah",
+    bullets: ["Satu", "Dua", "Tiga", "Empat", "Lima", "Enam", "Tujuh"]
+  });
+  assert.equal(decideImproveWrite(source, faithful, 1), "accept");
+  const gutted = countSpecUnits({ type: "bullets", headline: "Tujuh Langkah", bullets: ["Satu"] });
+  assert.equal(decideImproveWrite(source, gutted, 1), "retry");
+  assert.equal(decideImproveWrite(source, gutted, 2), "refuse");
+});
+
+test("carriage returns from the in-host read do not collapse a slide to one line", () => {
+  assert.equal(normalizeSlideText("Judul\rSatu\rDua"), "Judul\nSatu\nDua");
+  assert.equal(normalizeSlideText("Judul\r\nSatu"), "Judul\nSatu");
+  assert.equal(normalizeSlideText(null), "");
+  // Without normalization this counted 1 and fell under the 3-unit floor, so a
+  // real gutting was neither warned about nor refused.
+  assert.equal(countSourceUnits("Judul\rSatu\rDua\rTiga\rEmpat\rLima"), 6);
 });
 
 test("content loss is reported when severe and stays quiet when modest", () => {
@@ -672,4 +770,73 @@ test("a columns slide with only one column is rejected with a visible reason", (
     type: "columns", headline: "Banding",
     columns: [{ title: "Sebelum", points: ["a"] }, { title: "Sesudah", points: ["b"] }]
   }).actions.length, 1);
+});
+
+// --- Write decision: retry once, then refuse ------------------------------
+// A pure stand-in for the improve_slide branch: it drives decideImproveWrite
+// exactly as executePptActions does, so the four live scenarios can be asserted
+// without any Office or model mocks.
+function runImproveDecision(sourceUnits, attempts) {
+  let kept = attempts[0];
+  if (decideImproveWrite(sourceUnits, kept, 1) === "accept") {
+    return { wrote: true, retried: false, kept };
+  }
+  kept = attempts.length > 1 ? attempts[1] : kept;
+  if (decideImproveWrite(sourceUnits, kept, 2) === "refuse") {
+    return { wrote: false, retried: true, kept };
+  }
+  return { wrote: true, retried: true, kept };
+}
+
+test("an acceptable first result is written without spending a second model call", () => {
+  assert.equal(decideImproveWrite(7, 5, 1), "accept");
+  assert.deepEqual(runImproveDecision(7, [5]), { wrote: true, retried: false, kept: 5 });
+  // Nothing to retry when the source is too small to judge either.
+  assert.equal(decideImproveWrite(2, 1, 1), "accept");
+});
+
+test("a severe first result is retried once and the acceptable retry is written", () => {
+  // The live defect: 7 poin -> 1 poin.
+  assert.equal(decideImproveWrite(7, 1, 1), "retry");
+  assert.equal(decideImproveWrite(7, 6, 2), "accept");
+  assert.deepEqual(runImproveDecision(7, [1, 6]), { wrote: true, retried: true, kept: 6 });
+  assert.match(
+    improveSuccessLine(2, "supaya lebih ringkas", "model-grounded", "", true),
+    /perlu percobaan kedua/
+  );
+});
+
+test("severe twice writes NOTHING and says so honestly", () => {
+  assert.equal(decideImproveWrite(7, 1, 2), "refuse");
+  assert.deepEqual(runImproveDecision(7, [1, 2]), { wrote: false, retried: true, kept: 2 });
+  const line = improveRefusedLine(2, 7, 2);
+  assert.match(line, /TIDAK diubah/);
+  assert.match(line, /tidak ada perubahan yang ditulis ke deck/);
+  assert.match(line, /7 poin → 2 poin/);
+  assert.ok(!line.startsWith("✅"));
+});
+
+test("the retry decision uses the SAME severity threshold as the reported note", () => {
+  // Boundary: exactly half is kept -> not severe, no retry, no note.
+  assert.equal(isSevereContentLoss(6, 3), false);
+  assert.equal(decideImproveWrite(6, 3, 1), "accept");
+  assert.equal(contentLossNote(6, 3), "");
+  // One below half -> severe on both.
+  assert.equal(isSevereContentLoss(6, 2), true);
+  assert.equal(decideImproveWrite(6, 2, 1), "retry");
+  assert.notEqual(contentLossNote(6, 2), "");
+  // Below the minimum source size nothing is ever severe.
+  assert.equal(isSevereContentLoss(2, 0), false);
+  assert.equal(decideImproveWrite(2, 0, 2), "accept");
+  assert.equal(isSevereContentLoss(3, 1), true);
+});
+
+test("the retry instruction is blunt, numeric, and keeps the original intent", () => {
+  const base = composeImproveInstruction("Pakai warna #112233.", "buat lebih ringkas");
+  const retry = composeImproveRetryInstruction(base, 7);
+  assert.match(retry, /minimal 7 poin/);
+  assert.match(retry, /Jangan menghapus poin/);
+  assert.ok(retry.includes(base));
+  assert.ok(retry.indexOf("PERCOBAAN KEDUA") < retry.indexOf("buat lebih ringkas"));
+  assert.match(composeImproveRetryInstruction("", 0), /minimal 1 poin/);
 });
