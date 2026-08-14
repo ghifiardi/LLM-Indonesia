@@ -90,7 +90,15 @@ Expected: FAIL — `Cannot find module '../src/chat/pptTools.js'`
 
 - [ ] **Step 3: Create pptTools.js with the moved functions**
 
-Create `src/chat/pptTools.js`. Copy both functions verbatim from `src/taskpane.js:1266-1289` and export them:
+Create `src/chat/pptTools.js`. Move both functions from `src/taskpane.js:1266-1289` and export them.
+
+**One deliberate change from the original, not a verbatim copy.** The original lookahead ends
+`|\s*$`. With the `m` flag, `$` matches before *any* newline, and `\s*` can match empty — so the
+lazy `([\s\S]*?)` stops at the end of the first line and every multi-line slide is silently
+truncated to its first line. `activeDeckSlideTextFallback` in `taskpane.js` relies on this
+function for a slide's FULL text, so the bug quietly fed truncated source into slide improvement.
+Use `(?![\s\S])` — the standard "true end of string, unaffected by `m`" idiom — instead. The
+multi-line test below is what pins this.
 
 ```js
 // Tantular PowerPoint chat tools — deck reading, action validation, execution.
@@ -108,7 +116,7 @@ export function extractRequestedSlideIndex(text) {
 
 export function extractPptxSlides(text) {
   const value = String(text || "");
-  const re = /^\[Slide\s+(\d+)(?:\s+\|\s+id\s+([^\]]+))?\]\s*\n([\s\S]*?)(?=^\[Slide\s+\d+(?:\s+\|\s+id\s+[^\]]+)?\]\s*\n|\s*$)/gm;
+  const re = /^\[Slide\s+(\d+)(?:\s+\|\s+id\s+([^\]]+))?\]\s*\n([\s\S]*?)(?=^\[Slide\s+\d+(?:\s+\|\s+id\s+[^\]]+)?\]\s*\n|(?![\s\S]))/gm;
   const slides = [];
   let match;
   while ((match = re.exec(value))) {
