@@ -42,8 +42,19 @@ Jalankan berurutan; catat hasil per mesin. Kolom "API minimum" menunjukkan requi
 | 8 | Document Studio → "Buat di Word" | `insertFileFromBase64` | Pesan error jelas + gunakan "Download .docx" |
 | 9 | PowerPoint: Deck Studio → "Buat Deck (sisip ke presentasi)" | PowerPointApi 1.2 (`insertSlidesFromBase64`) | Otomatis mengunduh file .pptx |
 | 10 | Excel: Sheet Studio → buat workbook | ExcelApi ~1.4 (`getUsedRangeOrNullObject`, `freezePanes`) | Verifikasi manual; bila error, catat pesan |
+| 11 | PowerPoint Chat: tanya deck ("Apa isi deck ini?") → dapat jawaban | Companion extractor **atau** PowerPointApi 1.4 (`Shape.textFrame`) | Bila keduanya gagal: pesan yang menyebut perintah `npm run doc-server` |
+| 12 | PowerPoint Chat: tambah slide (setelah konfirmasi) | PowerPointApi 1.2 (`insertSlidesFromBase64`) | ❌ dengan alasan; deck tidak berubah |
+| 13 | PowerPoint Chat: perbaiki/ganti/hapus slide (setelah konfirmasi) | PowerPointApi **1.3** (`Slide.delete`) | ❌ "Host PowerPoint ini belum mendukung penghapusan slide via API"; deck tidak berubah |
 
-Kelulusan minimum untuk workshop: #1–#4 wajib; #5–#10 boleh memakai fallback (catat mana yang fallback).
+Kelulusan minimum untuk workshop: #1–#4 wajib; #5–#13 boleh memakai fallback (catat mana yang fallback).
+
+### 3a. Catatan khusus PowerPoint Chat (fitur baru, 2026-08-14)
+
+- **Membaca deck.** Di Mac sudah **diukur**: jalur PowerPointApi (`Shape.textFrame`, butuh 1.4) **tidak jalan**, jadi semua pembacaan lewat Companion extractor (port 8787). Artinya di Mac, **Companion wajib hidup** agar chat bisa membaca deck. Di Windows jalur in-host kemungkinan besar jalan (WebView2 + API lebih baru) sehingga chat bisa membaca tanpa Companion — **belum diverifikasi**, mohon dicatat hasilnya saat uji #11.
+- **Menulis ke deck.** Semua perubahan (perbaiki/ganti/tambah/hapus) hanya **usulan**: Tantular menampilkan daftar slide yang akan berubah beserta peringatan "Tidak ada undo", dan tidak menyentuh deck sampai pengguna menekan **Terapkan**. Tidak ada jalur lain yang bisa mengubah deck.
+- **Batas API perpetual.** Mengganti slide dikerjakan sebagai sisip-lalu-hapus, sehingga butuh `Slide.delete` (**1.3**) — lebih tinggi dari Deck Studio yang hanya butuh 1.2. Pada host yang beku di bawah 1.3, uji #11 dan #12 tetap lulus tetapi #13 gagal dengan pesan jelas dan **deck tidak rusak**.
+- **Office 2019:** chat memakai ES modules seperti sisa pane, jadi tidak akan jalan sama sekali di webview IE11 (lihat §4).
+- **Status verifikasi:** diuji langsung di **Mac + Microsoft 365** saja. **Windows dan semua SKU perpetual (2021/2024) belum diuji untuk chat** — jalankan #11–#13 sekali per SKU dan laporkan.
 
 ## 4. Risiko khusus Office 2019 Windows (webview lama)
 
