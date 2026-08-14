@@ -285,6 +285,27 @@ test("resolveDeleteTarget rejects an index outside the live deck", () => {
   assert.equal(result.ok, false);
 });
 
+test("resolveDeleteTarget refuses an ambiguous fuzzy id match rather than guessing which slide to delete", () => {
+  const result = resolveDeleteTarget(["257#a", "257#b"], { slideIndex: 1, id: "257" });
+  assert.equal(result.ok, false);
+});
+
+test("resolveDeleteTarget still resolves a fuzzy id match when only one live slide qualifies", () => {
+  const result = resolveDeleteTarget(["257#a", "258#b"], { slideIndex: 1, id: "257" });
+  assert.equal(result.ok, true);
+  assert.equal(result.id, "257#a");
+});
+
+test("resolveDeleteTarget refuses slideIndex 0 on the index-only path instead of deleting an off-by-one slide", () => {
+  const result = resolveDeleteTarget(["257", "258"], { slideIndex: 0, id: "" });
+  assert.equal(result.ok, false);
+});
+
+test("resolveDeleteTarget refuses a non-integer slideIndex on the index-only path instead of rounding onto a live slide", () => {
+  const result = resolveDeleteTarget(["257", "258"], { slideIndex: 1.5, id: "" });
+  assert.equal(result.ok, false);
+});
+
 test("deckContextToPromptText states slide count and the global truncation notice", () => {
   const text = deckContextToPromptText({
     source: "extractor",
