@@ -364,8 +364,13 @@ export async function getDeckContext({ force = false } = {}) {
   let slides = await readDeckViaHost();
   let source = "host";
   if (!slides?.length) {
-    slides = await readDeckViaExtractor();
-    source = "extractor";
+    try {
+      slides = await readDeckViaExtractor();
+      source = "extractor";
+    } catch (error) {
+      console.warn("[TantularChat/PPT] extractor deck read failed", error);
+      slides = [];
+    }
   }
   if (!slides?.length) {
     throw new Error(
