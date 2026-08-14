@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES } from "../src/chat/pptTools.js";
+import { extractPptxSlides, extractRequestedSlideIndex, sanitizePptActions, TYPE_RULES, orderPptActions } from "../src/chat/pptTools.js";
 import { SLIDE_TYPES } from "../src/deck/deckPlanner.js";
 
 test("extractRequestedSlideIndex finds slide numbers in Indonesian and English", () => {
@@ -184,4 +184,73 @@ test("TYPE_RULES stays in sync with SLIDE_TYPES", () => {
   assert.deepEqual(ruleKeys, slideTypes,
     `TYPE_RULES keys and SLIDE_TYPES have drifted: TYPE_RULES has ${JSON.stringify(ruleKeys)}, ` +
     `SLIDE_TYPES has ${JSON.stringify(slideTypes)}`);
+});
+
+const slideFor = (name) => ({ type: "bullets", headline: name, bullets: ["x"] });
+
+test("replaces and deletes run descending by slideIndex", () => {
+  const ordered = orderPptActions([
+    { op: "replace_slide", slideIndex: 2, slide: slideFor("A") },
+    { op: "delete_slide", slideIndex: 9 },
+    { op: "improve_slide", slideIndex: 5 }
+  ]);
+  assert.deepEqual(ordered.map((a) => a.slideIndex), [9, 5, 2]);
+});
+
+test("two same-anchor inserts land in model order in the final deck", () => {
+  const ordered = orderPptActions([
+    { op: "add_slide", afterIndex: 5, slide: slideFor("A") },
+    { op: "add_slide", afterIndex: 5, slide: slideFor("B") }
+  ]);
+  // Each insert lands immediately after slide 5, so executing B then A
+  // produces the deck order 5, A, B — which is the model's intent.
+  assert.deepEqual(ordered.map((a) => a.slide.headline), ["B", "A"]);
+});
+
+test("three same-anchor inserts land in model order in the final deck", () => {
+  const ordered = orderPptActions([
+    { op: "add_slide", afterIndex: 3, slide: slideFor("A") },
+    { op: "add_slide", afterIndex: 3, slide: slideFor("B") },
+    { op: "add_slide", afterIndex: 3, slide: slideFor("C") }
+  ]);
+  assert.deepEqual(ordered.map((a) => a.slide.headline), ["C", "B", "A"]);
+});
+
+test("an insert anchored on a replaced slide runs before that replace", () => {
+  const ordered = orderPptActions([
+    { op: "replace_slide", slideIndex: 5, slide: slideFor("baru") },
+    { op: "add_slide", afterIndex: 5, slide: slideFor("tambahan") }
+  ]);
+  assert.deepEqual(ordered.map((a) => a.op), ["add_slide", "replace_slide"]);
+});
+
+test("at equal index the tie-break is add, then replace, then delete", () => {
+  const ordered = orderPptActions([
+    { op: "delete_slide", slideIndex: 4 },
+    { op: "replace_slide", slideIndex: 4, slide: slideFor("R") },
+    { op: "add_slide", afterIndex: 4, slide: slideFor("A") }
+  ]);
+  assert.deepEqual(ordered.map((a) => a.op), ["add_slide", "replace_slide", "delete_slide"]);
+});
+
+test("a mixed list produces one deterministic sequence", () => {
+  const ordered = orderPptActions([
+    { op: "improve_slide", slideIndex: 2 },
+    { op: "add_slide", afterIndex: 7, slide: slideFor("A") },
+    { op: "delete_slide", slideIndex: 4 },
+    { op: "add_slide", afterIndex: 7, slide: slideFor("B") }
+  ]);
+  assert.deepEqual(
+    ordered.map((a) => `${a.op}:${a.slideIndex ?? a.afterIndex}:${a.slide?.headline ?? ""}`),
+    ["add_slide:7:B", "add_slide:7:A", "delete_slide:4:", "improve_slide:2:"]
+  );
+});
+
+test("orderPptActions does not mutate its input", () => {
+  const input = [
+    { op: "improve_slide", slideIndex: 1 },
+    { op: "improve_slide", slideIndex: 9 }
+  ];
+  orderPptActions(input);
+  assert.deepEqual(input.map((a) => a.slideIndex), [1, 9]);
 });

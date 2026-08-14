@@ -185,3 +185,30 @@ function sanitizeSlide(raw) {
   }
   return { ok: true, slide };
 }
+
+// Execution order is load-bearing, for two reasons:
+//  1. Mutating slide N shifts the position of everything after it, so the
+//     highest index goes first.
+//  2. replaceSlideInActivePresentation inserts after the original and THEN
+//     deletes it (officeClient.js:603/645). An add_slide anchored on a slide
+//     being replaced must therefore run BEFORE the replace, while its anchor
+//     id still exists.
+const OP_RANK = { add_slide: 0, replace_slide: 1, improve_slide: 1, delete_slide: 2 };
+
+export function orderPptActions(actions) {
+  const list = Array.isArray(actions) ? actions.slice() : [];
+  return list
+    .map((action, position) => ({ action, position }))
+    .sort((a, b) => {
+      const aIndex = a.action.op === "add_slide" ? a.action.afterIndex : a.action.slideIndex;
+      const bIndex = b.action.op === "add_slide" ? b.action.afterIndex : b.action.slideIndex;
+      if (aIndex !== bIndex) return bIndex - aIndex;
+      const rank = OP_RANK[a.action.op] - OP_RANK[b.action.op];
+      if (rank !== 0) return rank;
+      // Same anchor, same op: reverse model order. Every insert lands
+      // immediately after the anchor, so the last one executed ends up first.
+      if (a.action.op === "add_slide") return b.position - a.position;
+      return a.position - b.position;
+    })
+    .map((entry) => entry.action);
+}
