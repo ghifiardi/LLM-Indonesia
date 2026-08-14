@@ -129,7 +129,7 @@ silently blanks a slide:
 | Field | Shape | Used by |
 |---|---|---|
 | `type` | one of `SLIDE_TYPES` | all |
-| `headline` | string | all except `quote` (optional there) |
+| `headline` | string | all; on `quote` it is the fallback when `quote` is absent |
 | `subhead` | string | `title`, and as the attribution on `quote` |
 | `quote` | string | `quote` |
 | `bullets` | `string[]` | `bullets`, `agenda`, `visualization` |
@@ -139,11 +139,24 @@ silently blanks a slide:
 | `data` | `[{ label, value }]` | `visualization` |
 | `chartType` | `"bar" \| "line" \| "heatmap"` | normalized by `deckPlanner`; `pptxBuilder` ignores it |
 
-The sanitizer validates **per type**: a `metrics` slide must carry a non-empty `metrics` array,
-a `visualization` slide a non-empty `data` array, `cards` a non-empty `cards` array, `columns` a
-non-empty `columns` array. A slide whose type-required field is missing or malformed is rejected
-with a reason rather than passed through to render as an empty frame. Nested objects are
-validated field by field; entries missing their required key are dropped.
+The sanitizer validates **per type**. Every slide needs a `type` from `SLIDE_TYPES`, plus:
+
+| Type | Required |
+|---|---|
+| `quote` | `quote` or `headline` (at least one non-empty) |
+| `bullets`, `agenda` | `headline` and a non-empty `bullets` array |
+| `cards` | `headline` and a non-empty `cards` array |
+| `columns` | `headline` and a non-empty `columns` array |
+| `metrics` | `headline` and a non-empty `metrics` array |
+| `visualization` | `headline` and a non-empty `data` array |
+| `title`, `closing` | `headline` |
+
+A slide whose type-required field is missing or malformed is rejected with a reason rather than
+passed through to render as an empty frame. This is intentional for `bullets` and `agenda` too:
+`pptxBuilder` renders a headline-only bullets layout without crashing, but a bullet slide with no
+bullets is a defect the user should see named, not a blank slide that looks like the add-in broke.
+Nested objects are validated field by field; entries missing their required key are dropped
+(a `cards` entry without `title`, a `metrics` entry without `value`).
 
 `improve_slide` is content-free by design. The executor pulls that slide's text from the
 snapshot and calls `improveExistingSlide({ slideText, tone, instruction, signal })` — the tuned
@@ -162,8 +175,8 @@ and skips the second model call.
   paling depan belum didukung. Sisipkan setelah slide 1, lalu geser di panel thumbnail."
   The probe step below measures where a no-anchor insert lands; enabling `0` is a follow-up,
   not part of this spec.
-- `replace_slide` and `add_slide` must carry a `slide` with a valid `type` and a non-empty
-  `headline`. Unknown slide fields are stripped so `pptxBuilder` only sees shapes it handles.
+- `replace_slide` and `add_slide` must carry a `slide` that passes the per-type table above.
+  Unknown slide fields are stripped so `pptxBuilder` only sees shapes it handles.
 - Maximum 8 actions per turn. Extras become rejections.
 - Everything rejected is returned in `rejected[]` with a reason and rendered to the user as
   `⚠️ …`. Nothing is silently dropped.
@@ -261,10 +274,12 @@ New `tests/pptTools.test.mjs`, modelled on `tests/excelTools.test.mjs`. All pure
 
 - **`sanitizePptActions`** — each valid op survives; unknown op rejected with a reason;
   `slideIndex` of `0`, `slideCount + 1`, `"3"`, and `3.5` rejected; **`afterIndex: 0` rejected
-  with the front-insert message**; slide with unknown `type` rejected; slide missing `headline`
-  rejected; unknown slide fields stripped; 9 actions → 8 kept plus 1 rejection.
+  with the front-insert message**; slide with unknown `type` rejected; unknown slide fields
+  stripped; 9 actions → 8 kept plus 1 rejection.
 - **Per-type slide validation** — a `metrics` slide without `metrics` rejected; a `visualization`
-  slide without `data` rejected; `cards` without `cards` and `columns` without `columns` rejected;
+  slide without `data` rejected; `cards` without `cards`, `columns` without `columns`, and
+  `bullets`/`agenda` without `bullets` rejected; a non-quote slide missing `headline` rejected;
+  **a `quote` slide with `quote` but no `headline` accepted**, and one with neither rejected;
   a valid `metrics` slide keeps every `{ value, label }` entry; a valid `visualization` slide keeps
   its `data` and `chartType`; a `cards` entry missing `title` is dropped while its siblings survive.
 - **`orderPptActions`** — replaces and deletes descending; inserts descending by anchor;
