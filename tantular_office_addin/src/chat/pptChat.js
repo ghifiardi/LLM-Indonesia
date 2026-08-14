@@ -107,8 +107,13 @@ export function mountPptChatPane() {
     // They also must not hardcode a slide number: it is arbitrary against the
     // user's real deck, and "slide 2" reads as "two slides" in Indonesian —
     // ambiguity handed straight to a weak local model as its instruction.
+    // Phrase every chip as a QUESTION, never an imperative. "Ringkas isi deck
+    // ini" reads in Indonesian as "condense this deck" — an instruction to edit
+    // — and a model holding slide-editing tools acted on it: one click once
+    // rewrote seven slides. Whether it answers or edits is otherwise a coin
+    // flip. A question has no such second reading.
     const prompts = [
-      "Ringkas isi deck ini",
+      "Apa isi deck ini?",
       "Apa pesan utama deck ini?",
       "Apa yang kurang dari deck ini?"
     ];
