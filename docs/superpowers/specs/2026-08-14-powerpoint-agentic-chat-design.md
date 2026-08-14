@@ -326,7 +326,19 @@ installer (`setup.ps1` / `tantular-workshop.zip`), and Windows PowerPoint genera
 companion running. It stays, marked in code as measured-dead on Mac and unproven on Windows —
 an honest state, not a proven one. Re-measure on a Windows host before treating it as working.
 
-**Probe B — pending.**
+**Probe B — 2026-08-14, Mac PowerPoint: the slide landed FIRST.** `insertSlidesFromBase64`
+with no `targetSlideId` inserts at the beginning of the deck, matching Microsoft's documented
+behavior for the omitted-anchor case.
+
+This is what `afterIndex: 0` needed. Enabling front insertion is now a measured change rather
+than a guess: accept `afterIndex: 0` in `sanitizePptActions` (drop the `=== 0` rejection, widen
+the range to `0..slideCount`), and in `executePptActions` treat `afterIndex: 0` as "call
+`insertDeckIntoActivePresentation` with no `targetSlideId`" instead of resolving an anchor.
+`orderPptActions` needs no change — anchor `0` sorts below every real index, so front inserts
+run last, which is correct.
+
+It remains **rejected in v1** as this spec states. Enabling it is a follow-up with its own
+review, not a silent widening of the shipped contract.
 
 Building the chat before knowing which is guessing.
 
