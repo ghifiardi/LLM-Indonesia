@@ -712,7 +712,7 @@ Skema:
   }
 }`;
 
-export async function improveExistingSlide({ slideText, tone = "", instruction = "" }) {
+export async function improveExistingSlide({ slideText, tone = "", instruction = "", signal }) {
   const source = String(slideText || "").trim();
   if (!source) return { spec: null, source: "empty" };
 
@@ -736,7 +736,8 @@ Teks slide sumber:
       maxTokens: 1200,
       temperature: 0.18,
       task: "deck",
-      jsonMode: true
+      jsonMode: true,
+      signal
     });
   } catch (error) {
     return { spec: improveFallbackSpec(source), source: "fallback", error: error?.message || String(error) };

@@ -542,6 +542,10 @@ export async function replaceSlideInActivePresentation(base64, { slideId = "", s
       (id) => id && !baseline.includes(id)
     );
 
+    // Same delete-and-verify contract as deleteSlidesInActivePresentation():
+    // delete, re-read, and only report success when the ids are actually gone.
+    // Kept inline because it must share this PowerPoint.run context with the
+    // insert above.
     const deleteSlidesByIds = async (ids) => {
       if (!ids.length) return true;
       const snapshot = await readSlideIds();
@@ -717,6 +721,50 @@ export async function replaceSlideInActivePresentation(base64, { slideId = "", s
         return { replaced: false, inserted: true, rolledBack: false, reason: deleteError?.message || String(deleteError) };
       }
     }
+  });
+}
+
+// Standalone slide delete, verified. Mac PowerPoint silently ignores
+// Slide.delete() when the target is the active selection, and the usual
+// workaround (setSelectedSlides) needs PowerPointApi 1.5 which this host
+// lacks — so we re-read afterwards and never report an unverified success.
+export async function deleteSlidesInActivePresentation(ids) {
+  const wanted = (Array.isArray(ids) ? ids : []).map((id) => String(id || "")).filter(Boolean);
+  if (!wanted.length) return { deleted: false, reason: "Tidak ada slide yang ditentukan." };
+  if (!globalThis.PowerPoint?.run) {
+    throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
+  }
+  return PowerPoint.run(async (context) => {
+    const readSlideIds = async () => {
+      const collection = context.presentation.slides;
+      collection.load("items");
+      await context.sync();
+      for (const slide of collection.items || []) slide.load("id");
+      await context.sync();
+      const items = collection.items || [];
+      return { items, ids: items.map((slide) => String(slide.id || "")) };
+    };
+
+    const snapshot = await readSlideIds();
+    const targets = snapshot.items.filter((_, index) => wanted.includes(snapshot.ids[index]));
+    if (targets.length !== wanted.length) {
+      return { deleted: false, reason: "Slide target tidak ditemukan lagi di deck aktif." };
+    }
+    if (targets.some((slide) => typeof slide.delete !== "function")) {
+      return { deleted: false, reason: "Host PowerPoint ini belum mendukung penghapusan slide via API." };
+    }
+    targets.forEach((slide) => slide.delete());
+    await context.sync();
+    const verify = await readSlideIds();
+    const survived = verify.ids.some((id) => wanted.includes(id));
+    if (survived) {
+      return {
+        deleted: false,
+        reason: "Slide tidak terhapus — kemungkinan sedang terpilih di panel thumbnail. " +
+          "Pilih slide lain lalu coba lagi."
+      };
+    }
+    return { deleted: true };
   });
 }
 
