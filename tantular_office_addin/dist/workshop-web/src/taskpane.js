@@ -47,8 +47,9 @@ import { planWorkbook } from "./workbook/workbookPlanner.js";
 import { buildWorkbookXlsxBase64 } from "./workbook/xlsxBuilder.js";
 import { hostUiConfig } from "./hostUi.js";
 import { putContext, shouldAdoptServerContext } from "./workspaceClient.js";
+import { extractPptxSlides, extractRequestedSlideIndex } from "./chat/pptTools.js";
 
-const DECK_STUDIO_BUILD = "0.10.6-table-replace-mode";
+const DECK_STUDIO_BUILD = "0.10.9-deselect-before-delete";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
 
 const state = {
@@ -75,6 +76,7 @@ const els = {
   deckModel: document.querySelector("#deck-model-input"),
   modelCapability: document.querySelector("#model-capability"),
   visionModel: document.querySelector("#vision-model-input"),
+  apiKey: document.querySelector("#api-key-input"),
   installedModel: document.querySelector("#installed-model-select"),
   useModelGeneral: document.querySelector("#use-model-general"),
   useModelDeck: document.querySelector("#use-model-deck"),
@@ -164,7 +166,7 @@ function bootstrap() {
       renderForHost();
       setStatus(`Terhubung ke ${state.host}.`, "ok");
       mountWorkspaceUi();
-      if (state.host === "Word" || state.host === "Excel") {
+      if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
         import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
       }
       // Warm up the Studio model in the background: the first Studio call
@@ -187,7 +189,7 @@ function bootstrap() {
     renderForHost();
     setStatus("Mode pratinjau browser: Office.js belum tersedia.", "");
     mountWorkspaceUi();
-    if (state.host === "Word" || state.host === "Excel") {
+    if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
       import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
     }
   }
@@ -278,6 +280,7 @@ function hydrateSettings() {
   els.model.value = settings.model;
   els.deckModel.value = settings.deckModel;
   els.visionModel.value = settings.visionModel;
+  els.apiKey.value = settings.apiKey;
   renderModelCapability();
   refreshInstalledModels(false);
 }
@@ -351,12 +354,14 @@ function persistVisibleModelSettings(message) {
     endpoint: els.endpoint.value,
     model: els.model.value,
     deckModel: els.deckModel.value,
-    visionModel: els.visionModel.value
+    visionModel: els.visionModel.value,
+    apiKey: els.apiKey.value
   });
   els.endpoint.value = saved.endpoint;
   els.model.value = saved.model;
   els.deckModel.value = saved.deckModel;
   els.visionModel.value = saved.visionModel;
+  els.apiKey.value = saved.apiKey;
   renderModelCapability();
   setModelSelectionStatus(message, "ok");
   return saved;
@@ -1126,6 +1131,13 @@ async function refineSelectedSlide() {
     resetRefineOutput();
     const instruction = refineInstructionBundle();
     const selected = await getSelectedSlideTextContext();
+    const selectedSlideCount = Math.max(
+      new Set(selected.slideIds || []).size,
+      new Set(selected.slideIndexes || []).size
+    );
+    if (selectedSlideCount > 1) {
+      throw new Error("Pilih tepat satu slide di panel thumbnail sebelum menjalankan Improve selected slide.");
+    }
     let slideText = selected.text.trim();
     const knowsSlide = Boolean(selected.slideIds?.length || selected.slideIndexes?.length);
     // A text selection is only a fragment of the slide; improving from a
@@ -1174,7 +1186,14 @@ async function refineSelectedSlide() {
       if (outcome.replaced) {
         setRefineStatus(`Slide terpilih diganti dengan versi improved (posisi sama). Output dijaga source-grounded: tidak menambah angka/fakta baru. (${DECK_STUDIO_BUILD})`, "ok");
       } else {
-        setRefineStatus(`Improved slide disisipkan setelah slide asli, tetapi slide asli tidak bisa dihapus otomatis: ${outcome.reason || "alasan tidak diketahui"}. Hapus slide lama secara manual.`, "error");
+        triggerSpecDownload(base64, state.refineSpec);
+        const deckState = outcome.inserted
+          ? "PowerPoint tidak dapat mengembalikan deck ke kondisi awal; periksa dan hapus slide tambahan jika ada."
+          : "Slide asli tidak diubah.";
+        setRefineStatus(
+          `Penggantian slide dibatalkan. ${deckState} Improved slide diunduh sebagai .pptx. ${outcome.reason || "alasan tidak diketahui"}`,
+          "error"
+        );
       }
     } catch (error) {
       triggerSpecDownload(base64, state.refineSpec);
@@ -1245,30 +1264,6 @@ async function activeDeckSlideTextFallback(selectedContext, instruction = "") {
   return "";
 }
 
-function extractRequestedSlideIndex(text) {
-  const value = String(text || "");
-  const match = value.match(/\b(?:slide|page|halaman|hlm|deck\s*page)\s*#?\s*(\d{1,3})\b/i)
-    || value.match(/#\s*(\d{1,3})\b/);
-  if (!match) return 0;
-  const index = Number(match[1]);
-  return Number.isInteger(index) && index > 0 ? index : 0;
-}
-
-function extractPptxSlides(text) {
-  const value = String(text || "");
-  const re = /^\[Slide\s+(\d+)(?:\s+\|\s+id\s+([^\]]+))?\]\s*\n([\s\S]*?)(?=^\[Slide\s+\d+(?:\s+\|\s+id\s+[^\]]+)?\]\s*\n|\s*$)/gm;
-  const slides = [];
-  let match;
-  while ((match = re.exec(value))) {
-    slides.push({
-      label: `Slide ${match[1]}${match[2] ? ` | id ${match[2]}` : ""}`,
-      index: match[1],
-      id: match[2] || "",
-      text: match[3].trim()
-    });
-  }
-  return slides;
-}
 
 function refineInstructionBundle() {
   return [

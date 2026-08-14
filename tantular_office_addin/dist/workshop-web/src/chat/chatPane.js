@@ -22,6 +22,12 @@ export function mountChatPane({ host }) {
     import("./excelChat.js").then(({ mountExcelChatPane }) => mountExcelChatPane());
     return;
   }
+  if (host === "PowerPoint") {
+    // Agentic deck chat: plan-and-execute over the active presentation instead
+    // of the Word document pipelines.
+    import("./pptChat.js").then(({ mountPptChatPane }) => mountPptChatPane());
+    return;
+  }
   if (host !== "Word") return;
   card.classList.remove("hidden");
 

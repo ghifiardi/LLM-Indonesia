@@ -695,6 +695,9 @@ Aturan kualitas WAJIB:
 - Gunakan chart/visualization HANYA jika teks slide berisi angka eksplisit yang bisa dipakai.
 - Jika tidak ada angka eksplisit, gunakan bullets/cards/columns saja.
 - Pertahankan istilah teknis dan angka asli.
+- JANGAN membuang fakta yang berbeda dari teks slide sumber. "Ringkas" berarti memperpendek kalimat, BUKAN menghapus poin. Kalau sumber punya 6 poin berbeda, hasilnya tetap harus memuat 6 fakta itu (boleh digabung kalau memang membahas hal yang sama).
+- Jangan membuat slide "columns" dengan kurang dari 2 kolom. Kalau isinya hanya satu kelompok poin, pakai type "bullets".
+- Setiap kolom wajib punya "title" yang nyata dan berasal dari sumber. Jangan memakai judul placeholder seperti "Kolom 1", "Kolom 2", atau judul kosong.
 - Jawab HANYA dengan satu objek JSON valid. Tanpa markdown/teks lain.
 
 Skema:
@@ -712,7 +715,7 @@ Skema:
   }
 }`;
 
-export async function improveExistingSlide({ slideText, tone = "", instruction = "" }) {
+export async function improveExistingSlide({ slideText, tone = "", instruction = "", signal }) {
   const source = String(slideText || "").trim();
   if (!source) return { spec: null, source: "empty" };
 
@@ -736,7 +739,8 @@ Teks slide sumber:
       maxTokens: 1200,
       temperature: 0.18,
       task: "deck",
-      jsonMode: true
+      jsonMode: true,
+      signal
     });
   } catch (error) {
     return { spec: improveFallbackSpec(source), source: "fallback", error: error?.message || String(error) };

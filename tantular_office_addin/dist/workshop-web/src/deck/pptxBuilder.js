@@ -11,10 +11,27 @@ const CX = W * PT;
 const CY = H * PT;
 const M = 54;
 
+// Optional spec fields for footer numbering. A one-slide spec built for an
+// EXISTING deck (chat improve/replace/add, Deck Studio refine) is not slide 1 of
+// 1 — it sits at some position inside a bigger deck. `spec.startIndex` (1-based
+// position of the spec's FIRST slide in the real deck) and `spec.deckTotal` (the
+// real deck size) let the caller stamp the truth. Absent, numbering stays
+// exactly as before: 1..slides.length.
+function footerNumbering(spec, count) {
+  const start = Number(spec?.startIndex);
+  const total = Number(spec?.deckTotal);
+  const startIndex = Number.isInteger(start) && start >= 1 ? start : 1;
+  const deckTotal = Number.isInteger(total) && total >= startIndex + count - 1
+    ? total
+    : startIndex + count - 1;
+  return { startIndex, deckTotal };
+}
+
 export function buildDeckPptxBase64(spec, styleId, projectInstructions = "") {
   const style = getStyle(styleId, projectInstructions);
   const slides = Array.isArray(spec?.slides) ? spec.slides : [];
   if (!slides.length) throw new Error("DeckSpec kosong; tidak ada slide untuk dibuat.");
+  const { startIndex, deckTotal } = footerNumbering(spec, slides.length);
 
   const files = new Map();
   files.set("[Content_Types].xml", contentTypes(slides.length));
@@ -30,7 +47,7 @@ export function buildDeckPptxBase64(spec, styleId, projectInstructions = "") {
   files.set("ppt/slideLayouts/_rels/slideLayout1.xml.rels", slideLayoutRels());
 
   slides.forEach((slide, i) => {
-    files.set(`ppt/slides/slide${i + 1}.xml`, slideXml(slide, style, i, slides.length));
+    files.set(`ppt/slides/slide${i + 1}.xml`, slideXml(slide, style, startIndex - 1 + i, deckTotal));
     files.set(`ppt/slides/_rels/slide${i + 1}.xml.rels`, slideRels());
   });
 
