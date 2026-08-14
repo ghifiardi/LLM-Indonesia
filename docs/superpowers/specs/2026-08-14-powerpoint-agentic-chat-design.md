@@ -355,3 +355,80 @@ run a turn with the companion stopped (expect the actionable error).
   decision.
 - Multi-turn tool loops. One planning call per turn, matching the Excel chat.
 - Changes to Deck Studio or Improve Existing Deck behavior.
+
+---
+
+# As shipped — 2026-08-14
+
+Deployed to `https://workshop-web-gamma.vercel.app` (project `gatra/workshop-web`). 29 commits from
+`4eb7d57`, 295 tests. The add-in manifest points at the hosted URL, so every existing install picks
+the code up on next pane load; only `docs/` ships inside the zip and needs re-downloading.
+
+## What live testing changed about this design
+
+Each of these came from running the feature against a real deck, not from review. All nine code
+tasks passed their reviews, and a whole-branch review passed, before any of these surfaced.
+
+**1. ALL writes are confirm-gated, not just deletes.** This spec gated deletion because deletion
+felt uniquely destructive. It isn't. A user clicked a chip reading "Ringkas isi deck ini" — a
+question — and the planner emitted `replace_slide` for slides 1-7, rewriting seven slides of a real
+presentation. Slides 8-9 survived only because of the 8-action cap. Every action was individually
+valid, correctly targeted and honestly reported; the system did exactly what it was designed to do.
+`executePptActions` now plans only and is synchronous with no Office symbol reachable from it;
+`executeConfirmedPptPlan` performs writes and has exactly one caller — the confirm button's click
+handler. Targets are re-resolved against the live deck **before each action**, since each write
+shifts the deck for the ones after it.
+
+**2. `improve_slide` carries per-action intent, with a fallback.** Making improve content-free
+preserved the tuned prompt but silently dropped the user's request: "supaya lebih ringkas" never
+reached `improveExistingSlide`, while the planner's `reply` narrated as though it had. An optional
+`instruction` field was added — and proved inert, because the local 9B never emitted it. Intent now
+falls back to the raw user message, so it flows whether or not the planner cooperates.
+
+**3. Improve retries once, then refuses to write.** The 9B collapses a 7-point slide to 1 point
+regardless of prompt wording. Warning after the fact is useless with no undo, so severe content loss
+triggers one retry with a blunt keep-every-fact instruction, and a second severe result writes
+nothing and says so. The severity measure compares **content units only** on both sides — counting
+chrome (headline/subhead/footer) on both sides of a ratio silently disarmed the gate for the exact
+shape it was built for.
+
+**4. Quick chips must be questions, never imperatives.** "Ringkas isi deck ini" reads in Indonesian
+as "condense this deck" — an instruction to edit. The same click produced a seven-slide rewrite once
+and a polite refusal another time; nothing changed but sampling. Chips are now `Apa isi deck ini?`,
+`Apa pesan utama deck ini?`, `Apa yang kurang dari deck ini?`.
+
+**5. `readDeckViaHost` was kept despite Probe A.** This spec said to delete it on an extractor
+result. Kept instead: the workshop ships a Windows installer, and deleting it would make Windows
+chat depend entirely on the Python companion. Marked in code as measured-dead-on-Mac,
+unproven-on-Windows.
+
+**6. Inserts are verified.** `add_slide` was the only write claiming success without proof. A new
+`insertSlideAfterInActivePresentation` reads live ids before and after inside one `PowerPoint.run`
+and confirms exactly one slide was added **and that it landed immediately after the anchor**.
+
+## Measured vs assumed
+
+| Claim | Status |
+|---|---|
+| In-host deck read (`Shape.textFrame`) fails on Mac | **Measured** — Probe A, `source: "extractor"` |
+| Unanchored `insertSlidesFromBase64` lands first | **Measured** — Probe B |
+| Read, answer, improve, replace, add, confirm gate work | **Measured** — live on Mac + Microsoft 365 |
+| Delete on a thumbnail-selected slide fails honestly | **Assumed** — code + tests only |
+| Stop mid-run writes nothing | **Assumed** — code + test 16 only |
+| Companion-down names `npm run doc-server` | **Assumed** — code only |
+| Windows in-host read works | **Unmeasured** — run Probe A there |
+| Perpetual Office 2021/2024 | **Unmeasured** — writes need PowerPointApi 1.3 (`Slide.delete`) |
+
+## Follow-ups, none blocking
+
+- Enable `afterIndex: 0` (front insert). Probe B measured the behaviour; the three edits are listed
+  in the Probe section above.
+- Give the per-slide intent its own prompt slot. It currently lands inside the block
+  `IMPROVE_SLIDE_SYSTEM` labels style-only ("BUKAN menambah konten baru"), which likely blunts it.
+- `improve_slide` bypasses `sanitizeSlide`, so the one-column rejection does not guard it — its spec
+  comes from `normalizeSlide`, shared with Deck Studio. Defended by prompt + loss gate only.
+- `deckTotal` undercounts when a deck ends in image-only slides (extractor skips them).
+- Test a larger deck model. The 9B authors new slides well (`replace_slide` output is good) and
+  compresses badly (`improve_slide` collapses). That asymmetry points at model capability.
+- No test imports the pane wiring in `pptChat.js`; the confirmation's pane-side enforcement rests on
+  review. The executor seam now accepts injected Office functions, so the same could be done there.
