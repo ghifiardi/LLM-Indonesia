@@ -48,7 +48,7 @@ import { buildWorkbookXlsxBase64 } from "./workbook/xlsxBuilder.js";
 import { hostUiConfig } from "./hostUi.js";
 import { putContext, shouldAdoptServerContext } from "./workspaceClient.js";
 
-const DECK_STUDIO_BUILD = "0.10.6-table-replace-mode";
+const DECK_STUDIO_BUILD = "0.10.9-deselect-before-delete";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
 
 const state = {
@@ -1130,6 +1130,13 @@ async function refineSelectedSlide() {
     resetRefineOutput();
     const instruction = refineInstructionBundle();
     const selected = await getSelectedSlideTextContext();
+    const selectedSlideCount = Math.max(
+      new Set(selected.slideIds || []).size,
+      new Set(selected.slideIndexes || []).size
+    );
+    if (selectedSlideCount > 1) {
+      throw new Error("Pilih tepat satu slide di panel thumbnail sebelum menjalankan Improve selected slide.");
+    }
     let slideText = selected.text.trim();
     const knowsSlide = Boolean(selected.slideIds?.length || selected.slideIndexes?.length);
     // A text selection is only a fragment of the slide; improving from a
@@ -1178,7 +1185,14 @@ async function refineSelectedSlide() {
       if (outcome.replaced) {
         setRefineStatus(`Slide terpilih diganti dengan versi improved (posisi sama). Output dijaga source-grounded: tidak menambah angka/fakta baru. (${DECK_STUDIO_BUILD})`, "ok");
       } else {
-        setRefineStatus(`Improved slide disisipkan setelah slide asli, tetapi slide asli tidak bisa dihapus otomatis: ${outcome.reason || "alasan tidak diketahui"}. Hapus slide lama secara manual.`, "error");
+        triggerSpecDownload(base64, state.refineSpec);
+        const deckState = outcome.inserted
+          ? "PowerPoint tidak dapat mengembalikan deck ke kondisi awal; periksa dan hapus slide tambahan jika ada."
+          : "Slide asli tidak diubah.";
+        setRefineStatus(
+          `Penggantian slide dibatalkan. ${deckState} Improved slide diunduh sebagai .pptx. ${outcome.reason || "alasan tidak diketahui"}`,
+          "error"
+        );
       }
     } catch (error) {
       triggerSpecDownload(base64, state.refineSpec);

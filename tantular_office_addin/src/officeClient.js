@@ -299,12 +299,18 @@ export async function getSelectedSlideTextContext() {
           try { slide.load("id"); } catch (_) { /* ignore */ }
         }
         await context.sync();
-        const idToIndex = new Map((allSlides.items || [])
-          .map((slide, index) => [String(slide.id || ""), index + 1])
-          .filter(([id]) => id));
         for (const id of slideIds) {
-          const index = idToIndex.get(id);
-          if (index) slideIndexes.push(index);
+          const all = allSlides.items || [];
+          // Prefer the exact live PowerPoint ID. Only use the cross-API
+          // component matcher when it identifies exactly one slide.
+          let index = all.findIndex((slide) => String(slide.id || "") === String(id || ""));
+          if (index < 0) {
+            const loose = all
+              .map((slide, candidateIndex) => sameSlideId(slide.id, id) ? candidateIndex : -1)
+              .filter((candidateIndex) => candidateIndex >= 0);
+            if (loose.length === 1) index = loose[0];
+          }
+          if (index >= 0) slideIndexes.push(index + 1);
         }
       } catch (_) {
         // Older PowerPoint hosts may not expose presentation.slides. The
@@ -422,11 +428,93 @@ export async function insertDeckIntoActivePresentation(base64, options = {}) {
   });
 }
 
+// PowerPoint target IDs can appear as "257#", "#creationId", or
+// "257#creationId". The Common API may return only "257". Match either
+// non-empty component so IDs from different PowerPoint API surfaces resolve
+// to the same slide without treating two empty components as equal.
+export function sameSlideId(a, b) {
+  const parts = (value) => {
+    const raw = String(value || "").trim();
+    const hash = raw.indexOf("#");
+    return hash < 0
+      ? { raw, slide: raw, creation: "" }
+      : { raw, slide: raw.slice(0, hash).trim(), creation: raw.slice(hash + 1).trim() };
+  };
+  const left = parts(a);
+  const right = parts(b);
+  if (!left.raw || !right.raw) return false;
+  if (left.raw === right.raw) return true;
+  if (left.slide && right.slide && left.slide === right.slide) return true;
+  return Boolean(left.creation && right.creation && left.creation === right.creation);
+}
+
+// Pure resolver: given the deck's live slide id list (in visual order) and the
+// caller's requested {slideId, slideIndex}, return the deck's OWN id for the
+// target plus its 1-based index. Grounding on the live collection's id — not
+// the raw selected id, which a different API surface may format differently —
+// keeps the insert anchor and the later delete pointed at the same slide.
+export function resolveReplaceTarget(liveIds, { slideId = "", slideIndex = 0 } = {}) {
+  const ids = (Array.isArray(liveIds) ? liveIds : []).map((id) => String(id || ""));
+  if (slideId) {
+    const exact = ids.findIndex((id) => id === String(slideId));
+    if (exact >= 0) return { targetLiveId: ids[exact], targetIndex: exact + 1 };
+    const matches = ids
+      .map((id, index) => sameSlideId(id, slideId) ? index : -1)
+      .filter((index) => index >= 0);
+    if (matches.length === 1) {
+      const byId = matches[0];
+      return { targetLiveId: ids[byId], targetIndex: byId + 1 };
+    }
+    // An explicit ID is stronger evidence than a positional fallback. If it
+    // disappeared while the model was generating, refuse instead of replacing
+    // whichever slide happens to occupy the old index now.
+    return { targetLiveId: "", targetIndex: 0 };
+  }
+  const index = Number(slideIndex) || 0;
+  if (index > 0 && ids[index - 1]) {
+    return { targetLiveId: ids[index - 1], targetIndex: index };
+  }
+  return { targetLiveId: "", targetIndex: 0 };
+}
+
+// Pure chooser: after inserting the improved slide AFTER the original, decide
+// WHICH slide in the post-insert collection is the original to delete. The
+// original keeps its stable ID. Position is used only to prefer among matching
+// candidates, never as an unverified fallback that could delete another slide.
+// Returns the 0-based index into afterIds, or -1 when nothing matches.
+export function pickOriginalIndex(afterIds, { targetLiveId = "", targetIndex = 0 } = {}) {
+  const ids = (Array.isArray(afterIds) ? afterIds : []).map((id) => String(id || ""));
+  if (!ids.length) return -1;
+  // A Slide.id obtained from presentation.slides is unique and stable for that
+  // presentation. Always prefer its exact value. An imported slide can reuse a
+  // numeric or creation-id component from its source presentation; treating a
+  // component match as identity can therefore delete the newly imported slide
+  // instead of the original (the real Mac PowerPoint regression).
+  const exact = ids.findIndex((id) => id === targetLiveId && targetLiveId);
+  if (exact >= 0) return exact;
+  // Cross-format fallback is safe only when exactly one live slide matches.
+  const loose = ids
+    .map((id, index) => sameSlideId(id, targetLiveId) ? index : -1)
+    .filter((index) => index >= 0);
+  if (loose.length === 1) return loose[0];
+  return -1;
+}
+
+// insertSlidesFromBase64 does not accept a bare numeric Slide.id. Microsoft
+// documents targetSlideId as nnn#, #creationId, or nnn#creationId. The live
+// Slide.id is commonly just "257", so add the delimiter in that case.
+export function toInsertTargetSlideId(liveId) {
+  const id = String(liveId || "").trim();
+  if (!id) return "";
+  return id.includes("#") ? id : `${id}#`;
+}
+
 // Replace one slide in the active presentation with the slide(s) from a
 // generated .pptx: insert after the target, then delete the original so the
 // improved version takes the SAME position instead of piling up as extra
-// pages. Falls back gracefully when the host cannot identify or delete the
-// original (delete needs PowerPointApi 1.3).
+// pages. It preflights deletion before insertion and attempts rollback if a
+// post-insert operation fails, so an unsupported host doesn't create a
+// duplicate slide. Insert and delete are both in PowerPointApi 1.2.
 export async function replaceSlideInActivePresentation(base64, { slideId = "", slideIndex = 0, formatting = "UseDestinationTheme" } = {}) {
   if (!globalThis.PowerPoint?.run) {
     throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
@@ -436,31 +524,65 @@ export async function replaceSlideInActivePresentation(base64, { slideId = "", s
       throw new Error("Host PowerPoint ini belum mendukung insertSlidesFromBase64.");
     }
 
-    // Slide ids appear as "257" (common API / insert target) or
-    // "257#creationId" (modern API); compare on the numeric part.
-    const sameSlideId = (a, b) => String(a || "").split("#")[0] === String(b || "").split("#")[0];
-
-    // Resolve the target slide id: prefer the explicit id, else map a 1-based
-    // index through the live slide collection.
-    let targetId = String(slideId || "");
-    let slides = null;
-    try {
-      slides = context.presentation.slides;
-      slides.load("items");
+    const readSlideIds = async () => {
+      const collection = context.presentation.slides;
+      collection.load("items");
       await context.sync();
-      for (const slide of slides.items || []) {
-        try { slide.load("id"); } catch (_) { /* ignore */ }
+      for (const slide of collection.items || []) {
+        slide.load("id");
       }
       await context.sync();
-      if (!targetId && slideIndex > 0) {
-        const byIndex = (slides.items || [])[slideIndex - 1];
-        targetId = String(byIndex?.id || "");
-      }
-    } catch (_) {
-      // Older hosts may not expose presentation.slides; keep whatever id we have.
-    }
+      const items = collection.items || [];
+      return { items, ids: items.map((slide) => String(slide.id || "")) };
+    };
 
-    if (!targetId) {
+    // Within one live presentation Slide.id is unique. Use exact identity
+    // after insertion; component matching is only for crossing API surfaces.
+    const idsAddedSince = (baseline, current) => current.filter(
+      (id) => id && !baseline.includes(id)
+    );
+
+    const deleteSlidesByIds = async (ids) => {
+      if (!ids.length) return true;
+      const snapshot = await readSlideIds();
+      const targets = snapshot.items.filter((_, index) =>
+        ids.includes(snapshot.ids[index])
+      );
+      if (targets.length !== ids.length || targets.some((slide) => typeof slide.delete !== "function")) {
+        return false;
+      }
+      targets.forEach((slide) => slide.delete());
+      await context.sync();
+      const verify = await readSlideIds();
+      return !verify.ids.some((currentId) => ids.includes(currentId));
+    };
+
+    // Mac PowerPoint silently ignores Slide.delete() when the slide being
+    // deleted is the ACTIVE selection — and the user selected exactly the
+    // slide they want improved, so the original is always selected at delete
+    // time. Moving the selection onto another slide (the freshly inserted one)
+    // first lets the delete actually take effect. Best-effort: needs
+    // PowerPointApi 1.5 (setSelectedSlides); if absent we still try the delete.
+    const trySelectSlideIds = async (ids) => {
+      const wanted = (Array.isArray(ids) ? ids : []).filter(Boolean);
+      if (!wanted.length) return false;
+      try {
+        if (typeof context.presentation.setSelectedSlides !== "function") return false;
+        context.presentation.setSelectedSlides(wanted);
+        await context.sync();
+        return true;
+      } catch (_) {
+        // Selection move is best-effort; deletion may still succeed without it.
+        return false;
+      }
+    };
+
+    // 1. Snapshot the deck BEFORE inserting so we know the target's OWN id and
+    // position, and can later tell new slides apart from existing ones.
+    const before = await readSlideIds();
+    const { targetLiveId, targetIndex } = resolveReplaceTarget(before.ids, { slideId, slideIndex });
+
+    if (!targetLiveId) {
       // No safe anchor: refuse rather than dropping the slide at the top of
       // the deck, which reads as corruption to the user.
       throw new Error(
@@ -469,31 +591,131 @@ export async function replaceSlideInActivePresentation(base64, { slideId = "", s
       );
     }
 
-    context.presentation.insertSlidesFromBase64(base64, { formatting, targetSlideId: targetId });
+    const originalBefore = before.items[targetIndex - 1];
+    if (!originalBefore || typeof originalBefore.delete !== "function") {
+      return {
+        replaced: false,
+        inserted: false,
+        reason: "Host PowerPoint ini belum mendukung penghapusan slide via API (butuh PowerPointApi 1.2)."
+      };
+    }
+
+    // 2. Insert the improved slide AFTER the target, using the deck's own id so
+    // the anchor format always matches what this host expects.
+    context.presentation.insertSlidesFromBase64(base64, {
+      formatting,
+      targetSlideId: toInsertTargetSlideId(targetLiveId)
+    });
     await context.sync();
 
-    // Delete the original so the improved slide takes its place. Re-read the
-    // collection AFTER the insert — pre-insert proxies can go stale.
+    // 3. Re-read AFTER the insert (pre-insert proxies go stale) and delete the
+    // original so the improved slide takes its place.
     try {
-      const fresh = context.presentation.slides;
-      fresh.load("items");
-      await context.sync();
-      for (const slide of fresh.items || []) {
-        try { slide.load("id"); } catch (_) { /* ignore */ }
+      const after = await readSlideIds();
+      const insertedIds = idsAddedSince(before.ids, after.ids);
+      if (insertedIds.length !== 1 || after.ids.length !== before.ids.length + 1) {
+        const rolledBack = await deleteSlidesByIds(insertedIds);
+        return {
+          replaced: false,
+          inserted: !rolledBack,
+          rolledBack,
+          reason: `PowerPoint menyisipkan jumlah slide yang tidak terduga (${insertedIds.length}); penggantian dibatalkan.`
+        };
       }
-      await context.sync();
-      const original = (fresh.items || []).find((slide) => sameSlideId(slide.id, targetId));
+      const originalPos = pickOriginalIndex(after.ids, { targetLiveId, targetIndex });
+      const original = originalPos >= 0 ? after.items[originalPos] : null;
       if (!original) {
-        return { replaced: false, reason: "Slide asli tidak ditemukan lagi setelah insert." };
+        const rolledBack = await deleteSlidesByIds(insertedIds);
+        return {
+          replaced: false,
+          inserted: !rolledBack,
+          rolledBack,
+          reason: "Slide asli tidak ditemukan lagi setelah insert."
+        };
       }
       if (typeof original.delete !== "function") {
-        return { replaced: false, reason: "Host PowerPoint ini belum mendukung penghapusan slide via API (butuh PowerPointApi 1.3)." };
+        const rolledBack = await deleteSlidesByIds(insertedIds);
+        return {
+          replaced: false,
+          inserted: !rolledBack,
+          rolledBack,
+          reason: "Host PowerPoint ini belum mendukung penghapusan slide via API (butuh PowerPointApi 1.2)."
+        };
       }
-      original.delete();
-      await context.sync();
-      return { replaced: true };
+      const originalId = String(after.ids[originalPos] || targetLiveId);
+      // Deselect the original before deleting it: on Mac PowerPoint a delete of
+      // the currently-selected slide is silently dropped. Select the inserted
+      // improved slide instead (which is also the nicer post-replace state).
+      await trySelectSlideIds(insertedIds);
+      try {
+        original.delete();
+        await context.sync();
+      } catch (deleteError) {
+        const current = await readSlideIds();
+        const originalStillExists = current.ids.includes(originalId);
+        if (!originalStillExists && current.ids.length === before.ids.length) {
+          return { replaced: true, inserted: true };
+        }
+        const rolledBack = originalStillExists
+          ? await deleteSlidesByIds(insertedIds)
+          : false;
+        return {
+          replaced: false,
+          inserted: !rolledBack,
+          rolledBack,
+          reason: deleteError?.message || String(deleteError)
+        };
+      }
+
+      // 4. Verify the original is actually gone. Some hosts silently ignore a
+      // delete; without this check we would wrongly report an in-place replace
+      // while the deck still shows the old slide plus a new one.
+      const verify = await readSlideIds();
+      const stillPresent = verify.ids.includes(originalId);
+      const expectedCount = verify.ids.length === before.ids.length;
+      if (stillPresent || !expectedCount) {
+        // One more attempt: if the original still exists, it may still have been
+        // the selection on a host that ignored setSelectedSlides. Re-select the
+        // inserted slide and retry the delete once before giving up.
+        if (stillPresent) {
+          const retrySelected = await trySelectSlideIds(insertedIds);
+          if (retrySelected) {
+            const retryOk = await deleteSlidesByIds([originalId]);
+            if (retryOk) {
+              const recheck = await readSlideIds();
+              if (recheck.ids.length === before.ids.length) {
+                return { replaced: true, inserted: true };
+              }
+            }
+          }
+        }
+        const rolledBack = stillPresent
+          ? await deleteSlidesByIds(insertedIds)
+          : false;
+        return {
+          replaced: false,
+          inserted: !rolledBack,
+          rolledBack,
+          reason: "Slide asli masih ada setelah percobaan hapus (host mengabaikan delete via API)."
+        };
+      }
+      return { replaced: true, inserted: true };
     } catch (deleteError) {
-      return { replaced: false, reason: deleteError?.message || String(deleteError) };
+      // If we can still identify the newly inserted slide, remove it so a
+      // failed replacement leaves the user's original deck unchanged.
+      try {
+        const current = await readSlideIds();
+        const insertedIds = idsAddedSince(before.ids, current.ids);
+        const rolledBack = await deleteSlidesByIds(insertedIds);
+        return {
+          replaced: false,
+          inserted: !rolledBack,
+          rolledBack,
+          reason: deleteError?.message || String(deleteError)
+        };
+      } catch (_) {
+        return { replaced: false, inserted: true, rolledBack: false, reason: deleteError?.message || String(deleteError) };
+      }
     }
   });
 }
@@ -780,7 +1002,7 @@ function basicBlockText(block, listIndex) {
 }
 
 // Keep in sync with the tag shown in src/taskpane.html next to the chat title.
-export const TASKPANE_BUILD = "b0811c";
+export const TASKPANE_BUILD = "b0812c";
 
 // Insert a formatted answer. When `afterText` is provided and located, the
 // content is placed immediately after that anchor (end of the queried
