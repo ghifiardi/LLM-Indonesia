@@ -14,6 +14,7 @@ import {
   dismissedIds,
   usedIds
 } from "./workspaceClient.js";
+import { companionOnlyMessage, isCloudSession } from "./companionUrl.js";
 
 const FILL_LABEL_BY_HOST = {
   PowerPoint: "Pakai sebagai brief Deck Studio",
@@ -275,6 +276,17 @@ export function mountWorkspace({ host, sourceTextEl, statusEl, doc = document, o
       setStatus("Gagal mengirim: workspace tidak terjangkau.");
     }
   });
+
+  // Companion-only: /api/workspace exists only in the local companion. In a
+  // cloud session, say so once and never poll — otherwise the user watches a
+  // send button fail against a gateway that has no such route.
+  if (isCloudSession()) {
+    lastOk = false;
+    sendHint = companionOnlyMessage("Kirim ke aplikasi lain (workspace)");
+    updateSendButtonState();
+    renderAll();
+    return { refresh: () => {}, stop: () => {} };
+  }
 
   updateSendButtonState();
   renderAll();

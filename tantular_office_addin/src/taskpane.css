@@ -48,6 +48,28 @@ body {
   box-shadow: 0 8px 18px rgba(166, 53, 29, 0.22);
 }
 
+/* Mode indicator: sits above every card and is never collapsible. Cloud is
+   loud on purpose — it is the state in which document text leaves the machine. */
+.mode-banner {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+  border: 1px solid transparent;
+}
+.mode-banner-local {
+  color: #14532d;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+.mode-banner-cloud {
+  color: #7c2d12;
+  background: #fff7ed;
+  border-color: #fdba74;
+}
+
 h1, h2, p { margin: 0; }
 h1 { font-size: 22px; line-height: 1.1; }
 h2 { font-size: 15px; }

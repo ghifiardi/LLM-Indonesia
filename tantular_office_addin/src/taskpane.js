@@ -7,6 +7,7 @@ import {
   runTantular,
   testLocalModel
 } from "./tantularClient.js";
+import { isCloudSession, isPortalMode, loadMode } from "./companionUrl.js";
 import {
   getSelectionContext,
   getSelectedSlideTextContext,
@@ -71,6 +72,14 @@ const els = {
   subtitle: document.querySelector("#host-subtitle"),
   settingsToggle: document.querySelector("#settings-toggle"),
   settingsBody: document.querySelector("#settings-body"),
+  modeBanner: document.querySelector("#mode-banner"),
+  modeBannerText: document.querySelector("#mode-banner-text"),
+  modeSelect: document.querySelector("#mode-select"),
+  modeHint: document.querySelector("#mode-hint"),
+  modeConfirm: document.querySelector("#mode-confirm"),
+  modeConfirmText: document.querySelector("#mode-confirm-text"),
+  modeConfirmYes: document.querySelector("#mode-confirm-yes"),
+  modeConfirmNo: document.querySelector("#mode-confirm-no"),
   endpoint: document.querySelector("#endpoint-input"),
   model: document.querySelector("#model-input"),
   deckModel: document.querySelector("#deck-model-input"),
@@ -164,6 +173,10 @@ function bootstrap() {
     Office.onReady((info) => {
       state.host = normalizeHostName(info.host);
       renderForHost();
+      // Re-render mode NOW: hydrateSettings() ran before Office.onReady, when
+      // insideOffice() was still false and the pane looked like the portal. The
+      // banner must state the mode this session actually runs in.
+      hydrateSettings();
       setStatus(`Terhubung ke ${state.host}.`, "ok");
       mountWorkspaceUi();
       if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
@@ -230,6 +243,9 @@ function bindStaticEvents() {
   els.saveSettings.addEventListener("click", () => {
     persistVisibleModelSettings("Pengaturan model disimpan dan aktif.");
   });
+  els.modeSelect?.addEventListener("change", onModeSelectChange);
+  els.modeConfirmYes?.addEventListener("click", () => applyMode("cloud"));
+  els.modeConfirmNo?.addEventListener("click", () => { hideModeConfirm(); renderMode(); });
   els.model.addEventListener("input", renderModelCapability);
   els.deckModel.addEventListener("input", renderModelCapability);
   els.useModelGeneral.addEventListener("click", () => useInstalledModel("general"));
@@ -274,8 +290,74 @@ function bindStaticEvents() {
   els.deckProjectInstructions.addEventListener("change", saveProjectInstructions);
 }
 
+// --- Mode Lokal / Mode Cloud ------------------------------------------------
+// The banner is rendered on every mode read so the pane can never show a mode
+// it is not actually running in.
+const CLOUD_BANNER = "☁️ Mode Cloud AKTIF — teks dokumen yang Anda kirim DIPROSES DI SERVER Tantular, bukan di komputer ini.";
+const LOCAL_BANNER = "🔒 Mode Lokal — teks dokumen Anda tidak keluar dari komputer ini.";
+const CLOUD_CONSEQUENCE = "Dengan Mode Cloud, isi dokumen/slide/sheet yang Anda proses DIKIRIM ke server Tantular untuk dijalankan di sana. Ini bukan lagi pemrosesan lokal. Fitur yang butuh Companion (daftar model Ollama, baca file PDF/DOCX/PPTX, Extract from image, kirim antar-aplikasi) tidak tersedia.";
+
+function renderMode() {
+  const mode = loadMode();
+  // The portal (plain browser, no Office.js) has ALWAYS run on the hosted
+  // gateway. The banner must tell that truth too, otherwise it would claim
+  // "local" on the one surface that never was.
+  const portal = isPortalMode();
+  const cloud = portal || mode === "cloud";
+  if (els.modeSelect) {
+    els.modeSelect.disabled = portal;
+    if (portal) els.modeSelect.value = "cloud";
+  }
+  if (els.modeBannerText) els.modeBannerText.textContent = cloud ? CLOUD_BANNER : LOCAL_BANNER;
+  if (els.modeBanner) {
+    els.modeBanner.className = `mode-banner ${cloud ? "mode-banner-cloud" : "mode-banner-local"}`;
+  }
+  if (els.modeSelect && !portal) els.modeSelect.value = mode;
+  if (els.modeHint) {
+    els.modeHint.textContent = cloud
+      ? "Mode Cloud memakai model di server Tantular — tidak perlu instalasi apa pun, tetapi teks dokumen Anda dikirim ke server."
+      : "Mode Lokal memakai model di komputer Anda melalui Tantular Companion. Teks dokumen tidak dikirim ke mana pun.";
+  }
+  return mode;
+}
+
+function hideModeConfirm() {
+  els.modeConfirm?.classList.add("hidden");
+}
+
+function onModeSelectChange() {
+  const wanted = String(els.modeSelect?.value || "local");
+  if (wanted === loadMode()) { hideModeConfirm(); return; }
+  if (wanted === "local") {
+    // Switching back toward privacy needs no ceremony.
+    hideModeConfirm();
+    applyMode("local");
+    return;
+  }
+  // Consequence stated BEFORE the switch takes effect, not after.
+  if (els.modeConfirmText) els.modeConfirmText.textContent = CLOUD_CONSEQUENCE;
+  els.modeConfirm?.classList.remove("hidden");
+}
+
+function applyMode(mode) {
+  // saveSettings persists the mode first and then re-derives the endpoint, so a
+  // stale local-companion or gateway URL heals on the switch.
+  const saved = saveSettings({ mode });
+  els.endpoint.value = saved.endpoint;
+  hideModeConfirm();
+  renderMode();
+  setModelSelectionStatus(
+    mode === "cloud"
+      ? "Mode Cloud aktif. Pemrosesan berjalan di server Tantular."
+      : "Mode Lokal aktif. Pemrosesan kembali berjalan di komputer ini.",
+    mode === "cloud" ? "error" : "ok"
+  );
+  refreshInstalledModels(false);
+}
+
 function hydrateSettings() {
   const settings = loadSettings();
+  renderMode();
   els.endpoint.value = settings.endpoint;
   els.model.value = settings.model;
   els.deckModel.value = settings.deckModel;
@@ -286,6 +368,21 @@ function hydrateSettings() {
 }
 
 async function refreshInstalledModels(showStatus = false) {
+  // Companion-only. Say why the dropdown is empty instead of letting a 404 from
+  // the gateway surface as "Tidak dapat membaca daftar model Ollama (404)".
+  if (isCloudSession()) {
+    els.installedModel.innerHTML = `<option value="">Tidak tersedia di Mode Cloud</option>`;
+    els.installedModel.disabled = true;
+    els.refreshModels.disabled = true;
+    if (showStatus) {
+      setModelSelectionStatus(
+        "Daftar model Ollama hanya tersedia di Mode Lokal dengan Tantular Companion berjalan. Sesi ini memakai Mode Cloud, jadi model ditentukan oleh server.",
+        "error"
+      );
+    }
+    return;
+  }
+  els.installedModel.disabled = false;
   els.refreshModels.disabled = true;
   const previous = els.installedModel.value;
   els.installedModel.innerHTML = `<option value="">Memuat daftar model...</option>`;
@@ -402,6 +499,11 @@ async function saveProjectInstructions() {
   const instructions = els.deckProjectInstructions.value || "";
   localStorage.setItem(PROJECT_INSTRUCTIONS_KEY, instructions);
   setDeckStatus("Instruksi project disimpan.", "ok");
+  // Companion-only sync: /api/workspace/context does not exist on the gateway.
+  if (isCloudSession()) {
+    setDeckStatus("Instruksi project disimpan di perangkat ini. Sinkronisasi antar-aplikasi butuh Tantular Companion (Mode Cloud aktif).", "");
+    return;
+  }
   try {
     const { status, body } = await putContext({ instructions, source_host: state.host });
     if (status < 200 || status >= 300) {

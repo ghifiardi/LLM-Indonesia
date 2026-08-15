@@ -5,9 +5,11 @@
 // available (this is the entire Windows story; that path is unchanged).
 
 import { runTantularVision } from "../tantularClient.js";
-import { companionUrl } from "../companionUrl.js";
+import { assertCompanionAvailable, companionUrl } from "../companionUrl.js";
 
-const OCR_URL = companionUrl("/api/ocr");
+// Lazy: Office.context.host appears only after onReady, and the active mode can
+// change mid-session from Pengaturan.
+const ocrUrl = () => companionUrl("/api/ocr");
 
 // --- Pure, injectable decision/orchestration logic -------------------------
 // Kept dependency-free (no DOM/network) so it is unit-testable in isolation
@@ -111,7 +113,7 @@ Tulis selengkap mungkin dan akurat sesuai isi gambar.`;
 // Raw capability probe — hits the local doc-server once; wrapped in
 // memoizeOcrProbe below so it only ever runs once per session.
 async function rawProbeOcrCapability() {
-  const response = await fetch(OCR_URL, { method: "GET" });
+  const response = await fetch(ocrUrl(), { method: "GET" });
   const payload = await response.json().catch(() => ({}));
   if (response.ok && payload && payload.ok) {
     return { ok: true, engine: payload.engine || "apple-vision" };
@@ -133,7 +135,7 @@ async function runAppleVisionOcr(dataUrl) {
   const blob = await dataUrlToBlob(dataUrl);
   const form = new FormData();
   form.append("file", blob, "slide.png");
-  const response = await fetch(OCR_URL, { method: "POST", body: form });
+  const response = await fetch(ocrUrl(), { method: "POST", body: form });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
     throw new Error((payload && payload.error) || `Apple Vision OCR gagal (${response.status}).`);
@@ -144,6 +146,11 @@ async function runAppleVisionOcr(dataUrl) {
 }
 
 export async function extractSlideFromImage(dataUrl, extraInstruction = "") {
+  // Companion-only. Apple Vision OCR lives in the local doc-server, and the
+  // fallback path is a local multimodal model the hosted gateway does not
+  // serve — so in cloud mode this says so instead of silently uploading the
+  // image and failing further downstream.
+  assertCompanionAvailable("Extract from image (OCR / model vision)");
   const prompt = extraInstruction
     ? `${EXTRACT_PROMPT}\n\nInstruksi tambahan: ${extraInstruction}`
     : EXTRACT_PROMPT;
