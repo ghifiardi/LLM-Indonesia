@@ -20,6 +20,12 @@ execFileSync(process.execPath, [
 ], { stdio: "inherit" });
 
 copy("tools/dev-server.mjs");
+// dev-server.mjs imports ./workspace.mjs. Shipping one without the other makes
+// the packaged dev server die at startup with ERR_MODULE_NOT_FOUND — and since
+// companionUrl() points a published task pane at https://localhost:3000, that
+// dev server is the attendee's only bridge to the local companion, so the model
+// stops answering entirely.
+copy("tools/workspace.mjs");
 copy("tools/install-office-model.sh");
 copy("tools/document-extractor.py");
 copy("models/Modelfile.office-9b");
