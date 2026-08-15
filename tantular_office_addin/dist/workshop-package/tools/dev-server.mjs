@@ -394,8 +394,24 @@ const server = hasCert
 // https://127.0.0.1 (IPv4) resolve. macOS often maps localhost to ::1.
 server.listen(port, () => {
   const scheme = hasCert ? "https" : "http";
-  console.log(`Tantular Office Add-in dev server: ${scheme}://localhost:${port}`);
-  console.log(`Manifest: ${scheme}://localhost:${port}/manifest.xml`);
+  // This file runs in two very different roots. In the repo, `root` holds src/
+  // and manifest.xml and this really is a dev server. In the workshop package it
+  // holds neither: the task pane is served from the hosted URL and the only job
+  // here is proxying /api/* to the local companion. Printing a manifest link
+  // there advertised a 404 and made a working install look broken, so say what
+  // this process is actually doing instead of assuming the repo layout.
+  const servesPane = fs.existsSync(path.join(root, "src", "taskpane.html"));
+  const manifestName = ["manifest.xml", "tantular-workshop-manifest.xml"]
+    .find((name) => fs.existsSync(path.join(root, name)));
+
+  if (servesPane) {
+    console.log(`Tantular Office Add-in dev server: ${scheme}://localhost:${port}`);
+    if (manifestName) console.log(`Manifest: ${scheme}://localhost:${port}/${manifestName}`);
+  } else {
+    console.log(`Tantular Companion bridge aktif: ${scheme}://localhost:${port}`);
+    console.log("Task pane dimuat dari web; proses ini hanya menyambungkan pane ke Companion lokal.");
+    console.log("Biarkan jendela ini terbuka selama memakai Tantular di Office.");
+  }
   if (!hasCert) {
     console.warn("No certs found. Run `npm run cert` because Office add-ins should be served over HTTPS.");
   }
