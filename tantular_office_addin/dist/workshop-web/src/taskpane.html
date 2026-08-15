@@ -37,6 +37,16 @@
       </div>
     </header>
 
+    <!-- Always visible, never inside a collapsed section: in Mode Cloud the
+         user's document text leaves their machine, and that must not be
+         something they have to go looking for. -->
+    <!-- Starts hidden: until Office.onReady resolves the pane cannot tell which
+         mode it runs in, and a mode claim made too early is a claim that can be
+         wrong. renderMode() reveals it once, with the truth. -->
+    <div id="mode-banner" class="mode-banner mode-banner-local hidden" role="status" aria-live="polite">
+      <span id="mode-banner-text">🔒 Mode Lokal — teks dokumen Anda tidak keluar dari komputer ini.</span>
+    </div>
+
     <section class="card chat hidden" id="chat-card" aria-labelledby="chat-title">
       <div class="section-title-row">
         <h2 id="chat-title">💬 Tantular Chat <small class="build-tag" style="font-size:10px;color:#98a2b3;font-weight:400">b0810b</small></h2>
@@ -61,6 +71,21 @@
         <span aria-hidden="true">▾</span>
       </button>
       <div id="settings-body" class="settings-body hidden">
+        <label>
+          Mode pemrosesan
+          <select id="mode-select">
+            <option value="local">Mode Lokal — model di komputer ini (butuh Tantular Companion)</option>
+            <option value="cloud">Mode Cloud — model di server Tantular (tanpa instalasi)</option>
+          </select>
+        </label>
+        <p id="mode-hint" class="hint"></p>
+        <div id="mode-confirm" class="mode-confirm hidden">
+          <p id="mode-confirm-text" class="hint model-warning"></p>
+          <div class="button-row compact-row">
+            <button id="mode-confirm-yes" class="secondary" type="button">Ya, aktifkan Mode Cloud</button>
+            <button id="mode-confirm-no" class="secondary" type="button">Batal, tetap Mode Lokal</button>
+          </div>
+        </div>
         <label>
           Pilih model yang terpasang di Ollama
           <select id="installed-model-select">

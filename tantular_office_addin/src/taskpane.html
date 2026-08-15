@@ -40,7 +40,10 @@
     <!-- Always visible, never inside a collapsed section: in Mode Cloud the
          user's document text leaves their machine, and that must not be
          something they have to go looking for. -->
-    <div id="mode-banner" class="mode-banner mode-banner-local" role="status" aria-live="polite">
+    <!-- Starts hidden: until Office.onReady resolves the pane cannot tell which
+         mode it runs in, and a mode claim made too early is a claim that can be
+         wrong. renderMode() reveals it once, with the truth. -->
+    <div id="mode-banner" class="mode-banner mode-banner-local hidden" role="status" aria-live="polite">
       <span id="mode-banner-text">🔒 Mode Lokal — teks dokumen Anda tidak keluar dari komputer ini.</span>
     </div>
 

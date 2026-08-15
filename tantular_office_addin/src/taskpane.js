@@ -7,7 +7,7 @@ import {
   runTantular,
   testLocalModel
 } from "./tantularClient.js";
-import { isCloudSession, isPortalMode, loadMode } from "./companionUrl.js";
+import { isCloudSession, isPortalMode, loadMode, modeIsKnown } from "./companionUrl.js";
 import {
   getSelectionContext,
   getSelectedSlideTextContext,
@@ -172,11 +172,14 @@ function bootstrap() {
   if (globalThis.Office?.onReady) {
     Office.onReady((info) => {
       state.host = normalizeHostName(info.host);
-      renderForHost();
-      // Re-render mode NOW: hydrateSettings() ran before Office.onReady, when
-      // insideOffice() was still false and the pane looked like the portal. The
-      // banner must state the mode this session actually runs in.
+      // Mode FIRST, before anything that could throw. hydrateSettings() ran
+      // before Office.onReady, when insideOffice() was still false and the mode
+      // was not yet knowable, so the banner was suppressed; this is the render
+      // that states the mode this session actually runs in. Doing it ahead of
+      // renderForHost() means a failure there can never strand the pane showing
+      // a mode claim that does not match how it routes.
       hydrateSettings();
+      renderForHost();
       setStatus(`Terhubung ke ${state.host}.`, "ok");
       mountWorkspaceUi();
       if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
@@ -298,6 +301,17 @@ const LOCAL_BANNER = "🔒 Mode Lokal — teks dokumen Anda tidak keluar dari ko
 const CLOUD_CONSEQUENCE = "Dengan Mode Cloud, isi dokumen/slide/sheet yang Anda proses DIKIRIM ke server Tantular untuk dijalankan di sana. Ini bukan lagi pemrosesan lokal. Fitur yang butuh Companion (daftar model Ollama, baca file PDF/DOCX/PPTX, Extract from image, kirim antar-aplikasi) tidak tersedia.";
 
 function renderMode() {
+  // Before Office.onReady the mode is not yet knowable (see modeIsKnown): stay
+  // silent rather than claim a mode. The banner is hidden and the select is
+  // disabled with no value forced onto it, so nothing is asserted until the
+  // truth is in. Once known, renderMode() paints it exactly once.
+  const known = modeIsKnown();
+  if (els.modeBanner) els.modeBanner.classList.toggle("hidden", !known);
+  if (!known) {
+    if (els.modeSelect) els.modeSelect.disabled = true;
+    if (els.modeHint) els.modeHint.textContent = "";
+    return null;
+  }
   const mode = loadMode();
   // The portal (plain browser, no Office.js) has ALWAYS run on the hosted
   // gateway. The banner must tell that truth too, otherwise it would claim

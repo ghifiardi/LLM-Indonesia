@@ -36,6 +36,19 @@ export function isPortalMode() {
   return !local && !insideOffice();
 }
 
+// Whether the mode this session runs in is settled yet.
+//
+// Between the pane's first paint and Office.onReady, Office.js is present but
+// Office.context.host is not, so insideOffice() is false and every mode read
+// answers as if this were the portal — i.e. "cloud". Painting a mode claim then
+// makes the privacy banner shout "Mode Cloud AKTIF" on every launch of every
+// local install, which is exactly how a user learns to ignore it. The UI must
+// stay silent about the mode until this returns true.
+export function modeIsKnown() {
+  if (insideOffice()) return true;            // onReady has resolved
+  return !globalThis.Office?.onReady;         // no Office.js at all → dev/portal, settled
+}
+
 function safeLocalStorage() {
   try {
     return globalThis.localStorage || null;
@@ -61,6 +74,25 @@ export function loadMode() {
     if (parsed?.mode !== "cloud") return DEFAULT_MODE;
     // Outside Office nothing is routed to a local companion anyway, so the flag
     // is informational there. Inside Office it is the consent record.
+    //
+    // ⚠ HAZARD — the pre-onReady window. Inside a REAL Office host, Office.js
+    // sets Office.context.host only once Office.onReady resolves, so for the
+    // first moments of a session insideOffice() is false and this branch is
+    // taken. A cloud record left in the shared origin's localStorage by portal
+    // use therefore reads as "cloud" during that window, even for a user who
+    // never chose cloud in Office. Routing is unaffected (companionUrl() takes
+    // the same portal branch and the pane issues no model calls before
+    // onReady), so this is safe ONLY as long as the invariant below holds:
+    //
+    //   NOTHING on a startup/hydrate path may WRITE the mode.
+    //
+    // A single line such as `saveSettings({ mode: loadMode() })` in bootstrap
+    // would take a leaked portal record, re-save it via saveMode(), and stamp
+    // chosenInOffice:true the moment Office finishes loading — permanently
+    // converting a local user to cloud with no consent. Read the mode freely on
+    // startup; never persist it. saveSettings() only writes the mode when a
+    // caller supplies one explicitly, and companionUrl.test.mjs pins that.
+    // Use modeIsKnown() before showing the user any claim about the mode.
     if (!insideOffice()) return "cloud";
     return parsed.chosenInOffice === true ? "cloud" : DEFAULT_MODE;
   } catch {

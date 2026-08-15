@@ -1,5 +1,11 @@
 import { createSseAccumulator } from "./chat/sse.js";
-import { companionUrl, insideOffice } from "./companionUrl.js";
+import {
+  assertCompanionAvailable,
+  companionUrl,
+  insideOffice,
+  loadMode,
+  saveMode
+} from "./companionUrl.js";
 
 // Resolved LAZILY, never at module load. Office.js sets Office.context.host
 // only after onReady, and this module is imported long before that — so a
@@ -16,6 +22,7 @@ const DECK_MODEL_FALLBACK = "qwen3.5:9b";
 const DEFAULT_VISION_MODEL = "llama3.2-vision";
 const SETTINGS_KEY = "tantular.office.settings.v1";
 const LEGACY_LOCAL_ENDPOINT_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost):11434\/v1\/chat\/completions\/?$/i;
+const LOCAL_COMPANION_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost):3000\//i;
 // Saved settings from earlier installs point at retired default models and
 // would otherwise silently keep users on them forever. Only EXACT old defaults
 // migrate — a deliberately chosen custom model is never touched.
@@ -37,6 +44,8 @@ export function loadSettings() {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
     return {
+      // Read from its own key, never from the settings blob — see loadMode().
+      mode: loadMode(),
       endpoint: normalizeEndpoint(parsed.endpoint),
       model: migrateRetiredModel(parsed.model, DEFAULT_MODEL),
       deckModel: migrateRetiredModel(parsed.deckModel, DEFAULT_DECK_MODEL),
@@ -45,6 +54,7 @@ export function loadSettings() {
     };
   } catch {
     return {
+      mode: loadMode(),
       endpoint: defaultEndpoint(),
       model: DEFAULT_MODEL,
       deckModel: DEFAULT_DECK_MODEL,
@@ -55,6 +65,12 @@ export function loadSettings() {
 }
 
 export function saveSettings(settings) {
+  // Mode is persisted FIRST and separately: defaultEndpoint()/normalizeEndpoint()
+  // below both resolve against the active mode, so a mode change has to be in
+  // effect before the endpoint is re-derived. Switching mode therefore heals a
+  // stale endpoint in either direction instead of stranding the pane on the
+  // wrong one.
+  const mode = settings.mode === undefined ? loadMode() : saveMode(settings.mode);
   const current = loadSettings();
   const next = {
     endpoint: normalizeEndpoint(settings.endpoint ?? current.endpoint ?? defaultEndpoint()),
@@ -66,10 +82,14 @@ export function saveSettings(settings) {
     apiKey: String(settings.apiKey ?? current.apiKey ?? "").trim()
   };
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
-  return next;
+  // Deliberately NOT stored in the settings blob — see loadMode(). Returned so
+  // callers can render the active mode without a second read.
+  return { ...next, mode };
 }
 
 export async function listLocalModels() {
+  // Companion-only: the hosted gateway has no /api/models to enumerate.
+  assertCompanionAvailable("Daftar model Ollama");
   const response = await fetch(companionUrl("/api/models"), {
     method: "GET",
     headers: { "Accept": "application/json" }
@@ -491,9 +511,18 @@ function normalizeEndpoint(value) {
   // localStorage. Someone who tries the portal saves a relative endpoint
   // ("/api/chat-completions" → the hosted gateway); opening the real add-in
   // later would restore that value and quietly send their document off-machine.
-  // Inside Office a relative endpoint is never a legitimate saved choice — the
-  // companion is always an absolute localhost URL — so refuse it.
+  // Inside Office a relative endpoint is never a legitimate saved choice — a
+  // saved string is never treated as consent. The ONLY thing that can route an
+  // Office session to the gateway is the mode record (loadMode), which portal
+  // use cannot forge. So: drop the stored value and re-derive from the mode.
+  // In local mode that yields the absolute localhost companion (guard intact);
+  // in a deliberate cloud session it yields the same-origin gateway.
   if (insideOffice() && endpoint.startsWith("/")) return defaultEndpoint();
+  // Mirror guard: a cloud session must not keep talking to a localhost
+  // companion left over from local mode — nothing is listening there.
+  if (insideOffice() && loadMode() === "cloud" && LOCAL_COMPANION_RE.test(endpoint)) {
+    return defaultEndpoint();
+  }
   return endpoint;
 }
 
