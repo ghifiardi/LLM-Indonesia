@@ -1,7 +1,15 @@
 import { createSseAccumulator } from "./chat/sse.js";
-import { companionUrl } from "./companionUrl.js";
+import { companionUrl, insideOffice } from "./companionUrl.js";
 
-const DEFAULT_ENDPOINT = companionUrl("/api/chat-completions");
+// Resolved LAZILY, never at module load. Office.js sets Office.context.host
+// only after onReady, and this module is imported long before that — so a
+// constant evaluated here would look like "not inside Office" even inside
+// PowerPoint, and would default every installed user to the hosted portal
+// gateway. That would send their document text off-machine while the product
+// still claimed to run locally. Call it, do not cache it.
+function defaultEndpoint() {
+  return companionUrl("/api/chat-completions");
+}
 const DEFAULT_MODEL = "qwen3.5:9b";
 const DEFAULT_DECK_MODEL = "tantular-office:0.4-9b";
 const DECK_MODEL_FALLBACK = "qwen3.5:9b";
@@ -37,7 +45,7 @@ export function loadSettings() {
     };
   } catch {
     return {
-      endpoint: DEFAULT_ENDPOINT,
+      endpoint: defaultEndpoint(),
       model: DEFAULT_MODEL,
       deckModel: DEFAULT_DECK_MODEL,
       visionModel: DEFAULT_VISION_MODEL,
@@ -49,7 +57,7 @@ export function loadSettings() {
 export function saveSettings(settings) {
   const current = loadSettings();
   const next = {
-    endpoint: normalizeEndpoint(settings.endpoint ?? current.endpoint ?? DEFAULT_ENDPOINT),
+    endpoint: normalizeEndpoint(settings.endpoint ?? current.endpoint ?? defaultEndpoint()),
     model: String(settings.model ?? current.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL,
     deckModel: String(settings.deckModel ?? current.deckModel ?? DEFAULT_DECK_MODEL).trim() || DEFAULT_DECK_MODEL,
     visionModel: String(settings.visionModel ?? current.visionModel ?? DEFAULT_VISION_MODEL).trim() || DEFAULT_VISION_MODEL,
@@ -273,7 +281,7 @@ function looksLikeJsonModeRejection(status, bodyText) {
 export function buildChatHeaders(endpoint, apiKey) {
   const headers = { "Content-Type": "application/json" };
   const key = String(apiKey || "").trim();
-  if (key && endpoint !== DEFAULT_ENDPOINT) headers.Authorization = `Bearer ${key}`;
+  if (key && endpoint !== defaultEndpoint()) headers.Authorization = `Bearer ${key}`;
   return headers;
 }
 
@@ -377,9 +385,9 @@ async function callChat({
     // a remote gateway, and silently answering from a local model instead
     // would look like success while coming from an entirely different model.
     // Fail loudly there instead.
-    if (endpoint !== DEFAULT_ENDPOINT && !apiKey && isNetworkLoadFailure(error)) {
+    if (endpoint !== defaultEndpoint() && !apiKey && isNetworkLoadFailure(error)) {
       return callChat({
-        endpoint: DEFAULT_ENDPOINT,
+        endpoint: defaultEndpoint(),
         model,
         messages,
         maxTokens,
@@ -478,7 +486,14 @@ export async function runTantularStream({ system, user, messages, maxTokens = 10
 
 function normalizeEndpoint(value) {
   const endpoint = String(value ?? "").trim();
-  if (!endpoint || LEGACY_LOCAL_ENDPOINT_RE.test(endpoint)) return DEFAULT_ENDPOINT;
+  if (!endpoint || LEGACY_LOCAL_ENDPOINT_RE.test(endpoint)) return defaultEndpoint();
+  // The portal and the installed add-in are the SAME origin, so they share
+  // localStorage. Someone who tries the portal saves a relative endpoint
+  // ("/api/chat-completions" → the hosted gateway); opening the real add-in
+  // later would restore that value and quietly send their document off-machine.
+  // Inside Office a relative endpoint is never a legitimate saved choice — the
+  // companion is always an absolute localhost URL — so refuse it.
+  if (insideOffice() && endpoint.startsWith("/")) return defaultEndpoint();
   return endpoint;
 }
 
