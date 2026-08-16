@@ -24,6 +24,17 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const home = os.homedir();
 
+// Optional components never make the exit fatal: the pane loads, chats and
+// edits documents without them. Only a genuine pane-load blocker — cert,
+// companion, model, sideload — should stop `npm start`.
+//
+// Exported so the distinction is unit-tested rather than asserted: getting it
+// backwards would either block startup over missing OCR, or let a dead
+// companion report healthy.
+export function isPaneBlocker(result) {
+  return !String(result.name).includes("(opsional)");
+}
+
 const results = [];
 function record(ok, name, detail, fix) {
   results.push({ ok, name, detail, fix });
@@ -129,17 +140,39 @@ async function checkCompanion() {
     "npm run dev   — biarkan jendela ini terbuka selama memakai Tantular");
 }
 
-// --- 3. document extractor ---------------------------------------------------
+// --- 3. document extractor (OPTIONAL) ----------------------------------------
+// Never a pane-load blocker. The pane opens, chats and edits documents without
+// this; only PDF text extraction and image OCR depend on it. Reported so the
+// distinction is visible rather than inferred from an exit code.
 async function checkDocServer() {
   const venv = path.join(root, ".venv-doc", "bin", "python");
   if (!fs.existsSync(venv)) {
-    return record(false, "Document extractor", ".venv-doc belum dibuat",
+    return record(false, "Ekstraksi dokumen (opsional)",
+      "belum disiapkan — panel tetap jalan, PDF/OCR tidak",
       "npm run doc-setup   lalu   npm run doc-server");
   }
   const result = await probe("http://127.0.0.1:8787/health");
-  if (result.ok) return record(true, "Document extractor", "port 8787 menjawab");
-  record(false, "Document extractor", `port 8787 tidak menjawab (${result.reason})`,
-    "npm run doc-server   — hanya diperlukan untuk PDF/gambar");
+  if (!result.ok) {
+    return record(false, "Ekstraksi dokumen (opsional)",
+      `port 8787 tidak menjawab (${result.reason}) — panel tetap jalan, PDF/OCR tidak`,
+      "npm run doc-server");
+  }
+  record(true, "Ekstraksi dokumen (opsional)", "port 8787 menjawab");
+  await checkOcr(venv);
+}
+
+// Installed is not importable. pyobjc can install cleanly and still fail to
+// load — wrong architecture, partial wheel, framework mismatch — and the old
+// setup ignored the install result entirely, so this could be broken on a
+// machine that believed it was set up.
+async function checkOcr(venv) {
+  const { verifyOcrImports } = await import("./doc-setup.mjs");
+  const result = verifyOcrImports(venv);
+  if (result.ok) return record(true, "OCR gambar (opsional)", "Vision, Quartz, Foundation OK");
+  record(false, "OCR gambar (opsional)",
+    (result.missingModule ? `modul '${result.missingModule}' tidak dapat diimpor` : result.detail)
+      + " — panel dan PDF tetap jalan",
+    "npm run doc-setup   (bila gagal:  rm -rf .venv-doc && npm run doc-setup)");
 }
 
 // --- 4. Ollama and models ----------------------------------------------------
@@ -183,6 +216,16 @@ function checkSideload() {
 
 const heading = (text) => `\n${text}\n${"-".repeat(text.length)}`;
 
+// Only run the checks when invoked directly. Without this, importing anything
+// from this file — as the tests do for isPaneBlocker — executes the whole
+// diagnostic and calls process.exit(), killing the importing process. That is
+// how a test run silently dropped from 7 tests to 1.
+const invokedDirectly = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (!invokedDirectly) {
+  // Importers get the helpers above and nothing else.
+} else {
+
 console.log(heading("Pemeriksaan Tantular Companion"));
 checkCerts();
 await checkCompanion();
@@ -206,6 +249,8 @@ for (const { name, fix } of broken) {
 }
 // Not everything is fatal: PDF/image extraction is optional, and the pane runs
 // without it. Only flag a non-zero exit when the pane genuinely cannot work.
-const fatal = broken.filter((r) => r.name !== "Document extractor");
+const fatal = broken.filter(isPaneBlocker);
 console.log("");
 process.exit(fatal.length ? 1 : 0);
+
+}
