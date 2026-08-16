@@ -1,2 +1,9 @@
 data/
 certs/
+
+# Vercel project link (projectId/orgId), created by `vercel deploy` inside
+# dist/workshop-web. The rule lives HERE, not in dist/workshop-web/.gitignore,
+# because build-workshop-web.mjs starts with rmSync(out, {recursive:true}) —
+# an ignore file inside the build output is deleted by the next build, and
+# .vercel silently becomes committable again.
+.vercel/
