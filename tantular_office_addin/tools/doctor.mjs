@@ -42,34 +42,80 @@ function probe(url, timeoutMs = 2500) {
 }
 
 // --- 1. certificates ---------------------------------------------------------
-// Checked first: an expired cert makes Office refuse the pane before any of the
-// servers below are ever contacted, so a green companion would be misleading.
-function checkCerts() {
-  const officeCert = path.join(home, ".office-addin-dev-certs", "localhost.crt");
-  const localCert = path.join(root, "certs", "localhost.crt");
-  const which = fs.existsSync(officeCert) ? officeCert
-    : fs.existsSync(localCert) ? localCert : null;
-  if (!which) {
-    return record(false, "Sertifikat HTTPS", "tidak ditemukan",
-      "npm run cert:office   (dipercaya Office; masukkan password bila diminta)");
-  }
+// Checked first: an expired or untrusted cert makes Office refuse the pane
+// before any of the servers below are ever contacted, so a green companion
+// would be misleading.
+//
+// Only ONE certificate can satisfy Office: ~/.office-addin-dev-certs/localhost.crt,
+// issued by "Developer CA for Microsoft Office Add-ins", whose CA is installed
+// into the login keychain by `npm run cert:office`.
+//
+// The repo's certs/localhost.crt is self-signed (issuer CN=localhost) and
+// verifies as CSSMERR_TP_NOT_TRUSTED. It lets the dev-server bind HTTPS, which
+// is why it exists, but Office will NOT load a pane served with it. It must
+// never count as a passing state — doing so reports health while the pane is
+// unloadable.
+const OFFICE_CERT = path.join(home, ".office-addin-dev-certs", "localhost.crt");
+const REPO_CERT = path.join(root, "certs", "localhost.crt");
+const CERT_FIX = "npm run cert:office   (masukkan password Mac bila diminta, lalu jalankan ulang Companion)";
+
+// Existence and expiry are not enough: a cert can be present and in date while
+// its CA has been removed from the keychain, and Office would still refuse it.
+function trustedBySystem(certPath) {
+  if (process.platform !== "darwin") return null;   // unknown, not false
   try {
-    const validTo = new Date(new X509Certificate(fs.readFileSync(which)).validTo);
-    const days = Math.round((validTo - Date.now()) / 86_400_000);
-    const label = `${path.basename(path.dirname(which))} — berakhir ${validTo.toISOString().slice(0, 10)}`;
-    if (days < 0) {
-      return record(false, "Sertifikat HTTPS", `KEDALUWARSA ${-days} hari lalu`,
-        "npm run cert:office");
-    }
-    // Office blocks the pane the moment it expires, mid-workshop if need be.
-    if (days < 14) {
-      return record(false, "Sertifikat HTTPS", `${label} (tinggal ${days} hari)`,
-        "npm run cert:office   (perbarui sebelum kedaluwarsa)");
-    }
-    record(true, "Sertifikat HTTPS", label);
-  } catch (error) {
-    record(false, "Sertifikat HTTPS", `tidak terbaca: ${error.message}`, "npm run cert:office");
+    execSync(`security verify-cert -c ${JSON.stringify(certPath)}`,
+             { stdio: "pipe", timeout: 8000 });
+    return true;
+  } catch {
+    return false;
   }
+}
+
+function checkCerts() {
+  if (!fs.existsSync(OFFICE_CERT)) {
+    const note = fs.existsSync(REPO_CERT)
+      ? "hanya ada certs/localhost.crt (self-signed) — Office TIDAK menerimanya"
+      : "tidak ditemukan";
+    return record(false, "Sertifikat Office", note, CERT_FIX);
+  }
+
+  let validTo;
+  try {
+    validTo = new Date(new X509Certificate(fs.readFileSync(OFFICE_CERT)).validTo);
+  } catch (error) {
+    return record(false, "Sertifikat Office", `tidak terbaca: ${error.message}`, CERT_FIX);
+  }
+  const days = Math.round((validTo - Date.now()) / 86_400_000);
+  const expiry = validTo.toISOString().slice(0, 10);
+
+  if (days < 0) {
+    return record(false, "Sertifikat Office", `KEDALUWARSA ${-days} hari lalu (${expiry})`,
+                  CERT_FIX);
+  }
+  const trusted = trustedBySystem(OFFICE_CERT);
+  if (trusted === false) {
+    return record(false, "Sertifikat Office",
+      `berlaku sampai ${expiry} TAPI tidak dipercaya sistem — CA hilang dari keychain`,
+      CERT_FIX);
+  }
+  // Office blocks the pane the moment it expires, mid-workshop if need be.
+  if (days < 14) {
+    return record(false, "Sertifikat Office", `berakhir ${expiry} — tinggal ${days} hari`,
+                  CERT_FIX);
+  }
+  record(true, "Sertifikat Office",
+    `office-addin-dev-certs, berakhir ${expiry}${trusted ? ", dipercaya sistem" : ""}`);
+}
+
+// Reported separately and never as a pass: the repo cert is a dev-server
+// binding convenience, not something Office accepts.
+function checkRepoCert() {
+  if (!fs.existsSync(REPO_CERT)) return;
+  const trusted = trustedBySystem(REPO_CERT);
+  console.log(`  [catatan] certs/localhost.crt ada (self-signed`
+    + `${trusted === false ? ", TIDAK dipercaya sistem" : ""}). `
+    + `Hanya agar dev-server bisa\n            membuka HTTPS — Office tidak akan memuat panel dengannya.`);
 }
 
 // --- 2. companion ------------------------------------------------------------
@@ -147,6 +193,7 @@ checkSideload();
 for (const { ok, name, detail } of results) {
   console.log(`  [${ok ? " OK " : "GAGAL"}] ${name.padEnd(24)} ${detail}`);
 }
+checkRepoCert();
 
 const broken = results.filter((r) => !r.ok);
 if (!broken.length) {

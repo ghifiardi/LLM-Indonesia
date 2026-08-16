@@ -32,9 +32,35 @@ const localKey = path.join(root, "certs", "localhost.key");
 
 let certPath = localCert;
 let keyPath = localKey;
+let usingOfficeCert = false;
 if (officeCert && officeKey && fs.existsSync(officeCert) && fs.existsSync(officeKey)) {
   certPath = officeCert;
   keyPath = officeKey;
+  usingOfficeCert = true;
+}
+
+// The fallback lets the server bind HTTPS; it does NOT let Office load the pane.
+// certs/localhost.crt is self-signed (issuer CN=localhost) and verifies as
+// CSSMERR_TP_NOT_TRUSTED, whereas Office only accepts a cert from the
+// "Developer CA for Microsoft Office Add-ins" that `npm run cert:office`
+// installs into the keychain.
+//
+// Falling back silently produces the worst possible state: a server that looks
+// healthy, logs a happy startup line, and a pane that Office refuses with a
+// message about connectivity. Say it plainly instead.
+if (!usingOfficeCert && fs.existsSync(localCert)) {
+  console.warn("");
+  console.warn("========================================================================");
+  console.warn("MEMAKAI SERTIFIKAT CADANGAN (certs/localhost.crt) — SELF-SIGNED.");
+  console.warn("");
+  console.warn("Server akan menyala, TAPI Office kemungkinan besar MENOLAK memuat panel:");
+  console.warn("sertifikat ini tidak dipercaya sistem, dan Office hanya menerima");
+  console.warn("sertifikat dari \"Developer CA for Microsoft Office Add-ins\".");
+  console.warn("");
+  console.warn("Perbaiki dengan:  npm run cert:office");
+  console.warn("Periksa dengan:   npm run doctor");
+  console.warn("========================================================================");
+  console.warn("");
 }
 
 // Dev certs expire after ~30 days and Office then blocks the pane with a
