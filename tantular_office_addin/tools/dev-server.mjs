@@ -390,6 +390,33 @@ const server = hasCert
   ? https.createServer({ cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) }, handler)
   : http.createServer(handler);
 
+// Running `npm run dev` twice is the most common mistake there is, and Node's
+// default is an unhandled 'error' event: a raw EADDRINUSE stack trace. Someone
+// at a workshop cannot read that as "it is already running", so they kill the
+// working server and try again. Say what happened instead.
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error("");
+    console.error("========================================================================");
+    console.error(`PORT ${port} SUDAH DIPAKAI.`);
+    console.error("");
+    console.error("Kemungkinan besar Tantular Companion SUDAH BERJALAN di jendela lain —");
+    console.error("dalam hal itu tidak perlu melakukan apa pun.");
+    console.error("");
+    console.error("Periksa dengan:   lsof -nP -iTCP:" + port + " -sTCP:LISTEN");
+    console.error("Hentikan dengan:  kill $(lsof -t -iTCP:" + port + " -sTCP:LISTEN)");
+    console.error("Atau pakai port lain:  PORT=3001 npm run dev");
+    console.error("========================================================================");
+    console.error("");
+    process.exit(1);
+  }
+  if (error.code === "EACCES") {
+    console.error(`\nTidak punya izin membuka port ${port}. Coba PORT=3001 npm run dev\n`);
+    process.exit(1);
+  }
+  throw error;
+});
+
 // Listen on all local interfaces so both https://localhost (IPv6 ::1) and
 // https://127.0.0.1 (IPv4) resolve. macOS often maps localhost to ::1.
 server.listen(port, () => {

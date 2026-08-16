@@ -19,7 +19,9 @@
     "sideload:word": "./tools/sideload-mac-word.sh",
     "sideload:excel": "./tools/sideload-mac-excel.sh",
     "sideload:powerpoint": "./tools/sideload-mac-powerpoint.sh",
-    "release:workshop-web": "node tools/build-workshop-web.mjs"
+    "release:workshop-web": "node tools/build-workshop-web.mjs",
+    "doctor": "node tools/doctor.mjs",
+    "start": "node tools/start.mjs"
   },
   "keywords": [
     "office-js",
