@@ -67,6 +67,67 @@ fs.copyFileSync(
   path.join(webDownloads, "tantular-workshop-manifest.xml")
 );
 
+// Verify the package can actually start BEFORE zipping it.
+//
+// The copy list above is hand-maintained, and shipping a module without its
+// imports has already broken a workshop once: dev-server.mjs imports
+// ./workspace.mjs, that copy line was missing, and the packaged companion died
+// at startup with ERR_MODULE_NOT_FOUND (fixed in a916adb). Attendees who
+// downloaded before the fix and after it followed identical instructions and
+// got different results, which is exactly what "some worked, some didn't"
+// looks like from the room.
+//
+// A comment cannot prevent the next one. These checks can: the build now fails
+// rather than shipping a package that cannot run.
+function verifyPackage(dir) {
+  const problems = [];
+
+  // 1. Every relative import of every shipped .mjs must also be shipped.
+  const mjs = fs.readdirSync(path.join(dir, "tools")).filter((f) => f.endsWith(".mjs"));
+  for (const file of mjs) {
+    const source = fs.readFileSync(path.join(dir, "tools", file), "utf8");
+    const imports = [...source.matchAll(/(?:from|import\()\s*"(\.\/[^"]+)"/g)]
+      .map((m) => m[1].replace(/^\.\//, ""));
+    for (const dep of new Set(imports)) {
+      if (!fs.existsSync(path.join(dir, "tools", dep))) {
+        problems.push(`tools/${file} imports ./${dep}, which is NOT in the package`);
+      }
+    }
+  }
+
+  // 2. Every `npm run X` the launchers and installer invoke must exist as a
+  //    script. A missing one fails with npm's "Missing script", mid-install.
+  const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+  const scripts = new Set(Object.keys(pkg.scripts || {}));
+  for (const entry of fs.readdirSync(dir)) {
+    if (!/\.(command|bat)$/.test(entry)) continue;
+    const text = fs.readFileSync(path.join(dir, entry), "utf8");
+    for (const [, name] of text.matchAll(/npm run ([a-zA-Z0-9:_-]+)/g)) {
+      if (!scripts.has(name)) problems.push(`${entry} calls \`npm run ${name}\`, not defined`);
+    }
+    if (/npm start/.test(text) && !scripts.has("start")) {
+      problems.push(`${entry} calls \`npm start\`, but no "start" script is defined`);
+    }
+  }
+
+  // 3. Scripts must point at files that exist.
+  for (const [name, command] of Object.entries(pkg.scripts || {})) {
+    const match = String(command).match(/(?:node|python3?|\.\/)\s*([\w./-]+\.(?:mjs|py|sh))/);
+    if (match && !fs.existsSync(path.join(dir, match[1]))) {
+      problems.push(`script "${name}" runs ${match[1]}, which is NOT in the package`);
+    }
+  }
+
+  if (problems.length) {
+    console.error("\nPAKET TIDAK LENGKAP — build dihentikan sebelum membuat ZIP:\n");
+    for (const problem of problems) console.error(`  - ${problem}`);
+    console.error("\nTambahkan copy() yang hilang di tools/build-workshop-package.mjs.\n");
+    process.exit(1);
+  }
+  console.log(`Verifikasi paket OK: ${mjs.length} modul, impor lengkap, skrip cocok.`);
+}
+verifyPackage(out);
+
 const zipPath = path.join(webDownloads, "tantular-workshop.zip");
 try { fs.rmSync(zipPath); } catch {}
 execFileSync("zip", ["-qr", zipPath, "."], { cwd: out });
