@@ -1,4 +1,4 @@
-import { ACTIONS, actionsForHost, normalizeHostName, scopedUserPrompt } from "./prompts.js";
+import { ACTIONS, actionsForHost, detectHost, normalizeHostName, scopedUserPrompt } from "./prompts.js";
 import {
   consumeAutoSwitchNote,
   listLocalModels,
@@ -171,7 +171,9 @@ function bootstrap() {
 
   if (globalThis.Office?.onReady) {
     Office.onReady((info) => {
-      state.host = normalizeHostName(info.host);
+      // Not normalizeHostName(info.host) alone: an unpopulated info.host
+      // resolves to "Office", which silently hides chat and Deck Studio.
+      state.host = detectHost(info);
       // Mode FIRST, before anything that could throw. hydrateSettings() ran
       // before Office.onReady, when insideOffice() was still false and the mode
       // was not yet knowable, so the banner was suppressed; this is the render
@@ -183,7 +185,14 @@ function bootstrap() {
       setStatus(`Terhubung ke ${state.host}.`, "ok");
       mountWorkspaceUi();
       if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
-        import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
+        import("./chat/chatPane.js")
+          .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
+          // Without this the promise rejects silently and the chat card simply
+          // never appears — indistinguishable from "this host has no chat".
+          .catch((error) => {
+            console.error("[Tantular] chat pane failed to mount:", error);
+            setStatus(`Chat tidak dapat dimuat: ${error?.message || error}`, "error");
+          });
       }
       // Warm up the Studio model in the background: the first Studio call
       // otherwise pays the multi-GB cold load (slow disks/RAM on workshop

@@ -98,6 +98,37 @@ export function normalizeHostName(hostName) {
   return "Office";
 }
 
+// Office.onReady's `info.host` is not always populated — it has been observed
+// empty on Mac hosts — and normalizeHostName then answers "Office". That is not
+// a cosmetic label: "Office" fails the Word/Excel/PowerPoint gate that mounts
+// the agentic chat pane, AND hostUi gives it deckStudio:false, so the chat and
+// Deck Studio cards both silently never appear while every host-agnostic
+// section renders normally. The pane looks stripped rather than broken.
+//
+// So never trust one source. Fall back to Office.context.host, then to the
+// host-specific globals Office.js injects (PowerPoint/Word/Excel namespaces),
+// then to the requirement sets. Any one of them identifying the host is enough.
+export function detectHost(readyInfo, globals = globalThis) {
+  const fromReady = normalizeHostName(readyInfo?.host);
+  if (fromReady !== "Office") return fromReady;
+
+  const fromContext = normalizeHostName(globals?.Office?.context?.host);
+  if (fromContext !== "Office") return fromContext;
+
+  // Office.js only defines these namespaces in the host they belong to.
+  if (typeof globals?.PowerPoint !== "undefined") return "PowerPoint";
+  if (typeof globals?.Excel !== "undefined") return "Excel";
+  if (typeof globals?.Word !== "undefined") return "Word";
+
+  const supported = globals?.Office?.context?.requirements?.isSetSupported;
+  if (typeof supported === "function") {
+    if (supported.call(null, "PowerPointApi", "1.1")) return "PowerPoint";
+    if (supported.call(null, "ExcelApi", "1.1")) return "Excel";
+    if (supported.call(null, "WordApi", "1.1")) return "Word";
+  }
+  return "Office";
+}
+
 export function scopedUserPrompt(action, userPrompt) {
   const domain = action?.domain === "security" ? "security" : "productivity";
   const scope = domain === "security"
