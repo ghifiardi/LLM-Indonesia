@@ -73,7 +73,12 @@ function buildRecord() {
   const sha = git(["rev-parse", "HEAD"], "unknown");
   // A build from uncommitted changes is NOT that commit, and labelling it so
   // would make the id lie in exactly the situation where it matters most.
-  const dirty = git(["status", "--porcelain"], "") !== "";
+  //
+  // Scoped to the package's INPUTS. A bare `git status` also sees dist/, which
+  // this build has just rewritten, so every build would report itself dirty and
+  // the flag would mean nothing.
+  const inputs = ["tools", "src", "models", "manifest.xml", "package.json"];
+  const dirty = git(["status", "--porcelain", "--", ...inputs], "") !== "";
   const builtAt = new Date().toISOString();
   const shortSha = sha === "unknown" ? "nogit" : sha.slice(0, 7);
   return {
