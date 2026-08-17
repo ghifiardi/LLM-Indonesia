@@ -29,7 +29,11 @@ Prasyarat Node.js 18+ dan Ollama dipasang OTOMATIS oleh installer bila belum ada
 4. Klik dua kali start-tantular-companion.bat dan biarkan jendelanya terbuka.
 5. Buka kembali Office lalu pilih Home → Tantular → Open Tantular.
 
-Unggah dokumen + OCR Apple Vision (Mac) perlu sekali `npm run doc-setup`, lalu jalankan `npm run doc-server` berdampingan dengan companion.
+OPSIONAL — PDF & OCR gambar:
+Tidak diperlukan untuk memakai Tantular. Jalankan `npm run doc-setup` HANYA bila
+perlu mengunggah PDF atau gambar (perlu Python 3). Setelah itu companion
+menjalankannya sendiri — tidak perlu perintah terpisah.
+Periksa kondisi kapan saja dengan `npm run doctor`.
 
 Task pane yang dihosting:
 https://workshop-web-gamma.vercel.app
