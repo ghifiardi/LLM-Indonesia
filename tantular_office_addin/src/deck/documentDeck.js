@@ -8,7 +8,8 @@ import {
   statementBullets,
   looksLikeStatement,
   stripBilingualMirror,
-  detectPeriods
+  detectPeriods,
+  isStatementRow
 } from "./statementRows.js";
 
 const HEADING_WORDS = [
@@ -73,7 +74,7 @@ export function buildDocumentDeckSpec(rawText, slideCount = 8) {
   slides.push({
     type: "closing",
     headline: "Poin Kunci & Langkah Berikutnya",
-    bullets: keyTakeaways(sections)
+    bullets: keyTakeaways(sections, periods)
   });
 
   return { title, subtitle: "Ringkasan terstruktur", slides };
@@ -112,11 +113,16 @@ function detectTitle(text) {
     if (skip.test(clean)) continue;
     if (/^abstract|^abstrak|^keywords/i.test(clean)) continue;
     if (!hasEnoughLetters(clean)) continue;
+    // A statement row is never the document's title. The first page of a
+    // financial report is a statement page, so without this the deck opened on
+    // "hasil investasi lain-lain 91,003 18,478 from other investments".
+    if (isStatementRow(clean)) continue;
     candidates.push(clean);
   }
   // Prefer an early, title-like line (mostly letters, not a sentence).
   const titleLike = candidates.find((c) => !/[.]$/.test(c) && letterRatio(c) > 0.6);
-  return truncate(respaceHeading(titleLike || candidates[0] || lines[0] || "Dokumen"), 100);
+  const chosen = titleLike || candidates[0] || lines[0] || "Dokumen";
+  return truncate(stripBilingualMirror(respaceHeading(chosen)), 100);
 }
 
 function detectSections(text) {
@@ -345,11 +351,19 @@ function toBullets(body, heading = "", periods = []) {
   return bullets;
 }
 
-function keyTakeaways(sections) {
+function keyTakeaways(sections, periods = []) {
   const picks = [];
   for (const section of sections) {
-    const first = splitSentences(section.body)[0];
-    if (first && first.length > 30) picks.push(truncate(first, 150));
+    // Same conversion the body slides use. Calling splitSentences directly left
+    // whole multi-line statement blocks in a single takeaway bullet, because a
+    // statement row has no terminal punctuation to split on.
+    const bullets = toBullets(section.body, section.title, periods);
+    // Prefer a line carrying figures, and never repeat one. Taking bullets[0]
+    // blindly filled the takeaways with the same boilerplate three times —
+    // "(Dinyatakan dalam ribuan Dolar AS)" heads every statement section.
+    const fresh = (b) => b && b.length > 30 && !picks.includes(b);
+    const first = bullets.find((b) => fresh(b) && /\d/.test(b)) || bullets.find(fresh);
+    if (first) picks.push(truncate(first, 150));
     if (picks.length >= 4) break;
   }
   if (picks.length < 3) {

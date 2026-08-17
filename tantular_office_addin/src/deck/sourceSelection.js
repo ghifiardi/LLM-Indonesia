@@ -56,6 +56,32 @@ const INTENT_PATTERNS = [
 // negatively weighted unless explicitly requested.
 const NOTES_PATTERN = /catatan\s+atas\s+laporan\s+keuangan|notes\s+to\s+the\s+(consolidated\s+)?financial/i;
 
+// Notes run for hundreds of pages and only the first page says so. Every page
+// after it is headed "1. UMUM", "1. UMUM (lanjutan) 1. GENERAL (continued)",
+// "34. INFORMASI SEGMEN" — none of which match NOTES_PATTERN, which is why
+// notes kept filling slides despite the penalty.
+//
+// A continuation marker cannot imply notes on its own: statements are continued
+// across pages too ("LAPORAN POSISI KEUANGAN KONSOLIDASIAN (lanjutan)"). It
+// means "same section as before", which is what the carry-forward below does.
+const NUMBERED_NOTE = /^\d{1,3}\s*\.\s*\S/;
+
+// Only the full statement titles end a notes run. Component keywords must not:
+// a note headed "34. LIABILITAS" is still a note, and treating it as a
+// statement would flip the rest of the notes back to full weight.
+const STATEMENT_TITLE = INTENT_PATTERNS.slice(0, 4).map((p) => p.re);
+
+function classifyHeading(heading, inNotes) {
+  const text = String(heading || "");
+  if (!text) return inNotes;
+  if (NOTES_PATTERN.test(text)) return true;
+  if (STATEMENT_TITLE.some((re) => re.test(text))) return false;
+  // A numbered heading inside a notes run stays in it; so does anything marked
+  // "(lanjutan)" / "(continued)", by inheriting the current state.
+  if (NUMBERED_NOTE.test(text)) return inNotes;
+  return inNotes;
+}
+
 const PAGE_MARKER = /^\[Page (\d+)\]$/;
 const SLIDE_MARKER = /^\[Slide (\d+)(?:\s*\|\s*id\s*([^\]]+))?\]$/;
 
@@ -67,6 +93,11 @@ function isHeading(line) {
   if (!trimmed || trimmed.length > 120) return false;
   if (/[.;]$/.test(trimmed)) return false;
   if (INTENT_PATTERNS.some((p) => p.re.test(trimmed))) return true;
+  // Numbered section headings — "1. UMUM", "34. INFORMASI SEGMEN". Needed for
+  // continuation pages: "1. UMUM (lanjutan) 1. GENERAL (continued)" is only 39%
+  // uppercase, so the ALL-CAPS rule below misses it and the page merged into
+  // the previous chunk instead of starting its own.
+  if (/^\d{1,3}\s*\.\s+[A-Za-z]/.test(trimmed)) return true;
   const letters = trimmed.replace(/[^A-Za-zÀ-ÿ]/g, "");
   if (letters.length < 4) return false;
   const upper = letters.replace(/[^A-ZÀ-Þ]/g, "").length;
@@ -92,6 +123,9 @@ export function chunkDocument(text) {
   let page = null;
   let heading = null;
   let buffer = [];
+  // Carried across chunks: the notes run continues until a statement title ends
+  // it, which is the only way to recognise "1. UMUM" three hundred pages in.
+  let inNotes = false;
 
   const flush = () => {
     const body = buffer.join("\n").trim();
@@ -104,6 +138,7 @@ export function chunkDocument(text) {
         heading,
         text: piece,
         tokens: estimateTokens(piece),
+        isNotes: inNotes,
       });
     }
   };
@@ -120,6 +155,7 @@ export function chunkDocument(text) {
     if (isHeading(trimmed)) {
       flush();
       heading = trimmed;
+      inNotes = classifyHeading(trimmed, inNotes);
       // The heading is part of its own chunk: a statement title carries the
       // period and currency basis, which the slide needs.
       buffer.push(trimmed);
@@ -174,7 +210,11 @@ export function scoreChunk(chunk, { includeNotes = false } = {}) {
   // A notes heading always contains "konsolidasian"/"consolidated" and so
   // collects the statement bonus twice over. The penalty must outweigh that
   // outright, or notes tie with the statements and win on volume.
-  if (NOTES_PATTERN.test(haystack)) score += includeNotes ? 4 : -24;
+  //
+  // chunk.isNotes carries the run forward, so continuation pages are penalised
+  // too — matching only the literal phrase left every page after the first at
+  // full weight.
+  if (chunk.isNotes || NOTES_PATTERN.test(haystack)) score += includeNotes ? 4 : -24;
   // Actual figures, not just talk about them.
   score += Math.round(numericDensity(chunk.text) * 12);
   return score;
@@ -194,25 +234,45 @@ export function selectSource(text, { budget = SOURCE_TOKEN_BUDGET, includeNotes 
   // Rank by intent, but emit in document order: a balance sheet read out of
   // sequence is worse than one that is merely incomplete.
   const ranked = [...scored].sort((a, b) => b.score - a.score || a.index - b.index);
-  const selected = [];
-  let used = 0;
-  for (const chunk of ranked) {
-    if (used + chunk.tokens > budget) continue; // keep trying: a later chunk may still fit
-    selected.push(chunk);
-    used += chunk.tokens;
-  }
+
+  const fill = (candidates) => {
+    const picked = [];
+    let used = 0;
+    for (const chunk of candidates) {
+      if (used + chunk.tokens > budget) continue; // a later, smaller chunk may still fit
+      picked.push(chunk);
+      used += chunk.tokens;
+    }
+    return { picked, used };
+  };
+
+  // A negative score means actively unwanted (notes, by default) — not merely
+  // lower priority. Spending leftover budget on it would put notes back in the
+  // deck through the side door.
+  const wanted = ranked.filter((c) => c.score >= 0);
+  let { picked: selected, used } = fill(wanted);
+  // Unless there is nothing else: a document that is entirely notes should
+  // still produce a deck rather than nothing at all.
+  if (!selected.length) ({ picked: selected, used } = fill(ranked));
+
   selected.sort((a, b) => a.index - b.index);
 
-  const dropped = scored.filter((c) => !selected.includes(c));
+  const chosen = new Set(selected);
+  // Two different reasons, two different things to tell the user: the budget
+  // ran out, or the content was deliberately left out.
+  const dropped = scored.filter((c) => !chosen.has(c) && c.score >= 0);
+  const excluded = scored.filter((c) => !chosen.has(c) && c.score < 0);
+
   return {
     chunks: scored,
     selected,
     dropped,
+    excluded,
     tokensSelected: used,
     tokensTotal: totalTokens,
     budget,
     truncated: dropped.length > 0,
-    exhaustive: dropped.length === 0,
+    exhaustive: dropped.length === 0 && excluded.length === 0,
   };
 }
 
@@ -265,11 +325,26 @@ export function selectionInstruction(selection) {
 export function describeSelection(selection, filename = "") {
   if (selection.exhaustive) return null;
   const from = filename ? ` dari ${filename}` : "";
+  const excludedCount = (selection.excluded || []).length;
+
+  // Being left out for size and being left out on purpose are different facts.
+  // Reporting notes exclusion as "document too large" would send someone
+  // splitting a file that fit perfectly well.
+  const reasons = [];
+  if (selection.truncated) {
+    reasons.push(
+      `terlalu besar untuk dibaca sekaligus ` +
+      `(≈${selection.tokensTotal.toLocaleString("id-ID")} token, batas ${selection.budget.toLocaleString("id-ID")}); ` +
+      `${selection.dropped.length} bagian tidak muat`
+    );
+  }
+  if (excludedCount) {
+    reasons.push(`${excludedCount} bagian catatan atas laporan keuangan sengaja dilewati`);
+  }
+
   return (
-    `Dokumen${from} terlalu besar untuk dibaca sekaligus ` +
-    `(≈${selection.tokensTotal.toLocaleString("id-ID")} token, batas ${selection.budget.toLocaleString("id-ID")}). ` +
-    `Tantular memilih ${selection.selected.length} dari ${selection.chunks.length} bagian yang paling relevan ` +
-    `dengan laporan keuangan; ${selection.dropped.length} bagian tidak dipakai. ` +
-    `Deck ini meringkas bagian terpilih saja, bukan seluruh dokumen.`
+    `Dokumen${from}: ${reasons.join("; ")}. ` +
+    `Tantular memakai ${selection.selected.length} dari ${selection.chunks.length} bagian yang paling relevan ` +
+    `dengan laporan keuangan. Deck ini meringkas bagian terpilih saja, bukan seluruh dokumen.`
   );
 }

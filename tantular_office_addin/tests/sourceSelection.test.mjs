@@ -124,6 +124,82 @@ test("notes are excluded by default and included on request", () => {
     > scoreChunk(notes, { includeNotes: false }));
 });
 
+// --- notes continuation ------------------------------------------------------
+
+// The real shape: notes say so once, then run for hundreds of pages under
+// numbered headings that never repeat the phrase.
+const NOTES_RUN = `[Page 40]
+CATATAN ATAS LAPORAN KEUANGAN KONSOLIDASIAN
+Kebijakan akuntansi diterapkan secara konsisten.
+
+[Page 41]
+1. UMUM 1. GENERAL
+Perusahaan didirikan berdasarkan Akta Notaris tertanggal 1 Desember 2004.
+
+[Page 42]
+1. UMUM (lanjutan) 1. GENERAL (continued)
+Kantor pusat Perusahaan berlokasi di Jakarta Selatan.
+
+[Page 43]
+34. LIABILITAS IMBALAN KERJA
+Liabilitas imbalan kerja dihitung oleh aktuaris independen.`;
+
+test("a notes run carries past headings that never repeat the phrase", () => {
+  const chunks = chunkDocument(NOTES_RUN);
+  const numbered = chunks.filter((c) => /^\d/.test(c.heading || ""));
+  assert.ok(numbered.length >= 3, "expected the numbered note headings");
+  for (const chunk of numbered) {
+    assert.equal(chunk.isNotes, true, `"${chunk.heading}" must be inside the notes run`);
+  }
+});
+
+test("continuation pages are penalised, not just the first notes page", () => {
+  const chunks = chunkDocument(NOTES_RUN);
+  const umum = chunks.find((c) => /1\. UMUM \(lanjutan\)/.test(c.heading || ""));
+  assert.ok(scoreChunk(umum, { includeNotes: false }) < 0,
+    "matching only the literal phrase left every later page at full weight");
+});
+
+test("a note named after a balance-sheet component is still a note", () => {
+  // "34. LIABILITAS" matches a component keyword. Treating that as a statement
+  // would flip the rest of the notes back to full weight.
+  const chunks = chunkDocument(NOTES_RUN);
+  const liabilitas = chunks.find((c) => /LIABILITAS/.test(c.heading || ""));
+  assert.equal(liabilitas.isNotes, true);
+  assert.ok(scoreChunk(liabilitas, { includeNotes: false }) < 0);
+});
+
+test("a real statement title ends the notes run", () => {
+  const doc = `${NOTES_RUN}\n\n[Page 60]\nLAPORAN POSISI KEUANGAN KONSOLIDASIAN\nKas dan setara kas 1.234.567 2.345.678`;
+  const chunks = chunkDocument(doc);
+  const sheet = chunks.find((c) => /POSISI KEUANGAN/.test(c.heading || ""));
+  assert.equal(sheet.isNotes, false, "the statement must not inherit the notes penalty");
+  assert.ok(scoreChunk(sheet) > 0);
+});
+
+test("a statement continued across pages does not become notes", () => {
+  // "(lanjutan)" means "same section as before" — statements are continued too.
+  const doc = `[Page 5]\nLAPORAN ARUS KAS KONSOLIDASIAN\nArus kas operasi 111.111 222.222\n\n`
+    + `[Page 6]\nLAPORAN ARUS KAS KONSOLIDASIAN (lanjutan)\nArus kas investasi 333.333 444.444`;
+  for (const chunk of chunkDocument(doc)) {
+    assert.equal(chunk.isNotes, false, `"${chunk.heading}" is a statement, not a note`);
+  }
+});
+
+test("notes lose the budget to statements across a whole report", () => {
+  const doc = `[Page 3]\nLAPORAN POSISI KEUANGAN KONSOLIDASIAN\n`
+    + `Kas dan setara kas 1.234.567 2.345.678\nJumlah aset lancar 2.691.356 3.058.023\n\n`
+    + NOTES_RUN + "\n\n"
+    + Array.from({ length: 20 }, (_, i) =>
+        `[Page ${50 + i}]\n${i + 2}. CATATAN LAIN (lanjutan)\n${"Uraian kebijakan akuntansi yang panjang. ".repeat(20)}`
+      ).join("\n\n");
+  const selection = selectSource(doc, { budget: 400 });
+  const kept = selection.selected.map((c) => c.text).join("\n");
+  assert.match(kept, /Kas dan setara kas/, "the statement must survive the notes");
+  assert.ok(selection.selected.every((c) => !c.isNotes),
+    "notes must not take budget from statements");
+});
+
 // --- selection ---------------------------------------------------------------
 
 test("under budget: everything is selected and reported as exhaustive", () => {
@@ -187,11 +263,32 @@ test("complete source yields no instruction, so the model is not falsely hedged"
   assert.equal(selectionInstruction(selectSource(BALANCE_SHEET)), "");
 });
 
+test("notes exclusion is not reported as the document being too large", () => {
+  // A report that fits but contains notes must not send anyone splitting a file
+  // that was never too big.
+  const doc = `[Page 3]\nLAPORAN POSISI KEUANGAN KONSOLIDASIAN\n`
+    + `Kas dan setara kas 1.234.567 2.345.678\nJumlah aset lancar 2.691.356 3.058.023\n\n`
+    + NOTES_RUN;
+  const selection = selectSource(doc);
+  assert.equal(selection.truncated, false, "nothing was dropped for size");
+  assert.ok(selection.excluded.length > 0, "notes were excluded on purpose");
+  const warning = describeSelection(selection, "laporan.pdf");
+  assert.match(warning, /catatan atas laporan keuangan sengaja dilewati/);
+  assert.ok(!/terlalu besar/.test(warning), "size was not the reason");
+});
+
+test("a document that is only notes still produces a deck", () => {
+  const selection = selectSource(NOTES_RUN);
+  assert.ok(selection.selected.length > 0,
+    "excluding everything would leave the user with nothing");
+});
+
 test("the warning names what was dropped and refuses to imply full coverage", () => {
   const filler = `[Page 9]\nSAMBUTAN DIREKSI\n${"Kalimat panjang sekali. ".repeat(400)}`;
   const selection = selectSource(`${filler}\n\n${BALANCE_SHEET}`, { budget: 300 });
   const warning = describeSelection(selection, "laporan.pdf");
   assert.match(warning, /laporan\.pdf/);
-  assert.match(warning, /tidak dipakai/);
+  assert.match(warning, /terlalu besar/, "size was the reason here");
+  assert.match(warning, /tidak muat/);
   assert.match(warning, /bukan seluruh dokumen/);
 });
