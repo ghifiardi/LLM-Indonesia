@@ -1,4 +1,7 @@
 WORKSHOP TANTULAR OFFICE (MAC & WINDOWS)
+Versi paket: 2026-08-17.a568f9b   (dibangun 2026-08-17 01:36 UTC)
+Sebutkan versi ini bila melaporkan masalah — dua unduhan bisa punya nama sama
+tetapi isi berbeda.
 
 CARA PALING MUDAH — satu perintah (unduh + pasang semuanya otomatis):
 - Mac (Terminal):      curl -fsSL https://workshop-web-gamma.vercel.app/downloads/setup.sh | bash

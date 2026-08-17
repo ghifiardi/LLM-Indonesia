@@ -231,6 +231,29 @@ if (!invokedDirectly) {
   // Importers get the helpers above and nothing else.
 } else {
 
+// Printed before any diagnostic so it survives a screenshot of the first
+// screen. Read from a file, never from git: an attendee machine has no repo.
+// Absent in a repo checkout, which is itself the answer — "you are running the
+// source, not a packaged build".
+function printBuildRecord() {
+  const recordPath = path.join(root, "workshop-build.json");
+  if (!fs.existsSync(recordPath)) {
+    console.log("Paket workshop : (tidak ada — menjalankan dari repo sumber)");
+    return;
+  }
+  try {
+    const build = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+    console.log(`Paket workshop : ${build.buildId}`);
+    console.log(`  dibangun     : ${String(build.builtAt).slice(0, 16).replace("T", " ")} UTC`);
+    if (build.sourceDirty) {
+      console.log("  CATATAN      : dibangun dari sumber yang belum di-commit");
+    }
+  } catch {
+    console.log("Paket workshop : workshop-build.json tidak terbaca");
+  }
+}
+
+printBuildRecord();
 console.log(heading("Pemeriksaan Tantular Companion"));
 checkCerts();
 await checkCompanion();
