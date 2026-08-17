@@ -56,7 +56,40 @@ fs.writeFileSync(path.join(out, "start-tantular-companion.command"), launcherScr
 fs.writeFileSync(path.join(out, "install-tantular-workshop.bat"), windowsInstallerScript());
 fs.writeFileSync(path.join(out, "start-tantular-companion.bat"), windowsLauncherScript());
 fs.writeFileSync(path.join(out, "tools", "install-office-model.ps1"), windowsModelScript());
-fs.writeFileSync(path.join(out, "README-WORKSHOP.txt"), readmeText());
+// Build record. The question this answers is "which artifact are you actually
+// running?", which was unanswerable when two zips with the same name and
+// different contents were in circulation during a workshop.
+//
+// git runs HERE, at build time in the repo. The attendee zip must never need
+// it — a packaged machine has no repo and often no git at all.
+function buildRecord() {
+  const git = (args, fallback) => {
+    try {
+      return execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+    } catch {
+      return fallback;
+    }
+  };
+  const sha = git(["rev-parse", "HEAD"], "unknown");
+  // A build from uncommitted changes is NOT that commit, and labelling it so
+  // would make the id lie in exactly the situation where it matters most.
+  const dirty = git(["status", "--porcelain"], "") !== "";
+  const builtAt = new Date().toISOString();
+  const shortSha = sha === "unknown" ? "nogit" : sha.slice(0, 7);
+  return {
+    buildId: `${builtAt.slice(0, 10)}.${shortSha}${dirty ? "+dirty" : ""}`,
+    sourceSha: sha,
+    sourceDirty: dirty,
+    builtAt,
+    packageFormat: 1,
+    baseUrl,
+  };
+}
+const build = buildRecord();
+fs.writeFileSync(path.join(out, "workshop-build.json"),
+                 JSON.stringify(build, null, 2) + "\n");
+
+fs.writeFileSync(path.join(out, "README-WORKSHOP.txt"), readmeText(build));
 fs.chmodSync(path.join(out, "install-tantular-workshop.command"), 0o755);
 fs.chmodSync(path.join(out, "start-tantular-companion.command"), 0o755);
 fs.chmodSync(path.join(out, "tools", "install-office-model.sh"), 0o755);
@@ -406,8 +439,11 @@ exit 0
 `;
 }
 
-function readmeText() {
+function readmeText(build) {
   return `WORKSHOP TANTULAR OFFICE (MAC & WINDOWS)
+Versi paket: ${build.buildId}   (dibangun ${build.builtAt.slice(0, 16).replace("T", " ")} UTC)
+Sebutkan versi ini bila melaporkan masalah — dua unduhan bisa punya nama sama
+tetapi isi berbeda.
 
 CARA PALING MUDAH — satu perintah (unduh + pasang semuanya otomatis):
 - Mac (Terminal):      curl -fsSL ${baseUrl}/downloads/setup.sh | bash
