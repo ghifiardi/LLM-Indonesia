@@ -77,3 +77,4 @@ not prevent the second occurrence.
 | Build id | Deployed | Notes |
 |---|---|---|
 | `2026-08-17.b9d1f9b` | 2026-08-17 | first release carrying build id + package verification |
+| `2026-08-17.c26c01e` | 2026-08-17 | support page aligned: doc-server instruction, build tag, doctor-first troubleshooting, Tantular/Qwen3.5 relationship |

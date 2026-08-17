@@ -1,5 +1,5 @@
 WORKSHOP TANTULAR OFFICE (MAC & WINDOWS)
-Versi paket: 2026-08-17.b9d1f9b   (dibangun 2026-08-17 01:41 UTC)
+Versi paket: 2026-08-17.c26c01e   (dibangun 2026-08-17 02:14 UTC)
 Sebutkan versi ini bila melaporkan masalah — dua unduhan bisa punya nama sama
 tetapi isi berbeda.
 

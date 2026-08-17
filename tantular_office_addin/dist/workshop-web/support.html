@@ -11,6 +11,10 @@
   <h1>Dukungan Workshop Tantular</h1>
   <p>Rilis ini ditujukan untuk workshop Microsoft 365 terfasilitasi di Mac dan Windows.</p>
   <h2>Spesifikasi laptop &amp; ekspektasi</h2>
+  <p><strong>Tantular Office</strong> adalah profil yang berjalan di atas model dasar
+  <strong>Qwen3.5</strong> (9B atau 4B, sesuai RAM). Yang Anda pilih di panel adalah
+  <code>tantular-office:0.4-9b</code>; yang diunduh Ollama adalah basis Qwen3.5-nya.
+  Karena itu dua nama tersebut muncul berdampingan di halaman ini.</p>
   <ul>
     <li><strong>RAM 16 GB ke atas:</strong> pengalaman penuh dengan model Qwen3.5 9B.</li>
     <li><strong>RAM 8 GB:</strong> otomatis memakai model ringan (Qwen3.5 4B) — tetap berfungsi, kualitas deck sedikit di bawah 9B.</li>
@@ -33,9 +37,9 @@
   </ul>
   <h3>Sudah pernah memasang sebelumnya? Ini yang perlu diperbarui</h3>
   <ul>
-    <li><strong>Panel Tantular (gaya desain baru): otomatis, tanpa unduh ulang.</strong> Cukup tutup Office sepenuhnya (<code>Cmd+Q</code> di Mac), buka kembali, lalu pastikan tag build di header panel menunjukkan <strong>b0810a</strong> atau lebih baru. Masih tag lama? Tutup penuh Office sekali lagi.</li>
+    <li><strong>Panel Tantular (gaya desain baru): otomatis, tanpa unduh ulang.</strong> Cukup tutup Office sepenuhnya (<code>Cmd+Q</code> di Mac), buka kembali, lalu pastikan tag build di header panel menunjukkan <strong>b0814a</strong> atau lebih baru. Masih tag lama? Tutup penuh Office sekali lagi.</li>
     <li><strong>Batas 100 MB dan OCR Apple Vision: perlu paket Companion terbaru.</strong> Paket lama belum memuat komponen barunya. Jalankan ulang perintah instalasi satu baris di bawah (bagian "Instalasi satu perintah") — paket terbaru akan terunduh otomatis, pengaturan Anda tidak hilang.</li>
-    <li><strong>Khusus Mac, setelah unduh ulang:</strong> di folder paket jalankan <code>npm run doc-setup</code> satu kali, lalu jalankan <code>npm run doc-server</code> berdampingan dengan Companion. Setelah itu, saat ekstraksi gambar, baris status akan menampilkan "Apple Vision".</li>
+    <li><strong>Khusus Mac, setelah unduh ulang:</strong> di folder paket jalankan <code>npm run doc-setup</code> <em>satu kali</em> (perlu Python 3). Companion menjalankannya sendiri setelah itu — <strong>tidak perlu</strong> perintah <code>doc-server</code> terpisah. Saat ekstraksi gambar, baris status akan menampilkan "Apple Vision".</li>
     <li><strong>Windows:</strong> cukup unduh ulang paket untuk batas 100 MB; OCR tetap memakai model vision lokal (tidak ada langkah tambahan).</li>
   </ul>
   <h2>Langkah demi langkah (ringkas)</h2>
@@ -70,6 +74,12 @@
   <h2>Membuka Tantular</h2>
   <p>Setelah manifest terpasang dan Office ditutup penuh (<code>Cmd+Q</code> di Mac, tutup semua jendela di Windows) lalu dibuka kembali, buka sebuah file Office dan pilih <strong>Home → Tantular → Open Tantular</strong>.</p>
   <h2>Pemeriksaan umum</h2>
+  <p><strong>Mulai dari sini:</strong> di folder paket jalankan <code>npm run doctor</code>.
+  Satu perintah ini memeriksa sertifikat, Companion, Ollama, model, dan manifest sekaligus,
+  lalu menyebutkan perintah perbaikan untuk apa pun yang bermasalah. Dua baris pertamanya
+  menampilkan <strong>versi paket</strong> Anda — sertakan itu bila melaporkan masalah,
+  karena dua unduhan bisa punya nama berkas sama tetapi isi berbeda.</p>
+  <p>Bila ingin memeriksa manual:</p>
   <ol>
     <li>Pastikan Ollama sedang berjalan.</li>
     <li>Pastikan jendela terminal Tantular Companion tetap terbuka.</li>

@@ -1,8 +1,8 @@
 {
-  "buildId": "2026-08-17.b9d1f9b",
-  "sourceSha": "b9d1f9b1b91d308b0e7c031240535e7d08342ea0",
+  "buildId": "2026-08-17.c26c01e",
+  "sourceSha": "c26c01e8831b58a9b0c1095c708975b741733ada",
   "sourceDirty": false,
-  "builtAt": "2026-08-17T01:41:23.650Z",
+  "builtAt": "2026-08-17T02:14:44.014Z",
   "packageFormat": 1,
   "baseUrl": "https://workshop-web-gamma.vercel.app"
 }
