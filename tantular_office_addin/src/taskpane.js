@@ -42,6 +42,12 @@ import { extractSlideFromImage, fileToDataUrl, getLastOcrEngine, ocrStatusLine }
 import { buildCapabilityMapSpec } from "./deck/capabilityMapSpec.js";
 import { extractDocumentFile } from "./deck/documentExtract.js";
 import { buildDocumentDeckSpec } from "./deck/documentDeck.js";
+import {
+  selectSource,
+  selectedSourceText,
+  selectionInstruction,
+  describeSelection
+} from "./deck/sourceSelection.js";
 import { planDocument } from "./document/documentPlanner.js";
 import { buildDocumentDocxBase64 } from "./document/docxBuilder.js";
 import { planWorkbook } from "./workbook/workbookPlanner.js";
@@ -62,6 +68,7 @@ const state = {
   extractedDocumentName: null,
   documentText: "",
   documentPreview: "",
+  documentSelection: null,
   refineSpec: null,
   documentSpec: null,
   workbookSpec: null,
@@ -296,7 +303,12 @@ function bindStaticEvents() {
   // out of the brief text.
   els.deckCount.addEventListener("input", () => { state.deckCountManual = true; });
   els.deckImageInput.addEventListener("change", () => { state.extractedImageName = null; });
-  els.deckDocumentInput.addEventListener("change", () => { state.extractedDocumentName = null; });
+  // Clear the selection too: a stale one would keep appending a coverage notice
+  // about a document that is no longer the source.
+  els.deckDocumentInput.addEventListener("change", () => {
+    state.extractedDocumentName = null;
+    state.documentSelection = null;
+  });
   els.saveProjectInstructions.addEventListener("click", saveProjectInstructions);
   els.clearProjectInstructions.addEventListener("click", clearProjectInstructions);
   els.deckProjectInstructions.addEventListener("change", saveProjectInstructions);
@@ -564,7 +576,13 @@ function projectInstructions() {
 }
 
 function combinedDeckInstructions() {
-  return [projectInstructions(), els.instruction.value.trim()].filter(Boolean).join("\n\nInstruksi tambahan:\n");
+  const base = [projectInstructions(), els.instruction.value.trim()]
+    .filter(Boolean).join("\n\nInstruksi tambahan:\n");
+  // Coverage travels with the instructions, not inside the source text, so the
+  // model knows the excerpt is a selection while the deterministic builder
+  // still sees clean document content.
+  const coverage = state.documentSelection ? selectionInstruction(state.documentSelection) : "";
+  return [base, coverage].filter(Boolean).join("\n\n");
 }
 
 function renderDeckStyleOptions() {
@@ -1004,9 +1022,16 @@ function setWorkbookStatus(message, kind = "") {
 // --- Deck Studio: single, predictable flow ---------------------------------
 // One "source of truth" resolver + two actions (create in PowerPoint / download).
 
-function documentPreview(text, chars) {
+// `chars` is the size of the extracted document; `text` is what will actually
+// be sent. Calling a bounded selection "teks lengkap" was how the truncation
+// stayed invisible, so the two numbers are now reported separately.
+function documentPreview(text, chars, selection = null) {
   const head = String(text || "").slice(0, 1000).trimEnd();
-  return `[Pratinjau dokumen — teks lengkap ${chars} karakter dipakai saat membuat deck. Edit kotak ini hanya jika ingin mengganti sumbernya.]\n\n${head}…`;
+  const scope = selection && selection.truncated
+    ? `bagian terpilih (${selection.selected.length}/${selection.chunks.length} bagian, `
+      + `≈${selection.tokensSelected} token) dari ${chars} karakter dokumen dipakai`
+    : `teks lengkap ${chars} karakter dipakai`;
+  return `[Pratinjau dokumen — ${scope} saat membuat deck. Edit kotak ini hanya jika ingin mengganti sumbernya.]\n\n${head}…`;
 }
 
 async function resolveDeckSpec() {
@@ -1021,10 +1046,24 @@ async function resolveDeckSpec() {
   if (docFile && state.extractedDocumentName !== docFile.name) {
     els.deckProgressText.textContent = "Mengekstrak dokumen/PDF...";
     const extractedDoc = await extractDocumentFile(docFile);
-    state.documentText = extractedDoc.text;
-    state.documentPreview = documentPreview(extractedDoc.text, extractedDoc.chars);
+
+    // Bound the source explicitly. Handing the whole document downstream used
+    // to overflow the model context, and the overflow was discarded in silence
+    // — a report whose figures never arrived still produced a confident deck.
+    const selection = selectSource(extractedDoc.text);
+    state.documentSelection = selection;
+    state.documentText = selectedSourceText(selection);
+
+    state.documentPreview = documentPreview(state.documentText, extractedDoc.chars, selection);
     els.sourceText.value = state.documentPreview;
-    els.selectionMeta.textContent = `Dokumen diekstrak: ${extractedDoc.chars} karakter dari ${extractedDoc.filename}. Pratinjau singkat ditampilkan; teks lengkap dipakai saat membuat deck.`;
+
+    const warning = describeSelection(selection, extractedDoc.filename);
+    els.selectionMeta.textContent = warning
+      || `Dokumen diekstrak: ${extractedDoc.chars} karakter dari ${extractedDoc.filename}. Seluruh dokumen dipakai saat membuat deck.`;
+    // The user has to be able to see that the deck covers part of the report,
+    // not all of it, without reading the generated slides to infer it.
+    if (warning) setDeckStatus(warning, "warn");
+
     updateCharCount();
     state.extractedDocumentName = docFile.name;
     state.extractedImageName = null;
