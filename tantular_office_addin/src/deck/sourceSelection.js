@@ -17,7 +17,7 @@
 // Kept in step with models/Modelfile.office-9b. Raising num_ctx was rejected
 // deliberately: 131072 on a 9B model turns memory pressure and latency into the
 // next workshop failure on attendee laptops.
-export const MODEL_CONTEXT_TOKENS = 32768;
+export const MODEL_CONTEXT_TOKENS = 32768; // see models/Modelfile.office-9b
 export const RESERVED_OUTPUT_TOKENS = 8192; // PARAMETER num_predict
 export const RESERVED_PROMPT_TOKENS = 2048; // system prompt, instructions, JSON scaffold
 export const SOURCE_TOKEN_BUDGET =

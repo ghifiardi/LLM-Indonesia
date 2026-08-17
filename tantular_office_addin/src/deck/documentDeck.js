@@ -3,6 +3,14 @@
 // a deck. This module builds structure directly: detect a title, detect section
 // headings, group content, and emit clean slides with concise bullets.
 
+import {
+  parseStatementRow,
+  statementBullets,
+  looksLikeStatement,
+  stripBilingualMirror,
+  detectPeriods
+} from "./statementRows.js";
+
 const HEADING_WORDS = [
   "abstract", "abstrak", "introduction", "pendahuluan", "background", "latar belakang",
   "method", "methods", "methodology", "metodologi", "approach", "pendekatan",
@@ -33,6 +41,8 @@ export function buildDocumentDeckSpec(rawText, slideCount = 8) {
   // first bullets. Split sentence-rich sections into continuation slides.
   if (sections.length < bodyBudget) sections = expandSectionsToTarget(sections, bodyBudget);
 
+  const periods = documentPeriods(text);
+
   const slides = [];
   slides.push({
     type: "title",
@@ -43,17 +53,21 @@ export function buildDocumentDeckSpec(rawText, slideCount = 8) {
   slides.push({
     type: "agenda",
     headline: "Agenda",
-    bullets: sections.map((s) => truncate(s.title, 70)).slice(0, 7)
+    bullets: sections.map((s) => truncate(sectionHeadline(s.title), 70)).slice(0, 7)
   });
 
+  // Two slides with the same headline AND the same bullets are a duplicate, not
+  // a continuation: section expansion could emit the same statement heading
+  // twice with identical content.
+  const seen = new Set();
   for (const section of sections) {
-    const bullets = toBullets(section.body);
+    const bullets = toBullets(section.body, section.title, periods);
     if (!bullets.length) continue;
-    slides.push({
-      type: "bullets",
-      headline: truncate(section.title, 80),
-      bullets
-    });
+    const headline = truncate(sectionHeadline(section.title), 80);
+    const fingerprint = `${headline} ${bullets.join(" ")}`;
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    slides.push({ type: "bullets", headline, bullets });
   }
 
   slides.push({
@@ -63,6 +77,27 @@ export function buildDocumentDeckSpec(rawText, slideCount = 8) {
   });
 
   return { title, subtitle: "Ringkasan terstruktur", slides };
+}
+
+// Section titles come from a group's first line when no heading was detected,
+// which put a whole flattened statement row in the headline position:
+// "hasil investasi lain-lain 91,003 18,478 from other investments". The row's
+// own label is the honest heading; its figures belong in the body.
+function sectionHeadline(title) {
+  const row = parseStatementRow(title);
+  return stripBilingualMirror(row ? row.label : title);
+}
+
+// Column years, taken from the first heading in the document that names them.
+// A statement page often repeats only the line items, so a row's own heading
+// frequently has no years — without this the figures print unlabelled and the
+// reader cannot tell 2025 from 2024.
+function documentPeriods(text) {
+  for (const line of String(text || "").split("\n")) {
+    const periods = detectPeriods(line);
+    if (periods.length >= 2) return periods;
+  }
+  return [];
 }
 
 // --- detection ---------------------------------------------------------------
@@ -104,7 +139,7 @@ function detectSections(text) {
   }
 
   return sections
-    .map((s) => ({ title: s.title, body: s.body.join(" ").trim() }))
+    .map((s) => ({ title: s.title, body: s.body.join("\n").trim() }))
     .filter((s) => s.body.length > 40);
 }
 
@@ -215,7 +250,7 @@ function detectSectionsLoose(text) {
   }
 
   const result = sections
-    .map((s) => ({ title: s.title, body: s.body.join(" ").trim() }))
+    .map((s) => ({ title: s.title, body: s.body.join("\n").trim() }))
     .filter((s) => s.body.length > 40);
   return result.length >= 3 ? result : [];
 }
@@ -244,7 +279,7 @@ function fallbackSections(text, targetGroups = 6) {
   for (let i = 0; i < paras.length; i += perGroup) {
     sections.push({
       title: `Bagian ${sections.length + 1}`,
-      body: paras.slice(i, i + perGroup).join(" ")
+      body: paras.slice(i, i + perGroup).join("\n")
     });
     if (sections.length >= groups) break;
   }
@@ -290,8 +325,15 @@ function mergeOrTrimSections(sections, budget) {
 
 // --- content shaping ---------------------------------------------------------
 
-function toBullets(body) {
-  const sentences = splitSentences(body);
+// A statement page is not prose: its line items are rows, not sentences, so
+// sentence-splitting dropped every figure on it. Rows are formatted as rows;
+// prose lines (the currency basis, notably) are kept verbatim.
+function toBullets(body, heading = "", periods = []) {
+  if (looksLikeStatement(body)) return statementBullets(body, heading, 7, periods);
+  // Section bodies keep their line breaks so statement rows stay separable.
+  // Prose does not want them: a sentence wrapped across two source lines must
+  // still read as one bullet.
+  const sentences = splitSentences(String(body || "").replace(/\s+/g, " "));
   const bullets = [];
   for (const sentence of sentences) {
     const s = sentence.trim();
