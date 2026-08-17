@@ -351,3 +351,27 @@ test("runTantularStream converts pre-response AbortError to dihentikan contract"
     globalThis.fetch = originalFetch;
   }
 });
+
+// --- companion timeout -------------------------------------------------------
+test("listLocalModels aborts instead of hanging when the companion never answers", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  // A companion that accepts the connection and never responds. Without a
+  // deadline this await never settles, the dropdown stays on "Memuat daftar
+  // model..." forever, and the user is told to reinstall models they have.
+  globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () =>
+      reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  });
+  try {
+    const { listLocalModels } = await import("../src/tantularClient.js");
+    await assert.rejects(() => listLocalModels(), (error) => {
+      assert.match(error.message, /tidak menjawab|Companion/i,
+        "must name the companion, not blame the model install");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

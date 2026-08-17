@@ -449,6 +449,18 @@ function useTantularForBoth() {
     || options.find((name) => /^tantular-office:/i.test(name))
     || options.find((name) => /^tantular/i.test(name));
   if (!model) {
+    // Distinguish "the list never loaded" from "no Tantular model installed".
+    // Telling someone to install a model they already have sends them off to
+    // re-download several GB while the real fault is an unreachable companion.
+    const stillLoading = [...els.installedModel.options]
+      .some((option) => !option.value && /memuat/i.test(option.textContent || ""));
+    if (stillLoading || !options.length) {
+      return setModelSelectionStatus(
+        "Daftar model belum termuat. Klik Refresh dulu — bila tetap gagal, pastikan "
+        + "jendela Tantular Companion masih terbuka (npm start).",
+        "error"
+      );
+    }
     return setModelSelectionStatus("Model Tantular belum ditemukan. Jalankan `npm run model:office`, lalu klik Refresh.", "error");
   }
   els.model.value = model;
