@@ -30,6 +30,10 @@ export const SOURCE_TOKEN_BUDGET =
 // slightly wasteful.
 const CHARS_PER_TOKEN = 3.5;
 
+// The same budget expressed in characters, for callers that bound a pasted or
+// typed brief (which never went through chunking) rather than a document.
+export const SOURCE_CHAR_BUDGET = Math.floor(SOURCE_TOKEN_BUDGET * CHARS_PER_TOKEN);
+
 export function estimateTokens(text) {
   return Math.ceil(String(text || "").length / CHARS_PER_TOKEN);
 }

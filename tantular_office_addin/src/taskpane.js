@@ -46,7 +46,8 @@ import {
   selectSource,
   selectedSourceText,
   selectionInstruction,
-  describeSelection
+  describeSelection,
+  SOURCE_CHAR_BUDGET
 } from "./deck/sourceSelection.js";
 import { planDocument } from "./document/documentPlanner.js";
 import { buildDocumentDocxBase64 } from "./document/docxBuilder.js";
@@ -137,8 +138,8 @@ const els = {
   deckProjectInstructions: document.querySelector("#deck-project-instructions"),
   saveProjectInstructions: document.querySelector("#save-project-instructions"),
   clearProjectInstructions: document.querySelector("#clear-project-instructions"),
-  deckImageInput: document.querySelector("#deck-image-input"),
-  deckDocumentInput: document.querySelector("#deck-document-input"),
+  sourceImageInput: document.querySelector("#source-image-input"),
+  sourceDocumentInput: document.querySelector("#source-document-input"),
   deckCreate: document.querySelector("#deck-create"),
   deckDownload: document.querySelector("#deck-download"),
   deckProgress: document.querySelector("#deck-progress"),
@@ -302,10 +303,10 @@ function bindStaticEvents() {
   // An explicit slide-count entry must never be overridden by a count parsed
   // out of the brief text.
   els.deckCount.addEventListener("input", () => { state.deckCountManual = true; });
-  els.deckImageInput.addEventListener("change", () => { state.extractedImageName = null; });
+  els.sourceImageInput.addEventListener("change", () => { state.extractedImageName = null; });
   // Clear the selection too: a stale one would keep appending a coverage notice
   // about a document that is no longer the source.
-  els.deckDocumentInput.addEventListener("change", () => {
+  els.sourceDocumentInput.addEventListener("change", () => {
     state.extractedDocumentName = null;
     state.documentSelection = null;
   });
@@ -684,8 +685,36 @@ function looksLikeDeckStudioInstruction(text) {
 
 // --- Document Studio --------------------------------------------------------
 
+// Word and Excel capped the brief at a bare `slice(0, 40_000)`. That is the
+// silent truncation this project just removed everywhere else: an uploaded
+// document is bounded to the model budget by selectSource, which can exceed
+// 40k characters, so the tail vanished without a word. Bound to the real
+// budget, and say so when anything is cut.
+function boundedBrief(content, setStatus) {
+  const text = String(content || "");
+  if (text.length <= SOURCE_CHAR_BUDGET) return text;
+  setStatus(
+    `Teks sumber dipotong ke ${SOURCE_CHAR_BUDGET.toLocaleString("id-ID")} karakter `
+    + `(dari ${text.length.toLocaleString("id-ID")}) agar muat di jendela konteks model. `
+    + `Hasil hanya mencakup bagian awal teks.`,
+    "warn"
+  );
+  return text.slice(0, SOURCE_CHAR_BUDGET);
+}
+
 async function resolveDocumentSpec() {
-  let content = els.sourceText.value.trim();
+  const { docFile } = await ingestUploadedSource({
+    setProgress: (text) => { els.documentProgressText.textContent = text; },
+    setStatus: setDocumentStatus,
+    extraOcrContext: [
+      els.documentTone.value.trim() ? `Tone dokumen: ${els.documentTone.value.trim()}` : "",
+      projectInstructions()
+        ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
+        : ""
+    ].filter(Boolean).join("\n\n")
+  });
+
+  let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "Word") {
     els.documentProgressText.textContent = "Membaca seleksi Word...";
     const selected = await getSelectionContext("Word");
@@ -703,12 +732,12 @@ async function resolveDocumentSpec() {
     }
   }
   if (!content) {
-    throw new Error("Masukkan brief/teks di kotak sumber, pilih teks Word, atau buka dokumen yang berisi teks.");
+    throw new Error("Unggah dokumen/PDF/gambar, masukkan brief di kotak sumber, pilih teks Word, atau buka dokumen yang berisi teks.");
   }
 
   els.documentProgressText.textContent = "Menyusun struktur dokumen dengan Tantular...";
   const result = await planDocument({
-    brief: content.slice(0, 40_000),
+    brief: boundedBrief(content, setDocumentStatus),
     documentType: els.documentType.value,
     tone: els.documentTone.value.trim(),
     sectionCount: documentSectionCount(),
@@ -890,7 +919,15 @@ function setDocumentStatus(message, kind = "") {
 // --- Sheet Studio -----------------------------------------------------------
 
 async function resolveWorkbookSpec() {
-  let content = els.sourceText.value.trim();
+  const { docFile } = await ingestUploadedSource({
+    setProgress: (text) => { els.workbookProgressText.textContent = text; },
+    setStatus: setWorkbookStatus,
+    extraOcrContext: projectInstructions()
+      ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
+      : ""
+  });
+
+  let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "Excel") {
     els.workbookProgressText.textContent = "Membaca range Excel...";
     const selected = await getSelectionContext("Excel");
@@ -902,12 +939,12 @@ async function resolveWorkbookSpec() {
     }
   }
   if (!content) {
-    throw new Error("Masukkan brief/teks di kotak sumber atau pilih range Excel terlebih dahulu.");
+    throw new Error("Unggah dokumen/PDF/gambar, masukkan brief di kotak sumber, atau pilih range Excel terlebih dahulu.");
   }
 
   els.workbookProgressText.textContent = "Menyusun struktur workbook dengan Tantular...";
   const result = await planWorkbook({
-    brief: content.slice(0, 40_000),
+    brief: boundedBrief(content, setWorkbookStatus),
     workbookType: els.workbookType.value,
     sheetCount: workbookSheetCount(),
     instruction: els.workbookInstruction.value.trim()
@@ -1031,25 +1068,30 @@ function documentPreview(text, chars, selection = null) {
     ? `bagian terpilih (${selection.selected.length}/${selection.chunks.length} bagian, `
       + `≈${selection.tokensSelected} token) dari ${chars} karakter dokumen dipakai`
     : `teks lengkap ${chars} karakter dipakai`;
-  return `[Pratinjau dokumen — ${scope} saat membuat deck. Edit kotak ini hanya jika ingin mengganti sumbernya.]\n\n${head}…`;
+  return `[Pratinjau dokumen — ${scope} saat membuat hasil. Edit kotak ini hanya jika ingin mengganti sumbernya.]\n\n${head}…`;
 }
 
-async function resolveDeckSpec() {
-  state.deckPlanWarning = "";
-  state.deckAutoSwitchNote = "";
-  const docFile = els.deckDocumentInput.files?.[0];
-  const file = els.deckImageInput.files?.[0];
+// Upload ingestion, shared by Deck Studio (PowerPoint), Document Studio (Word)
+// and Sheet Studio (Excel).
+//
+// The two file inputs used to live inside Deck Studio, which only PowerPoint
+// is given — so Word and Excel had no way to upload a PDF, document, or
+// screenshot at all. They now sit in the shared source card and every studio
+// reads them through here.
+//
+// The full extracted text is kept in memory only; the textarea gets a short
+// preview, so the pane stays light and a large document is never re-rendered.
+async function ingestUploadedSource({ setProgress, setStatus, extraOcrContext = "" }) {
+  const docFile = els.sourceDocumentInput.files?.[0];
+  const imageFile = els.sourceImageInput.files?.[0];
 
-  // 1) If a document/PDF is uploaded, extract it first. Keep the full text in
-  // memory only — the textarea gets a short preview so the pane stays light
-  // and the full document is never re-rendered or re-used as pasted input.
   if (docFile && state.extractedDocumentName !== docFile.name) {
-    els.deckProgressText.textContent = "Mengekstrak dokumen/PDF...";
+    setProgress("Mengekstrak dokumen/PDF...");
     const extractedDoc = await extractDocumentFile(docFile);
 
     // Bound the source explicitly. Handing the whole document downstream used
     // to overflow the model context, and the overflow was discarded in silence
-    // — a report whose figures never arrived still produced a confident deck.
+    // — a report whose figures never arrived still produced a confident result.
     const selection = selectSource(extractedDoc.text);
     state.documentSelection = selection;
     state.documentText = selectedSourceText(selection);
@@ -1059,45 +1101,61 @@ async function resolveDeckSpec() {
 
     const warning = describeSelection(selection, extractedDoc.filename);
     els.selectionMeta.textContent = warning
-      || `Dokumen diekstrak: ${extractedDoc.chars} karakter dari ${extractedDoc.filename}. Seluruh dokumen dipakai saat membuat deck.`;
-    // The user has to be able to see that the deck covers part of the report,
-    // not all of it, without reading the generated slides to infer it.
-    if (warning) setDeckStatus(warning, "warn");
+      || `Dokumen diekstrak: ${extractedDoc.chars} karakter dari ${extractedDoc.filename}. Seluruh dokumen dipakai.`;
+    // The user has to be able to see that the output covers part of the
+    // document, not all of it, without reading the result to infer it.
+    if (warning) setStatus(warning, "warn");
 
     updateCharCount();
     state.extractedDocumentName = docFile.name;
     state.extractedImageName = null;
   }
 
-  // 2) If an image is uploaded (and not yet extracted), OCR it once.
-  if (!docFile && file && state.extractedImageName !== file.name) {
-    els.deckProgressText.textContent = "Membaca teks dari gambar...";
-    const dataUrl = await fileToDataUrl(file);
-    const extra = [
-      els.deckTone.value.trim() ? `Tone deck: ${els.deckTone.value.trim()}` : "",
-      projectInstructions()
-        ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
-        : ""
-    ].filter(Boolean).join("\n\n");
-    const extracted = await extractSlideFromImage(dataUrl, extra);
+  if (!docFile && imageFile && state.extractedImageName !== imageFile.name) {
+    setProgress("Membaca teks dari gambar...");
+    const dataUrl = await fileToDataUrl(imageFile);
+    const extracted = await extractSlideFromImage(dataUrl, extraOcrContext);
     els.sourceText.value = extracted;
-    els.selectionMeta.textContent = `Gambar diekstrak: ${extracted.length} karakter dari ${file.name} — ${ocrStatusLine(getLastOcrEngine())}.`;
+    els.selectionMeta.textContent =
+      `Gambar diekstrak: ${extracted.length} karakter dari ${imageFile.name} — ${ocrStatusLine(getLastOcrEngine())}.`;
     updateCharCount();
-    state.extractedImageName = file.name;
+    state.extractedImageName = imageFile.name;
   }
 
-  // 3) Content priority: extracted document (full text) -> text box -> selected
-  // slide. The document's full text is used only while the textarea still shows
-  // its untouched preview; editing the box hands control back to the user.
-  let content = els.sourceText.value.trim();
+  return { docFile, imageFile };
+}
+
+// Content priority: extracted document (full text) -> text box -> host
+// selection. The document's full text is used only while the textarea still
+// shows its untouched preview; editing the box hands control back to the user.
+function uploadedOrTypedContent(docFile) {
+  const typed = els.sourceText.value.trim();
   if (
     docFile &&
     state.extractedDocumentName === docFile.name &&
     state.documentText &&
-    content === state.documentPreview.trim()
+    typed === state.documentPreview.trim()
   ) {
-    content = state.documentText.trim();
+    return state.documentText.trim();
   }
+  return typed;
+}
+
+async function resolveDeckSpec() {
+  state.deckPlanWarning = "";
+  state.deckAutoSwitchNote = "";
+  const { docFile } = await ingestUploadedSource({
+    setProgress: (text) => { els.deckProgressText.textContent = text; },
+    setStatus: setDeckStatus,
+    extraOcrContext: [
+      els.deckTone.value.trim() ? `Tone deck: ${els.deckTone.value.trim()}` : "",
+      projectInstructions()
+        ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
+        : ""
+    ].filter(Boolean).join("\n\n")
+  });
+
+  let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "PowerPoint") {
     els.deckProgressText.textContent = "Membaca slide terpilih...";
     const selected = await getSelectedSlideTextContext();

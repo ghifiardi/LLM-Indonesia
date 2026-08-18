@@ -138,6 +138,16 @@
         <span id="selection-meta">Belum ada seleksi.</span>
         <span id="char-count">0 karakter</span>
       </div>
+      <div class="deck-image-row">
+        <label class="prompt-label" for="source-document-input">Sumber dokumen/PDF (opsional)</label>
+        <input id="source-document-input" type="file" accept=".pdf,.docx,.pptx,.txt,.md,.markdown,.csv,.tsv,.json,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation" />
+        <p class="hint">Dipakai oleh Document Studio (Word), Sheet Studio (Excel), dan Deck Studio (PowerPoint). Untuk PDF/DOCX/PPTX jalankan companion lokal: <code>npm start</code>. TXT/MD/CSV dibaca langsung.</p>
+      </div>
+      <div class="deck-image-row">
+        <label class="prompt-label" for="source-image-input">Sumber gambar/screenshot (opsional)</label>
+        <input id="source-image-input" type="file" accept="image/*" />
+        <p class="hint">Urutan sumber: dokumen yang diunggah → gambar → teks di kotak di atas → seleksi aktif di Office.</p>
+      </div>
       <div id="workspace-banner" class="workspace-banner hidden"></div>
       <details id="workspace-inbox" class="workspace-inbox">
         <summary>Ambil dari aplikasi lain (10 kiriman terakhir)</summary>
@@ -276,16 +286,6 @@
       <div class="button-row compact-row">
         <button id="save-project-instructions" class="secondary" type="button">Simpan instruksi</button>
         <button id="clear-project-instructions" class="secondary" type="button">Kosongkan</button>
-      </div>
-      <div class="deck-image-row">
-        <label class="prompt-label" for="deck-image-input">Sumber gambar/screenshot (opsional)</label>
-        <input id="deck-image-input" type="file" accept="image/*" />
-        <p class="hint">Sumber deck otomatis: gambar yang diunggah → teks di kotak atas → slide yang terpilih.</p>
-      </div>
-      <div class="deck-image-row">
-        <label class="prompt-label" for="deck-document-input">Sumber dokumen/PDF (opsional)</label>
-        <input id="deck-document-input" type="file" accept=".pdf,.docx,.pptx,.txt,.md,.markdown,.csv,.tsv,.json,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation" />
-        <p class="hint">Untuk PDF/DOCX/PPTX, jalankan companion lokal: <code>npm run doc-server</code>. TXT/MD/CSV bisa dibaca langsung.</p>
       </div>
       <div class="button-row">
         <button id="deck-create" class="primary deck-build" type="button">✨ Buat Deck (sisip ke presentasi)</button>
