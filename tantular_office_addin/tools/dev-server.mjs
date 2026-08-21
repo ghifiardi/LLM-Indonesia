@@ -4,6 +4,11 @@ import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createWorkspaceStore, handleWorkspaceRequest } from "./workspace.mjs";
+import {
+  ollamaLineToOpenAiEvent,
+  openAiToOllamaBody,
+  parseOllamaResponse
+} from "../src/chat/ollamaBridge.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -303,39 +308,145 @@ function proxyChatCompletions(req, res) {
     return;
   }
 
-  const proxyReq = http.request(
-    {
-      hostname: "127.0.0.1",
-      port: 11434,
-      path: "/v1/chat/completions",
-      method: "POST",
-      headers: {
-        "Content-Type": req.headers["content-type"] || "application/json",
-        "Content-Length": req.headers["content-length"] || undefined
-      }
-    },
-    (proxyRes) => {
-      res.writeHead(proxyRes.statusCode || 502, {
-        "Content-Type": proxyRes.headers["content-type"] || "application/json; charset=utf-8",
-        ...corsHeaders(req),
-        "Cache-Control": "no-store"
+  readJsonBody(req, (error, body) => {
+    if (error) {
+      res.writeHead(error.status || 400, {
+        "Content-Type": "application/json; charset=utf-8",
+        ...corsHeaders(req)
       });
-      proxyRes.pipe(res);
+      res.end(JSON.stringify({ ok: false, error: error.message }));
+      return;
     }
-  );
 
-  proxyReq.on("error", (error) => {
-    res.writeHead(502, {
-      "Content-Type": "application/json; charset=utf-8",
-      ...corsHeaders(req)
-    });
-    res.end(JSON.stringify({
-      ok: false,
-      error: `Model proxy gagal: ${error.message}. Pastikan Ollama berjalan dan model Tantular tersedia.`
-    }));
+    const ollamaBody = openAiToOllamaBody(body);
+    const proxyReq = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: 11434,
+        path: "/api/chat",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(JSON.stringify(ollamaBody))
+        }
+      },
+      (proxyRes) => {
+        if ((proxyRes.statusCode || 502) >= 400) {
+          collectResponse(proxyRes, (collectError, raw) => {
+            if (collectError) {
+              writeModelProxyError(res, req, collectError);
+              return;
+            }
+            const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502);
+            res.writeHead(proxyRes.statusCode || 502, {
+              "Content-Type": "application/json; charset=utf-8",
+              ...corsHeaders(req),
+              "Cache-Control": "no-store"
+            });
+            res.end(JSON.stringify(payload));
+          });
+          return;
+        }
+        if (ollamaBody.stream) {
+          streamOllamaAsOpenAi(proxyRes, res, req);
+          return;
+        }
+        collectResponse(proxyRes, (collectError, raw) => {
+          if (collectError) {
+            writeModelProxyError(res, req, collectError);
+            return;
+          }
+          const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502);
+          res.writeHead(proxyRes.statusCode || 502, {
+            "Content-Type": "application/json; charset=utf-8",
+            ...corsHeaders(req),
+            "Cache-Control": "no-store"
+          });
+          res.end(JSON.stringify(payload));
+        });
+      }
+    );
+
+    proxyReq.on("error", (proxyError) => writeModelProxyError(res, req, proxyError));
+    proxyReq.end(JSON.stringify(ollamaBody));
   });
+}
 
-  req.pipe(proxyReq);
+const MAX_CHAT_BODY_BYTES = 256 * 1024;
+
+function readJsonBody(req, callback) {
+  let body = "";
+  let size = 0;
+  let finished = false;
+  const fail = (error) => {
+    if (finished) return;
+    finished = true;
+    callback(error);
+    req.destroy();
+  };
+  req.setEncoding("utf8");
+  req.on("data", (chunk) => {
+    size += Buffer.byteLength(chunk);
+    if (size > MAX_CHAT_BODY_BYTES) {
+      fail(Object.assign(new Error("Permintaan model terlalu besar."), { status: 413 }));
+      return;
+    }
+    body += chunk;
+  });
+  req.on("end", () => {
+    if (finished) return;
+    try {
+      finished = true;
+      callback(null, JSON.parse(body || "{}"));
+    } catch {
+      finished = true;
+      callback(Object.assign(new Error("Body harus JSON yang valid."), { status: 400 }));
+    }
+  });
+  req.on("error", (error) => fail(error));
+}
+
+function collectResponse(response, callback) {
+  const chunks = [];
+  response.on("data", (chunk) => chunks.push(chunk));
+  response.on("end", () => callback(null, Buffer.concat(chunks).toString("utf8")));
+  response.on("error", callback);
+}
+
+function streamOllamaAsOpenAi(proxyRes, res, req) {
+  res.writeHead(proxyRes.statusCode || 502, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    ...corsHeaders(req)
+  });
+  let pending = "";
+  proxyRes.on("data", (chunk) => {
+    pending += chunk.toString("utf8");
+    const lines = pending.split("\n");
+    pending = lines.pop() || "";
+    for (const line of lines) res.write(ollamaLineToOpenAiEvent(line));
+  });
+  proxyRes.on("end", () => {
+    if (pending.trim()) res.write(ollamaLineToOpenAiEvent(pending));
+    res.end("data: [DONE]\n\n");
+  });
+  proxyRes.on("error", () => res.end());
+}
+
+function writeModelProxyError(res, req, error) {
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  res.writeHead(error.status || 502, {
+    "Content-Type": "application/json; charset=utf-8",
+    ...corsHeaders(req)
+  });
+  res.end(JSON.stringify({
+    ok: false,
+    error: `Model proxy gagal: ${error.message}. Pastikan Ollama berjalan dan model Tantular tersedia.`
+  }));
 }
 
 function proxyOllamaModels(req, res) {
