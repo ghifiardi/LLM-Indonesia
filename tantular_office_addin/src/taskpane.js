@@ -431,6 +431,7 @@ async function refreshInstalledModels(showStatus = false) {
       : `<option value="">Tidak ada model Ollama</option>`;
     const preferred = [
       previous,
+      "tantular-office:0.5-9b",
       "tantular-office:0.4-9b",
       ...options.filter((model) => /^tantular/i.test(model)),
       options[0]
@@ -458,7 +459,8 @@ function useInstalledModel(target) {
 
 function useTantularForBoth() {
   const options = [...els.installedModel.options].map((option) => option.value).filter(Boolean);
-  const model = options.find((name) => name === "tantular-office:0.4-9b")
+  const model = options.find((name) => name === "tantular-office:0.5-9b")
+    || options.find((name) => name === "tantular-office:0.4-9b")
     || options.find((name) => /^tantular-office:/i.test(name))
     || options.find((name) => /^tantular/i.test(name));
   if (!model) {
@@ -486,7 +488,7 @@ function renderModelCapability() {
   const deck = String(els.deckModel.value || "").trim();
   const weakDeckModel = /\b(?:0\.[12]-id|0\.8b|1(?:\.5|\.7)?b|2b|3b|mini|small)\b/i.test(deck);
   if (weakDeckModel) {
-    els.modelCapability.textContent = `⚠ Model Studio "${deck}" terlalu kecil untuk output panjang. Gunakan tantular-office:0.4-9b atau qwen3.5:9b.`;
+    els.modelCapability.textContent = `⚠ Model Studio "${deck}" terlalu kecil untuk output panjang. Gunakan tantular-office:0.5-9b atau qwen3.5:9b.`;
     els.modelCapability.className = "hint model-warning";
     return;
   }

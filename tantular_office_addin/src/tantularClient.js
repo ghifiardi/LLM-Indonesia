@@ -17,7 +17,11 @@ function defaultEndpoint() {
   return companionUrl("/api/chat-completions");
 }
 const DEFAULT_MODEL = "qwen3.5:9b";
-const DEFAULT_DECK_MODEL = "tantular-office:0.4-9b";
+// Q8_0 profile, published as ghifidanukusumo/tantular:latest and installed
+// under this alias. The 0.4 alias was Q4_K_M, which scores 37/40 on the voice
+// gate against a 0.95 bar; Q8 scores 38/40 and matches bf16. Existing installs
+// keep working — 0.4 stays in the preference list below the new default.
+const DEFAULT_DECK_MODEL = "tantular-office:0.5-9b";
 const DECK_MODEL_FALLBACK = "qwen3.5:9b";
 const DEFAULT_VISION_MODEL = "llama3.2-vision";
 const SETTINGS_KEY = "tantular.office.settings.v1";

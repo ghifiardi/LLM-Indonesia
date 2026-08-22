@@ -90,11 +90,17 @@ responses, but it is not trained for long presentation plans and its model
 profile caps generation at 220 tokens.
 
 Deck Studio therefore uses a separate **Model deck** setting. The recommended
-profile is `tantular-office:0.4-9b`, built locally from `qwen3.5:9b`:
+profile is `tantular-office:0.5-9b`, pulled from the published Q8_0 artifact
+`ghifidanukusumo/tantular:latest`:
 
 ```bash
 npm run model:office
 ```
+
+Q8_0 is the default because the earlier Q4_K_M profile scored below the voice
+gate (37/40 against a 0.95 bar) while Q8 matches bf16 at 38/40. It needs 16GB
+RAM; the installer selects the 4B `lite` profile below that. `tantular:q4-0.4`
+remains published for rollback.
 
 If that alias has not been created yet, Deck Studio automatically falls back to
 the installed `qwen3.5:9b` base. The general/chat model remains independently
