@@ -1154,7 +1154,12 @@ function basicBlockText(block, listIndex) {
 }
 
 // Keep in sync with the tag shown in src/taskpane.html next to the chat title.
-export const TASKPANE_BUILD = "b0818a";
+// Bump this whenever the task pane changes. It is the only way to tell,
+// from inside Office, whether the pane you are looking at is the code you
+// just edited — Word caches the bundle from when the pane was opened.
+// It sat at b0818a across the progress/cancel work (5cf7fee) and so
+// reported "current" for a pane that was two features behind.
+export const TASKPANE_BUILD = "5cf7fe";
 
 // Insert a formatted answer. When `afterText` is provided and located, the
 // content is placed immediately after that anchor (end of the queried
