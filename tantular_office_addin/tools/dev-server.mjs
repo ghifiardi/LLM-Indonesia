@@ -9,8 +9,25 @@ import {
   openAiToOllamaBody,
   parseOllamaResponse
 } from "../src/chat/ollamaBridge.js";
+import {
+  lookupEnabled, allowedHosts, prepareLookup, authorizeExecution,
+  auditRecord, wrapUntrusted
+} from "../src/chat/lookupPolicy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Tokens issued by /api/lookup/prepare, consumed once by /api/lookup/execute.
+const pendingLookups = new Map();
+const LOOKUP_AUDIT = path.join(process.env.HOME || ".", ".tantular-lookup-audit.jsonl");
+function appendLookupAudit(record) {
+  try {
+    fs.appendFileSync(LOOKUP_AUDIT, JSON.stringify(record) + "\n");
+  } catch {
+    // An unwritable audit log must not silently allow an unlogged request; the
+    // caller treats a throw here as a refusal.
+    throw new Error("audit log tidak dapat ditulis; permintaan dibatalkan");
+  }
+}
 const root = path.resolve(__dirname, "..");
 const port = Number(process.env.PORT || 3000);
 const allowedOrigins = new Set([
@@ -120,6 +137,83 @@ function handler(req, res) {
 
   if (url.pathname === "/api/ocr") {
     proxyOcr(req, res);
+    return;
+  }
+
+  // --- approval-gated web lookup: the ONLY outbound path ------------------
+  //
+  // Enforced in the companion rather than the pane. A pane-side check protects
+  // nothing: a bug or a later code path could call fetch directly. Here there
+  // is one door, and it is shut unless TANTULAR_LOOKUP_ENABLED=true.
+  if (url.pathname === "/api/lookup/prepare" || url.pathname === "/api/lookup/execute") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json", ...corsHeaders(req) });
+      res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+      return;
+    }
+    readJsonBody(req, async (bodyError, body) => {
+      const reply = (status, payload) => {
+        res.writeHead(status, {
+          "Content-Type": "application/json; charset=utf-8",
+          ...corsHeaders(req), "Cache-Control": "no-store"
+        });
+        res.end(JSON.stringify(payload));
+      };
+      if (bodyError) return reply(400, { ok: false, error: bodyError.message });
+
+      if (url.pathname === "/api/lookup/prepare") {
+        const prepared = prepareLookup({ query: body?.query, host: body?.host });
+        if (!prepared.ok) {
+          appendLookupAudit(auditRecord({
+            query: String(body?.query || ""), host: String(body?.host || ""),
+            approved: false, outcome: `refused:${prepared.reason}`
+          }));
+          return reply(403, prepared);
+        }
+        pendingLookups.set(prepared.token, prepared);
+        // No request has left the machine at this point. Nothing does until
+        // the user reads `disclosure` and the pane calls execute.
+        return reply(200, {
+          ok: true, token: prepared.token, disclosure: prepared.disclosure,
+          expiresAt: prepared.expiresAt
+        });
+      }
+
+      const authorized = authorizeExecution({
+        pending: pendingLookups, token: body?.token,
+        query: body?.query, host: body?.host
+      });
+      if (!authorized.ok) {
+        appendLookupAudit(auditRecord({
+          query: String(body?.query || ""), host: String(body?.host || ""),
+          approved: false, outcome: `refused:${authorized.reason}`
+        }));
+        return reply(403, authorized);
+      }
+
+      const target = `https://${authorized.entry.host}/w/index.php?search=`
+        + encodeURIComponent(authorized.entry.query);
+      try {
+        const upstream = await fetch(target, { redirect: "error" });
+        const text = await upstream.text();
+        appendLookupAudit(auditRecord({
+          query: authorized.entry.query, host: authorized.entry.host,
+          approved: true, outcome: `sent:${upstream.status}`,
+          responseBytes: text.length
+        }));
+        // Labelled, never handed over as instructions.
+        return reply(200, {
+          ok: true, host: authorized.entry.host, status: upstream.status,
+          untrusted: true, content: wrapUntrusted(authorized.entry.host, text.slice(0, 20_000))
+        });
+      } catch (error) {
+        appendLookupAudit(auditRecord({
+          query: authorized.entry.query, host: authorized.entry.host,
+          approved: true, outcome: `error:${error?.message || "fetch failed"}`
+        }));
+        return reply(502, { ok: false, error: String(error?.message || error) });
+      }
+    });
     return;
   }
 
