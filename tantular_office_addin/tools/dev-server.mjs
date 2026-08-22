@@ -11,7 +11,7 @@ import {
 } from "../src/chat/ollamaBridge.js";
 import {
   lookupEnabled, allowedHosts, prepareLookup, authorizeExecution,
-  auditRecord, wrapUntrusted
+  auditRecord, wrapUntrusted, resolveUrl
 } from "../src/chat/lookupPolicy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -191,16 +191,42 @@ function handler(req, res) {
         return reply(403, authorized);
       }
 
-      const target = `https://${authorized.entry.host}/w/index.php?search=`
-        + encodeURIComponent(authorized.entry.query);
+      const target = resolveUrl(authorized.entry.host, authorized.entry.query);
+      if (!target) {
+        appendLookupAudit(auditRecord({
+          query: authorized.entry.query, host: authorized.entry.host,
+          approved: true, outcome: "refused:no_adapter"
+        }));
+        return reply(403, { ok: false, reason: "no_adapter",
+                            message: "Host tidak punya adapter pencarian." });
+      }
       try {
-        const upstream = await fetch(target, { redirect: "error" });
+        const upstream = await fetch(target, {
+          redirect: "error",
+          headers: {
+            // Wikimedia rate-limits anonymous clients: the first real request
+            // came back 429. Their policy asks for a descriptive agent with
+            // contact info, and it also means our traffic is identifiable
+            // rather than hiding among generic clients.
+            "User-Agent": "TantularOffice/0.5 (local Office add-in; "
+                          + "https://ollama.com/ghifidanukusumo/tantular)",
+            "Accept": "application/json"
+          }
+        });
         const text = await upstream.text();
         appendLookupAudit(auditRecord({
           query: authorized.entry.query, host: authorized.entry.host,
           approved: true, outcome: `sent:${upstream.status}`,
           responseBytes: text.length
         }));
+        // A 429 or a 404 is not a lookup that worked. Reporting ok:true with an
+        // error status hands the model an error page as if it were an answer.
+        if (!upstream.ok) {
+          return reply(502, {
+            ok: false, reason: "upstream_status", status: upstream.status,
+            message: `Sumber menolak permintaan (HTTP ${upstream.status}).`
+          });
+        }
         // Labelled, never handed over as instructions.
         return reply(200, {
           ok: true, host: authorized.entry.host, status: upstream.status,

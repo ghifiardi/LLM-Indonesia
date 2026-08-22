@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   lookupEnabled, hostAllowed, prepareLookup, authorizeExecution,
-  auditRecord, wrapUntrusted, DEFAULT_ALLOWED_HOSTS
+  auditRecord, wrapUntrusted, DEFAULT_ALLOWED_HOSTS, adapterFor, resolveUrl
 } from "../src/chat/lookupPolicy.js";
 
 const ON = { TANTULAR_LOOKUP_ENABLED: "true" };
@@ -22,7 +22,7 @@ test("the feature is OFF unless explicitly enabled", () => {
 });
 
 test("with the flag off, prepare refuses — there is nothing to approve", () => {
-  const out = prepareLookup({ query: "harga beras", host: "www.bps.go.id", env: {} });
+  const out = prepareLookup({ query: "harga beras", host: "id.wikipedia.org", env: {} });
   assert.equal(out.ok, false);
   assert.equal(out.reason, "disabled");
   assert.equal(out.token, undefined, "a token must not exist when disabled");
@@ -52,11 +52,11 @@ test("execution requires a token that prepare actually issued", () => {
 test("THE CORE GUARANTEE: the sent query must be byte-identical to the approved one", () => {
   const pending = new Map();
   const prepared = prepareLookup({ query: "UU Cipta Kerja",
-                                   host: "peraturan.go.id", env: ON });
+                                   host: "id.wikipedia.org", env: ON });
   pending.set(prepared.token, prepared);
   // A single extra word — as a model or a bug might add — invalidates it.
   const tampered = authorizeExecution({
-    pending, token: prepared.token, host: "peraturan.go.id",
+    pending, token: prepared.token, host: "id.wikipedia.org",
     query: "UU Cipta Kerja PT Sinar Mas"
   });
   assert.equal(tampered.ok, false);
@@ -66,9 +66,9 @@ test("THE CORE GUARANTEE: the sent query must be byte-identical to the approved 
 
 test("a token is single use", () => {
   const pending = new Map();
-  const p = prepareLookup({ query: "inflasi 2026", host: "www.bps.go.id", env: ON });
+  const p = prepareLookup({ query: "inflasi 2026", host: "id.wikipedia.org", env: ON });
   pending.set(p.token, p);
-  const args = { pending, token: p.token, query: "inflasi 2026", host: "www.bps.go.id" };
+  const args = { pending, token: p.token, query: "inflasi 2026", host: "id.wikipedia.org" };
   assert.equal(authorizeExecution({ ...args }).ok, true);
   assert.equal(authorizeExecution({ ...args }).ok, false, "replay must fail");
 });
@@ -84,10 +84,10 @@ test("an expired approval cannot be executed", () => {
 });
 
 test("the audit records what left, and NOT the document or the response", () => {
-  const rec = auditRecord({ query: "inflasi 2026", host: "www.bps.go.id",
+  const rec = auditRecord({ query: "inflasi 2026", host: "id.wikipedia.org",
                             approved: true, responseBytes: 12345 });
   assert.equal(rec.query, "inflasi 2026");
-  assert.equal(rec.host, "www.bps.go.id");
+  assert.equal(rec.host, "id.wikipedia.org");
   assert.equal(rec.approved, true);
   assert.ok(rec.at);
   // Assert the SHAPE, not a keyword scan. The first version of this test
@@ -99,7 +99,7 @@ test("the audit records what left, and NOT the document or the response", () => 
   assert.equal(rec.response_bytes, 12345, "size is enough; content is not logged");
   // Feeding document text through the recorder must not smuggle it in: only the
   // fields above exist, so there is nowhere for a body to go.
-  const withBody = auditRecord({ query: "q", host: "www.bps.go.id", approved: true });
+  const withBody = auditRecord({ query: "q", host: "id.wikipedia.org", approved: true });
   assert.equal(withBody.response_bytes, null);
   assert.equal("body" in withBody, false);
   assert.equal("document" in withBody, false);
@@ -123,4 +123,31 @@ test("the default allowlist is narrow and contains no wildcards", () => {
   for (const host of DEFAULT_ALLOWED_HOSTS) {
     assert.doesNotMatch(host, /\*/, "a wildcard allowlist is not an allowlist");
   }
+});
+
+
+test("an allowlisted host with no adapter is still refused", () => {
+  // Allowlisting says "we trust this host". An adapter says "we know how to
+  // ask it something". Without the second, a guessed URL sends the query to a
+  // 404 — the query leaves and nothing useful returns.
+  const env = { ...ON, TANTULAR_LOOKUP_HOSTS: "id.wikipedia.org,www.bps.go.id" };
+  assert.equal(hostAllowed("www.bps.go.id", ["id.wikipedia.org", "www.bps.go.id"]), true);
+  assert.equal(adapterFor("www.bps.go.id"), null);
+  const out = prepareLookup({ query: "inflasi", host: "www.bps.go.id", env });
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, "no_adapter");
+});
+
+test("the adapter builds a documented URL and encodes the query", () => {
+  const url = resolveUrl("id.wikipedia.org", "UU Cipta Kerja & pasal 5");
+  assert.match(url, /^https:\/\/id\.wikipedia\.org\/w\/rest\.php\/v1\/search\/page\?/);
+  assert.match(url, /q=UU%20Cipta%20Kerja%20%26%20pasal%205/,
+    "an unencoded & would truncate the query or inject a parameter");
+});
+
+test("the test-only origin is separate from the feature flag", () => {
+  // Enabling lookup must not enable the test hatch, or a production install
+  // could be pointed at an arbitrary origin.
+  const out = resolveUrl("attacker.test", "x", ON);
+  assert.equal(out, null);
 });

@@ -25,13 +25,34 @@ export function lookupEnabled(env = process.env) {
   return String(env.TANTULAR_LOOKUP_ENABLED || "").toLowerCase() === "true";
 }
 
-// Narrow by default. A wildcard allowlist is not an allowlist.
-export const DEFAULT_ALLOWED_HOSTS = Object.freeze([
-  "id.wikipedia.org",
-  "en.wikipedia.org",
-  "peraturan.go.id",
-  "www.bps.go.id",
-]);
+// HOST ADAPTERS. One entry per host, each building the exact URL for that
+// host's documented search API.
+//
+// The first version built "https://<host>/w/index.php?search=" for EVERY host,
+// which is a Wikipedia path applied to sites that have never heard of it. A
+// generic URL guess against an allowlisted host is not a lookup, it is a
+// 404 with the query attached — the query still leaves, and nothing useful
+// comes back. So a host is only usable when someone has written its adapter.
+//
+// Starting with ONE host deliberately. Adding the rest is per-host work, not a
+// wildcard.
+export const HOST_ADAPTERS = Object.freeze({
+  "id.wikipedia.org": {
+    label: "Wikipedia Bahasa Indonesia",
+    // Documented REST search endpoint; returns JSON, not a rendered page.
+    buildUrl: (query) =>
+      "https://id.wikipedia.org/w/rest.php/v1/search/page?limit=5&q="
+      + encodeURIComponent(query),
+  },
+});
+
+// Narrow by default. A wildcard allowlist is not an allowlist, and a host
+// without an adapter cannot be reached even if it is listed.
+export const DEFAULT_ALLOWED_HOSTS = Object.freeze(Object.keys(HOST_ADAPTERS));
+
+export function adapterFor(host) {
+  return HOST_ADAPTERS[String(host || "").trim().toLowerCase()] || null;
+}
 
 export function allowedHosts(env = process.env) {
   const raw = String(env.TANTULAR_LOOKUP_HOSTS || "").trim();
@@ -45,6 +66,24 @@ export function hostAllowed(host, hosts = allowedHosts()) {
   // Exact match only. Suffix matching would let "evil-wikipedia.org" through,
   // and subdomain wildcards would let an attacker-controlled subdomain through.
   return hosts.includes(clean);
+}
+
+// Test-only escape hatch, off unless explicitly set. It exists so the
+// prompt-injection end-to-end test can serve its own hostile page instead of
+// attacking a real site; it is a separate variable from the feature flag so
+// enabling lookup never enables it.
+export function allowTestAdapter(env = process.env) {
+  return String(env.TANTULAR_LOOKUP_TEST_ORIGIN || "").trim() !== "";
+}
+
+export function resolveUrl(host, query, env = process.env) {
+  const adapter = adapterFor(host);
+  if (adapter) return adapter.buildUrl(query);
+  const origin = String(env.TANTULAR_LOOKUP_TEST_ORIGIN || "").trim();
+  if (origin && String(host).toLowerCase() === new URL(origin).host) {
+    return `${origin}/?q=${encodeURIComponent(query)}`;
+  }
+  return null;
 }
 
 export function fingerprint(query, host) {
@@ -67,6 +106,12 @@ export function prepareLookup({ query, host, env = process.env,
   if (!hostAllowed(host, allowedHosts(env))) {
     return { ok: false, reason: "host_not_allowed",
              message: `Host ${host} tidak ada dalam daftar yang diizinkan.` };
+  }
+  // Allowlisted is not enough: without an adapter there is no correct URL for
+  // this host, and guessing one sends the query nowhere useful.
+  if (!adapterFor(host) && !allowTestAdapter(env)) {
+    return { ok: false, reason: "no_adapter",
+             message: `Host ${host} belum punya adapter pencarian.` };
   }
   return {
     ok: true,
