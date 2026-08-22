@@ -1,3 +1,5 @@
+import { createRun, classifyOutcome, progressLabel, REQUEST_BUDGET_MS,
+         DECK_BUDGET_MS } from "./chat/runProgress.js";
 import { ACTIONS, actionsForHost, detectHost, normalizeHostName, scopedUserPrompt } from "./prompts.js";
 import {
   consumeAutoSwitchNote,
@@ -166,7 +168,11 @@ const els = {
   copyResult: document.querySelector("#copy-result"),
   insertResult: document.querySelector("#insert-result"),
   classifyExcel: document.querySelector("#classify-excel"),
-  status: document.querySelector("#status")
+  status: document.querySelector("#status"),
+  progressCancel: document.querySelector("#progress-cancel"),
+  documentProgressCancel: document.querySelector("#document-progress-cancel"),
+  workbookProgressCancel: document.querySelector("#workbook-progress-cancel"),
+  deckProgressCancel: document.querySelector("#deck-progress-cancel")
 };
 
 bootstrap();
@@ -667,12 +673,15 @@ async function runSelectedAction() {
   }
   const user = scopedUserPrompt(action, action.buildUser({ text, instruction }));
 
-  await withProgress("Menjalankan Tantular lokal...", async () => {
+  await withProgress("Menjalankan Tantular lokal...", async (signal) => {
     const rawResult = await runTantular({
       system: action.system,
       user,
       maxTokens: state.selectedActionId === "excel_classify" ? 900 : 600,
-      temperature: state.selectedActionId === "scam_check" || state.selectedActionId === "excel_classify" ? 0.05 : 0.2
+      temperature: state.selectedActionId === "scam_check" || state.selectedActionId === "excel_classify" ? 0.05 : 0.2,
+      // Without this the Batal button aborts nothing: the pane would stop
+      // waiting while the model kept generating.
+      signal
     });
     const result = normalizeResultForAction(rawResult, state.selectedActionId);
     state.lastResult = result;
@@ -1711,21 +1720,46 @@ async function labelExcelRange() {
   });
 }
 
-async function withProgress(message, fn) {
-  setBusy(true, message);
+async function withProgress(message, fn, { budgetMs = REQUEST_BUDGET_MS,
+                                            cancelButton = els.progressCancel,
+                                            report = setStatus,
+                                            paint = null } = {}) {
+  // The elapsed clock and the cancel button exist together on purpose: a timer
+  // without a way out only tells the user how long they have been stuck, and a
+  // button without a timer gives them nothing to judge by.
+  const repaint = paint || ((text) => setBusy(true, text));
+  const run = createRun({
+    budgetMs,
+    onTick: (elapsed) => repaint(progressLabel(message, elapsed, budgetMs))
+  });
+  const onCancel = () => run.cancel();
+  if (cancelButton) {
+    cancelButton.disabled = false;
+    cancelButton.addEventListener("click", onCancel);
+  }
+  repaint(progressLabel(message, 0, budgetMs));
   try {
-    await fn();
+    await fn(run.signal);
   } catch (error) {
     console.error(error);
-    setStatus(error?.message || String(error), "error");
+    const outcome = classifyOutcome(error, {
+      cancelled: run.cancelled, timedOut: run.timedOut
+    });
+    // A cancellation is the user's decision, not a failure. Reporting it as an
+    // error teaches people to ignore the error channel.
+    report(outcome.message, outcome.status);
   } finally {
+    run.finish();
+    if (cancelButton) cancelButton.removeEventListener("click", onCancel);
     setBusy(false);
   }
 }
 
 function setBusy(isBusy, message = "Memproses...") {
   els.progress.classList.toggle("hidden", !isBusy);
-  els.progressText.textContent = message;
+  // Never blank. An empty progress line is the "looks hung" state itself.
+  els.progressText.textContent = message || "Memproses...";
+  if (els.progressCancel) els.progressCancel.disabled = !isBusy;
   [els.loadSelection, els.runAction, els.insertResult, els.classifyExcel].forEach((button) => {
     button.disabled = isBusy;
   });
