@@ -13,13 +13,17 @@
   <h2>Spesifikasi laptop &amp; ekspektasi</h2>
   <p><strong>Tantular Office</strong> adalah profil yang berjalan di atas model dasar
   <strong>Qwen3.5</strong> (9B atau 4B, sesuai RAM). Yang Anda pilih di panel adalah
-  <code>tantular-office:0.4-9b</code>; yang diunduh Ollama adalah basis Qwen3.5-nya.
-  Karena itu dua nama tersebut muncul berdampingan di halaman ini.</p>
+  <code>tantular-office:0.5-9b</code>.</p>
+  <p>Sejak Agustus 2026 installer <strong>mengunduh profil jadi</strong> dari
+  ollama.com, bukan menyusunnya di komputer Anda. Profil itu memakai presisi Q8
+  yang kualitasnya setara bobot penuh; versi Q4 sebelumnya gagal pada uji bahasa
+  Indonesia kami (37 dari 40, ambang 38). Satu unduhan, tanpa langkah build.</p>
   <ul>
-    <li><strong>RAM 16 GB ke atas:</strong> pengalaman penuh dengan model Qwen3.5 9B.</li>
-    <li><strong>RAM 8 GB:</strong> otomatis memakai model ringan (Qwen3.5 4B) — tetap berfungsi, kualitas deck sedikit di bawah 9B.</li>
+    <li><strong>RAM 16 GB ke atas:</strong> pengalaman penuh dengan model 9B (unduhan ±10 GB).</li>
+    <li><strong>RAM di bawah 16 GB:</strong> otomatis memakai model ringan 4B (±3,4 GB) — tetap berfungsi, kualitas deck sedikit di bawah 9B.</li>
+    <li>Batas ini naik dari 12 GB ke 16 GB karena model 9B kini berukuran 10 GB, bukan 6,6 GB. Komputer 12 GB akan tersendat bila dipaksa memakai 9B.</li>
     <li>Installer mendeteksi RAM secara otomatis dan memilih model yang tepat; tidak perlu diatur manual.</li>
-    <li>Installer mengunduh base resmi Qwen3.5 dari Ollama (±6,6 GB untuk 9B, ±3,4 GB untuk lite) dan membuat profil Tantular Office secara lokal — sebaiknya jalankan installer dari rumah sebelum hari workshop.</li>
+    <li>Unduhannya besar — <strong>jalankan installer dari rumah sebelum hari workshop</strong>, jangan mengandalkan Wi-Fi ruangan.</li>
   </ul>
   <h2>Komponen lokal yang dibutuhkan</h2>
   <ul>
@@ -85,7 +89,8 @@
     <li>Pastikan jendela terminal Tantular Companion tetap terbuka.</li>
     <li>Buka <code>https://localhost:3000/src/taskpane.html</code> satu kali dan setujui/percayai sertifikatnya bila diminta.</li>
     <li>Di pengaturan Tantular, klik <strong>Refresh</strong> lalu <strong>Tes model terpilih</strong>.</li>
-    <li>Jika Buat Deck selalu gagal dengan pesan <em>"Permintaan model lokal terlalu lama"</em>: RAM komputer kemungkinan tidak cukup untuk model 9B. Jalankan ulang installer agar memilih Qwen3.5 4B, lalu di Pengaturan model lokal isi kolom <strong>Model Studio</strong> dengan <code>tantular-office:lite</code> dan klik Simpan. Jangan klik Buat Deck berulang kali saat menunggu — antrean permintaan membuat model makin lambat.</li>
+    <li>Saat panel sedang bekerja, ia menampilkan <strong>waktu berjalan</strong> dan tombol <strong>Batal</strong>. Bila terasa lama, tekan Batal — jangan mengklik tombolnya berulang kali, karena setiap klik menambah antrean dan justru memperlambat model.</li>
+    <li>Jika Buat Deck selalu gagal dengan pesan <em>"Permintaan model lokal terlalu lama"</em>: RAM komputer kemungkinan tidak cukup untuk model 9B. Jalankan ulang installer agar memilih model 4B, lalu di Pengaturan model lokal isi kolom <strong>Model Studio</strong> dengan <code>tantular-office:lite</code> dan klik Simpan.</li>
   </ol>
   <p>Untuk bantuan khusus workshop, hubungi fasilitator yang membagikan paket ini.</p>
 </main>

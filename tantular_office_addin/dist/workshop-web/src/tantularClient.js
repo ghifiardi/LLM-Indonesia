@@ -17,7 +17,11 @@ function defaultEndpoint() {
   return companionUrl("/api/chat-completions");
 }
 const DEFAULT_MODEL = "qwen3.5:9b";
-const DEFAULT_DECK_MODEL = "tantular-office:0.4-9b";
+// Q8_0 profile, published as ghifidanukusumo/tantular:latest and installed
+// under this alias. The 0.4 alias was Q4_K_M, which scores 37/40 on the voice
+// gate against a 0.95 bar; Q8 scores 38/40 and matches bf16. Existing installs
+// keep working — 0.4 stays in the preference list below the new default.
+const DEFAULT_DECK_MODEL = "tantular-office:0.5-9b";
 const DECK_MODEL_FALLBACK = "qwen3.5:9b";
 const DEFAULT_VISION_MODEL = "llama3.2-vision";
 const SETTINGS_KEY = "tantular.office.settings.v1";
@@ -90,10 +94,35 @@ export function saveSettings(settings) {
 export async function listLocalModels() {
   // Companion-only: the hosted gateway has no /api/models to enumerate.
   assertCompanionAvailable("Daftar model Ollama");
-  const response = await fetch(companionUrl("/api/models"), {
-    method: "GET",
-    headers: { "Accept": "application/json" }
-  });
+  // A companion that accepts the connection but never answers leaves this
+  // awaiting forever: the dropdown stays on "Memuat daftar model..." with no
+  // error, the catch that would show the real models never runs, and the user
+  // is then told to run `npm run model:office` for models that are installed.
+  // Observed exactly that in PowerPoint on Mac. Never fetch the companion
+  // without a deadline.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  let response;
+  try {
+    response = await fetch(companionUrl("/api/models"), {
+      method: "GET",
+      headers: { "Accept": "application/json" },
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(
+        "Companion tidak menjawab dalam 12 detik. Pastikan jendela Tantular Companion "
+        + "masih terbuka (npm start), lalu klik Refresh."
+      );
+    }
+    throw new Error(
+      `Tidak dapat menghubungi Companion: ${error?.message || error}. `
+      + "Pastikan Tantular Companion berjalan (npm start)."
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     throw new Error(`Tidak dapat membaca daftar model Ollama (${response.status}). ${body.slice(0, 180)}`);

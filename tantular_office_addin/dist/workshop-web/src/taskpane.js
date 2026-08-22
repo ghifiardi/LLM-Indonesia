@@ -1,4 +1,6 @@
-import { ACTIONS, actionsForHost, normalizeHostName, scopedUserPrompt } from "./prompts.js";
+import { createRun, classifyOutcome, progressLabel, REQUEST_BUDGET_MS,
+         DECK_BUDGET_MS } from "./chat/runProgress.js";
+import { ACTIONS, actionsForHost, detectHost, normalizeHostName, scopedUserPrompt } from "./prompts.js";
 import {
   consumeAutoSwitchNote,
   listLocalModels,
@@ -42,6 +44,13 @@ import { extractSlideFromImage, fileToDataUrl, getLastOcrEngine, ocrStatusLine }
 import { buildCapabilityMapSpec } from "./deck/capabilityMapSpec.js";
 import { extractDocumentFile } from "./deck/documentExtract.js";
 import { buildDocumentDeckSpec } from "./deck/documentDeck.js";
+import {
+  selectSource,
+  selectedSourceText,
+  selectionInstruction,
+  describeSelection,
+  SOURCE_CHAR_BUDGET
+} from "./deck/sourceSelection.js";
 import { planDocument } from "./document/documentPlanner.js";
 import { buildDocumentDocxBase64 } from "./document/docxBuilder.js";
 import { planWorkbook } from "./workbook/workbookPlanner.js";
@@ -62,6 +71,7 @@ const state = {
   extractedDocumentName: null,
   documentText: "",
   documentPreview: "",
+  documentSelection: null,
   refineSpec: null,
   documentSpec: null,
   workbookSpec: null,
@@ -130,8 +140,8 @@ const els = {
   deckProjectInstructions: document.querySelector("#deck-project-instructions"),
   saveProjectInstructions: document.querySelector("#save-project-instructions"),
   clearProjectInstructions: document.querySelector("#clear-project-instructions"),
-  deckImageInput: document.querySelector("#deck-image-input"),
-  deckDocumentInput: document.querySelector("#deck-document-input"),
+  sourceImageInput: document.querySelector("#source-image-input"),
+  sourceDocumentInput: document.querySelector("#source-document-input"),
   deckCreate: document.querySelector("#deck-create"),
   deckDownload: document.querySelector("#deck-download"),
   deckProgress: document.querySelector("#deck-progress"),
@@ -158,7 +168,11 @@ const els = {
   copyResult: document.querySelector("#copy-result"),
   insertResult: document.querySelector("#insert-result"),
   classifyExcel: document.querySelector("#classify-excel"),
-  status: document.querySelector("#status")
+  status: document.querySelector("#status"),
+  progressCancel: document.querySelector("#progress-cancel"),
+  documentProgressCancel: document.querySelector("#document-progress-cancel"),
+  workbookProgressCancel: document.querySelector("#workbook-progress-cancel"),
+  deckProgressCancel: document.querySelector("#deck-progress-cancel")
 };
 
 bootstrap();
@@ -171,7 +185,9 @@ function bootstrap() {
 
   if (globalThis.Office?.onReady) {
     Office.onReady((info) => {
-      state.host = normalizeHostName(info.host);
+      // Not normalizeHostName(info.host) alone: an unpopulated info.host
+      // resolves to "Office", which silently hides chat and Deck Studio.
+      state.host = detectHost(info);
       // Mode FIRST, before anything that could throw. hydrateSettings() ran
       // before Office.onReady, when insideOffice() was still false and the mode
       // was not yet knowable, so the banner was suppressed; this is the render
@@ -183,7 +199,14 @@ function bootstrap() {
       setStatus(`Terhubung ke ${state.host}.`, "ok");
       mountWorkspaceUi();
       if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
-        import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
+        import("./chat/chatPane.js")
+          .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
+          // Without this the promise rejects silently and the chat card simply
+          // never appears — indistinguishable from "this host has no chat".
+          .catch((error) => {
+            console.error("[Tantular] chat pane failed to mount:", error);
+            setStatus(`Chat tidak dapat dimuat: ${error?.message || error}`, "error");
+          });
       }
       // Warm up the Studio model in the background: the first Studio call
       // otherwise pays the multi-GB cold load (slow disks/RAM on workshop
@@ -286,8 +309,13 @@ function bindStaticEvents() {
   // An explicit slide-count entry must never be overridden by a count parsed
   // out of the brief text.
   els.deckCount.addEventListener("input", () => { state.deckCountManual = true; });
-  els.deckImageInput.addEventListener("change", () => { state.extractedImageName = null; });
-  els.deckDocumentInput.addEventListener("change", () => { state.extractedDocumentName = null; });
+  els.sourceImageInput.addEventListener("change", () => { state.extractedImageName = null; });
+  // Clear the selection too: a stale one would keep appending a coverage notice
+  // about a document that is no longer the source.
+  els.sourceDocumentInput.addEventListener("change", () => {
+    state.extractedDocumentName = null;
+    state.documentSelection = null;
+  });
   els.saveProjectInstructions.addEventListener("click", saveProjectInstructions);
   els.clearProjectInstructions.addEventListener("click", clearProjectInstructions);
   els.deckProjectInstructions.addEventListener("change", saveProjectInstructions);
@@ -409,6 +437,7 @@ async function refreshInstalledModels(showStatus = false) {
       : `<option value="">Tidak ada model Ollama</option>`;
     const preferred = [
       previous,
+      "tantular-office:0.5-9b",
       "tantular-office:0.4-9b",
       ...options.filter((model) => /^tantular/i.test(model)),
       options[0]
@@ -436,10 +465,23 @@ function useInstalledModel(target) {
 
 function useTantularForBoth() {
   const options = [...els.installedModel.options].map((option) => option.value).filter(Boolean);
-  const model = options.find((name) => name === "tantular-office:0.4-9b")
+  const model = options.find((name) => name === "tantular-office:0.5-9b")
+    || options.find((name) => name === "tantular-office:0.4-9b")
     || options.find((name) => /^tantular-office:/i.test(name))
     || options.find((name) => /^tantular/i.test(name));
   if (!model) {
+    // Distinguish "the list never loaded" from "no Tantular model installed".
+    // Telling someone to install a model they already have sends them off to
+    // re-download several GB while the real fault is an unreachable companion.
+    const stillLoading = [...els.installedModel.options]
+      .some((option) => !option.value && /memuat/i.test(option.textContent || ""));
+    if (stillLoading || !options.length) {
+      return setModelSelectionStatus(
+        "Daftar model belum termuat. Klik Refresh dulu — bila tetap gagal, pastikan "
+        + "jendela Tantular Companion masih terbuka (npm start).",
+        "error"
+      );
+    }
     return setModelSelectionStatus("Model Tantular belum ditemukan. Jalankan `npm run model:office`, lalu klik Refresh.", "error");
   }
   els.model.value = model;
@@ -452,7 +494,7 @@ function renderModelCapability() {
   const deck = String(els.deckModel.value || "").trim();
   const weakDeckModel = /\b(?:0\.[12]-id|0\.8b|1(?:\.5|\.7)?b|2b|3b|mini|small)\b/i.test(deck);
   if (weakDeckModel) {
-    els.modelCapability.textContent = `⚠ Model Studio "${deck}" terlalu kecil untuk output panjang. Gunakan tantular-office:0.4-9b atau qwen3.5:9b.`;
+    els.modelCapability.textContent = `⚠ Model Studio "${deck}" terlalu kecil untuk output panjang. Gunakan tantular-office:0.5-9b atau qwen3.5:9b.`;
     els.modelCapability.className = "hint model-warning";
     return;
   }
@@ -543,7 +585,13 @@ function projectInstructions() {
 }
 
 function combinedDeckInstructions() {
-  return [projectInstructions(), els.instruction.value.trim()].filter(Boolean).join("\n\nInstruksi tambahan:\n");
+  const base = [projectInstructions(), els.instruction.value.trim()]
+    .filter(Boolean).join("\n\nInstruksi tambahan:\n");
+  // Coverage travels with the instructions, not inside the source text, so the
+  // model knows the excerpt is a selection while the deterministic builder
+  // still sees clean document content.
+  const coverage = state.documentSelection ? selectionInstruction(state.documentSelection) : "";
+  return [base, coverage].filter(Boolean).join("\n\n");
 }
 
 function renderDeckStyleOptions() {
@@ -625,12 +673,15 @@ async function runSelectedAction() {
   }
   const user = scopedUserPrompt(action, action.buildUser({ text, instruction }));
 
-  await withProgress("Menjalankan Tantular lokal...", async () => {
+  await withProgress("Menjalankan Tantular lokal...", async (signal) => {
     const rawResult = await runTantular({
       system: action.system,
       user,
       maxTokens: state.selectedActionId === "excel_classify" ? 900 : 600,
-      temperature: state.selectedActionId === "scam_check" || state.selectedActionId === "excel_classify" ? 0.05 : 0.2
+      temperature: state.selectedActionId === "scam_check" || state.selectedActionId === "excel_classify" ? 0.05 : 0.2,
+      // Without this the Batal button aborts nothing: the pane would stop
+      // waiting while the model kept generating.
+      signal
     });
     const result = normalizeResultForAction(rawResult, state.selectedActionId);
     state.lastResult = result;
@@ -645,8 +696,36 @@ function looksLikeDeckStudioInstruction(text) {
 
 // --- Document Studio --------------------------------------------------------
 
+// Word and Excel capped the brief at a bare `slice(0, 40_000)`. That is the
+// silent truncation this project just removed everywhere else: an uploaded
+// document is bounded to the model budget by selectSource, which can exceed
+// 40k characters, so the tail vanished without a word. Bound to the real
+// budget, and say so when anything is cut.
+function boundedBrief(content, setStatus) {
+  const text = String(content || "");
+  if (text.length <= SOURCE_CHAR_BUDGET) return text;
+  setStatus(
+    `Teks sumber dipotong ke ${SOURCE_CHAR_BUDGET.toLocaleString("id-ID")} karakter `
+    + `(dari ${text.length.toLocaleString("id-ID")}) agar muat di jendela konteks model. `
+    + `Hasil hanya mencakup bagian awal teks.`,
+    "warn"
+  );
+  return text.slice(0, SOURCE_CHAR_BUDGET);
+}
+
 async function resolveDocumentSpec() {
-  let content = els.sourceText.value.trim();
+  const { docFile } = await ingestUploadedSource({
+    setProgress: (text) => { els.documentProgressText.textContent = text; },
+    setStatus: setDocumentStatus,
+    extraOcrContext: [
+      els.documentTone.value.trim() ? `Tone dokumen: ${els.documentTone.value.trim()}` : "",
+      projectInstructions()
+        ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
+        : ""
+    ].filter(Boolean).join("\n\n")
+  });
+
+  let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "Word") {
     els.documentProgressText.textContent = "Membaca seleksi Word...";
     const selected = await getSelectionContext("Word");
@@ -664,12 +743,12 @@ async function resolveDocumentSpec() {
     }
   }
   if (!content) {
-    throw new Error("Masukkan brief/teks di kotak sumber, pilih teks Word, atau buka dokumen yang berisi teks.");
+    throw new Error("Unggah dokumen/PDF/gambar, masukkan brief di kotak sumber, pilih teks Word, atau buka dokumen yang berisi teks.");
   }
 
   els.documentProgressText.textContent = "Menyusun struktur dokumen dengan Tantular...";
   const result = await planDocument({
-    brief: content.slice(0, 40_000),
+    brief: boundedBrief(content, setDocumentStatus),
     documentType: els.documentType.value,
     tone: els.documentTone.value.trim(),
     sectionCount: documentSectionCount(),
@@ -851,7 +930,15 @@ function setDocumentStatus(message, kind = "") {
 // --- Sheet Studio -----------------------------------------------------------
 
 async function resolveWorkbookSpec() {
-  let content = els.sourceText.value.trim();
+  const { docFile } = await ingestUploadedSource({
+    setProgress: (text) => { els.workbookProgressText.textContent = text; },
+    setStatus: setWorkbookStatus,
+    extraOcrContext: projectInstructions()
+      ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
+      : ""
+  });
+
+  let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "Excel") {
     els.workbookProgressText.textContent = "Membaca range Excel...";
     const selected = await getSelectionContext("Excel");
@@ -863,12 +950,12 @@ async function resolveWorkbookSpec() {
     }
   }
   if (!content) {
-    throw new Error("Masukkan brief/teks di kotak sumber atau pilih range Excel terlebih dahulu.");
+    throw new Error("Unggah dokumen/PDF/gambar, masukkan brief di kotak sumber, atau pilih range Excel terlebih dahulu.");
   }
 
   els.workbookProgressText.textContent = "Menyusun struktur workbook dengan Tantular...";
   const result = await planWorkbook({
-    brief: content.slice(0, 40_000),
+    brief: boundedBrief(content, setWorkbookStatus),
     workbookType: els.workbookType.value,
     sheetCount: workbookSheetCount(),
     instruction: els.workbookInstruction.value.trim()
@@ -983,61 +1070,103 @@ function setWorkbookStatus(message, kind = "") {
 // --- Deck Studio: single, predictable flow ---------------------------------
 // One "source of truth" resolver + two actions (create in PowerPoint / download).
 
-function documentPreview(text, chars) {
+// `chars` is the size of the extracted document; `text` is what will actually
+// be sent. Calling a bounded selection "teks lengkap" was how the truncation
+// stayed invisible, so the two numbers are now reported separately.
+function documentPreview(text, chars, selection = null) {
   const head = String(text || "").slice(0, 1000).trimEnd();
-  return `[Pratinjau dokumen — teks lengkap ${chars} karakter dipakai saat membuat deck. Edit kotak ini hanya jika ingin mengganti sumbernya.]\n\n${head}…`;
+  const scope = selection && selection.truncated
+    ? `bagian terpilih (${selection.selected.length}/${selection.chunks.length} bagian, `
+      + `≈${selection.tokensSelected} token) dari ${chars} karakter dokumen dipakai`
+    : `teks lengkap ${chars} karakter dipakai`;
+  return `[Pratinjau dokumen — ${scope} saat membuat hasil. Edit kotak ini hanya jika ingin mengganti sumbernya.]\n\n${head}…`;
 }
 
-async function resolveDeckSpec() {
-  state.deckPlanWarning = "";
-  state.deckAutoSwitchNote = "";
-  const docFile = els.deckDocumentInput.files?.[0];
-  const file = els.deckImageInput.files?.[0];
+// Upload ingestion, shared by Deck Studio (PowerPoint), Document Studio (Word)
+// and Sheet Studio (Excel).
+//
+// The two file inputs used to live inside Deck Studio, which only PowerPoint
+// is given — so Word and Excel had no way to upload a PDF, document, or
+// screenshot at all. They now sit in the shared source card and every studio
+// reads them through here.
+//
+// The full extracted text is kept in memory only; the textarea gets a short
+// preview, so the pane stays light and a large document is never re-rendered.
+async function ingestUploadedSource({ setProgress, setStatus, extraOcrContext = "" }) {
+  const docFile = els.sourceDocumentInput.files?.[0];
+  const imageFile = els.sourceImageInput.files?.[0];
 
-  // 1) If a document/PDF is uploaded, extract it first. Keep the full text in
-  // memory only — the textarea gets a short preview so the pane stays light
-  // and the full document is never re-rendered or re-used as pasted input.
   if (docFile && state.extractedDocumentName !== docFile.name) {
-    els.deckProgressText.textContent = "Mengekstrak dokumen/PDF...";
+    setProgress("Mengekstrak dokumen/PDF...");
     const extractedDoc = await extractDocumentFile(docFile);
-    state.documentText = extractedDoc.text;
-    state.documentPreview = documentPreview(extractedDoc.text, extractedDoc.chars);
+
+    // Bound the source explicitly. Handing the whole document downstream used
+    // to overflow the model context, and the overflow was discarded in silence
+    // — a report whose figures never arrived still produced a confident result.
+    const selection = selectSource(extractedDoc.text);
+    state.documentSelection = selection;
+    state.documentText = selectedSourceText(selection);
+
+    state.documentPreview = documentPreview(state.documentText, extractedDoc.chars, selection);
     els.sourceText.value = state.documentPreview;
-    els.selectionMeta.textContent = `Dokumen diekstrak: ${extractedDoc.chars} karakter dari ${extractedDoc.filename}. Pratinjau singkat ditampilkan; teks lengkap dipakai saat membuat deck.`;
+
+    const warning = describeSelection(selection, extractedDoc.filename);
+    els.selectionMeta.textContent = warning
+      || `Dokumen diekstrak: ${extractedDoc.chars} karakter dari ${extractedDoc.filename}. Seluruh dokumen dipakai.`;
+    // The user has to be able to see that the output covers part of the
+    // document, not all of it, without reading the result to infer it.
+    if (warning) setStatus(warning, "warn");
+
     updateCharCount();
     state.extractedDocumentName = docFile.name;
     state.extractedImageName = null;
   }
 
-  // 2) If an image is uploaded (and not yet extracted), OCR it once.
-  if (!docFile && file && state.extractedImageName !== file.name) {
-    els.deckProgressText.textContent = "Membaca teks dari gambar...";
-    const dataUrl = await fileToDataUrl(file);
-    const extra = [
-      els.deckTone.value.trim() ? `Tone deck: ${els.deckTone.value.trim()}` : "",
-      projectInstructions()
-        ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
-        : ""
-    ].filter(Boolean).join("\n\n");
-    const extracted = await extractSlideFromImage(dataUrl, extra);
+  if (!docFile && imageFile && state.extractedImageName !== imageFile.name) {
+    setProgress("Membaca teks dari gambar...");
+    const dataUrl = await fileToDataUrl(imageFile);
+    const extracted = await extractSlideFromImage(dataUrl, extraOcrContext);
     els.sourceText.value = extracted;
-    els.selectionMeta.textContent = `Gambar diekstrak: ${extracted.length} karakter dari ${file.name} — ${ocrStatusLine(getLastOcrEngine())}.`;
+    els.selectionMeta.textContent =
+      `Gambar diekstrak: ${extracted.length} karakter dari ${imageFile.name} — ${ocrStatusLine(getLastOcrEngine())}.`;
     updateCharCount();
-    state.extractedImageName = file.name;
+    state.extractedImageName = imageFile.name;
   }
 
-  // 3) Content priority: extracted document (full text) -> text box -> selected
-  // slide. The document's full text is used only while the textarea still shows
-  // its untouched preview; editing the box hands control back to the user.
-  let content = els.sourceText.value.trim();
+  return { docFile, imageFile };
+}
+
+// Content priority: extracted document (full text) -> text box -> host
+// selection. The document's full text is used only while the textarea still
+// shows its untouched preview; editing the box hands control back to the user.
+function uploadedOrTypedContent(docFile) {
+  const typed = els.sourceText.value.trim();
   if (
     docFile &&
     state.extractedDocumentName === docFile.name &&
     state.documentText &&
-    content === state.documentPreview.trim()
+    typed === state.documentPreview.trim()
   ) {
-    content = state.documentText.trim();
+    return state.documentText.trim();
   }
+  return typed;
+}
+
+async function resolveDeckSpec() {
+  state.deckPlanWarning = "";
+  state.deckAutoSwitchNote = "";
+  const { docFile } = await ingestUploadedSource({
+    setProgress: (text) => { els.deckProgressText.textContent = text; },
+    setStatus: setDeckStatus,
+    extraOcrContext: [
+      els.deckTone.value.trim() ? `Tone deck: ${els.deckTone.value.trim()}` : "",
+      projectInstructions()
+        ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
+        : ""
+    ].filter(Boolean).join("\n\n")
+  });
+
+  let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "PowerPoint") {
     els.deckProgressText.textContent = "Membaca slide terpilih...";
     const selected = await getSelectedSlideTextContext();
@@ -1591,21 +1720,46 @@ async function labelExcelRange() {
   });
 }
 
-async function withProgress(message, fn) {
-  setBusy(true, message);
+async function withProgress(message, fn, { budgetMs = REQUEST_BUDGET_MS,
+                                            cancelButton = els.progressCancel,
+                                            report = setStatus,
+                                            paint = null } = {}) {
+  // The elapsed clock and the cancel button exist together on purpose: a timer
+  // without a way out only tells the user how long they have been stuck, and a
+  // button without a timer gives them nothing to judge by.
+  const repaint = paint || ((text) => setBusy(true, text));
+  const run = createRun({
+    budgetMs,
+    onTick: (elapsed) => repaint(progressLabel(message, elapsed, budgetMs))
+  });
+  const onCancel = () => run.cancel();
+  if (cancelButton) {
+    cancelButton.disabled = false;
+    cancelButton.addEventListener("click", onCancel);
+  }
+  repaint(progressLabel(message, 0, budgetMs));
   try {
-    await fn();
+    await fn(run.signal);
   } catch (error) {
     console.error(error);
-    setStatus(error?.message || String(error), "error");
+    const outcome = classifyOutcome(error, {
+      cancelled: run.cancelled, timedOut: run.timedOut
+    });
+    // A cancellation is the user's decision, not a failure. Reporting it as an
+    // error teaches people to ignore the error channel.
+    report(outcome.message, outcome.status);
   } finally {
+    run.finish();
+    if (cancelButton) cancelButton.removeEventListener("click", onCancel);
     setBusy(false);
   }
 }
 
 function setBusy(isBusy, message = "Memproses...") {
   els.progress.classList.toggle("hidden", !isBusy);
-  els.progressText.textContent = message;
+  // Never blank. An empty progress line is the "looks hung" state itself.
+  els.progressText.textContent = message || "Memproses...";
+  if (els.progressCancel) els.progressCancel.disabled = !isBusy;
   [els.loadSelection, els.runAction, els.insertResult, els.classifyExcel].forEach((button) => {
     button.disabled = isBusy;
   });

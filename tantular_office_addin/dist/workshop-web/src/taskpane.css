@@ -307,6 +307,9 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .status { min-height: 16px; margin-top: 8px; }
 .status.error { color: var(--danger); }
 .status.ok { color: var(--safe); }
+/* Partial source coverage is not an error — the deck is valid, it just does not
+   cover the whole document. It must still be impossible to miss. */
+.status.warn { color: var(--warn); font-weight: 600; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
