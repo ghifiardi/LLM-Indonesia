@@ -200,9 +200,30 @@ function bootstrap() {
       // renderForHost() means a failure there can never strand the pane showing
       // a mode claim that does not match how it routes.
       hydrateSettings();
-      renderForHost();
-      setStatus(`Terhubung ke ${state.host}.`, "ok");
-      mountWorkspaceUi();
+
+      // Each step runs INDEPENDENTLY. These used to be bare statements, so a
+      // throw in renderForHost() — one null element, one unexpected host —
+      // aborted the rest of the callback, and the chat mount at the end never
+      // ran. From the room that is indistinguishable from "chat is broken":
+      // the pane renders, the banner shows, and the gap where the chat card
+      // belongs is simply empty, with nothing written anywhere saying why.
+      step("renderForHost", renderForHost);
+      step("mountWorkspaceUi", mountWorkspaceUi);
+
+      // The host goes in the status line because it is the single fact that
+      // explains a stripped-looking pane: "Office" means detectHost() found no
+      // usable signal, and that hides chat AND Studio while everything
+      // host-agnostic still renders normally.
+      if (state.host === "Office") {
+        setStatus(
+          `Host Office tidak terdeteksi (build ${TASKPANE_BUILD}). Chat dan Studio disembunyikan. `
+          + "Laporkan pesan ini ke fasilitator.",
+          "error"
+        );
+      } else {
+        setStatus(`Terhubung ke ${state.host}. (build ${TASKPANE_BUILD})`, "ok");
+      }
+
       if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
         import("./chat/chatPane.js")
           .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
@@ -236,6 +257,17 @@ function bootstrap() {
     if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
       import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
     }
+  }
+}
+
+// Run one startup step so that its failure is reported rather than silently
+// truncating everything after it.
+function step(name, fn) {
+  try {
+    fn();
+  } catch (error) {
+    console.error(`[Tantular] ${name} failed:`, error);
+    setStatus(`Gagal pada ${name}: ${error?.message || error}`, "error");
   }
 }
 
