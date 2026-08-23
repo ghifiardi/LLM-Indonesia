@@ -171,6 +171,16 @@ function handler(req, res) {
   // Enforced in the companion rather than the pane. A pane-side check protects
   // nothing: a bug or a later code path could call fetch directly. Here there
   // is one door, and it is shut unless TANTULAR_LOOKUP_ENABLED=true.
+  // Read-only: lets the pane hide the toggle entirely when the feature is off,
+  // rather than offering a control that always refuses. No side effects and no
+  // token, so it cannot be a step toward egress.
+  if (url.pathname === "/api/lookup/status") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8",
+                         ...corsHeaders(req), "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ enabled: lookupEnabled(), hosts: allowedHosts() }));
+    return;
+  }
+
   if (url.pathname === "/api/lookup/prepare" || url.pathname === "/api/lookup/execute") {
     if (req.method !== "POST") {
       res.writeHead(405, { "Content-Type": "application/json", ...corsHeaders(req) });

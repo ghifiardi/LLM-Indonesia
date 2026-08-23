@@ -124,28 +124,73 @@ egress unless approved" into a slogan and make the suite depend on Wikimedia
 being up. It asserts that the fetched page never reaches the pane under either
 verdict.
 
+## The pane code path
+
+`src/chat/lookupController.js`, wired in `taskpane.js`:
+
+    toggle on → read the real document → prepare → dialog (host + query)
+              → approve → execute with the SAME token and document
+              → render verified or blocked
+
+**The toggle is a separate axis from Mode Lokal/Cloud.** That one is about
+where the *model* runs; this one is about whether anything leaves the machine.
+It is unchecked on load and the row is hidden entirely unless
+`/api/lookup/status` reports `enabled: true` — a control that always refuses
+teaches users to ignore refusals. Turning it off clears any result on screen,
+so a verified answer cannot sit there looking current in Mode Lokal.
+
+**The document is read once.** Re-reading it before execute would let an edit
+slip in between approval and request; the companion would then reject
+`document_changed` — after the query had already gone out.
+
+**The document reaches the local companion only.** `createLocalCompanionPost`
+refuses in a cloud session, because `companionUrl()` routes to the cloud
+gateway there and the document must not follow. It also re-checks the resolved
+URL's hostname: the first guard is about the user's mode, the second about
+where the bytes actually go.
+
+**Document text never travels in the query.** The reader knows nothing about
+hosts and the query comes only from what the user typed, so no edit here can
+put one where the other goes.
+
+### What each host contributes
+
+| host | document |
+|---|---|
+| Word | body text |
+| Excel | the **selected** range, with its address |
+| PowerPoint | the **selected** slides' text |
+
+Excel and PowerPoint use the selection rather than the whole file deliberately.
+Each reader fails with a reason rather than returning `""`, which would be
+indistinguishable from an empty document and would send a lookup that could
+only be refused. Truncation of very long documents is disclosed in the dialog —
+a user must not be told the answer was checked against "the document" when it
+was checked against the first half.
+
 ## Still `false`
 
 Closed since the last review: the verifier is in the companion, it runs before
 anything reaches the pane, failure returns `blocked_by_verifier`, protected
 strings come from the real document, and the suite runs over HTTP.
 
-Closed since: the pane renders both states, the approval binds a document hash,
-two response shapes and one real remote host are measured.
+Closed since: the pane renders both states and now drives the whole path, the
+approval binds a document hash, the three hosts read real documents, and the
+document cannot reach a remote endpoint.
 
 Open, and each one blocks enabling:
 
-1. **The pane does not yet CALL the lookup.** `lookupResultView` renders a
-   response and `taskpane.html` has the container, but there is no mode
-   toggle, no approval dialog and no code path in `taskpane.js` that reaches
-   the companion. The rendering is proven; the trigger does not exist.
-2. **Nothing reads the Office document into the request.** The binding is
-   enforced end to end, but the pane must supply `document` from the real Word
-   or Excel body, and that reader is not written.
+1. **Nothing has run in real Office.** Every host reader is proven against a
+   hand-written mock of the Office API. Mocks encode what we believe the API
+   does. Word in Compatibility Mode, an Excel selection spanning sheets, a
+   PowerPoint host without `getSelectedSlides` — these are the cases that
+   break in the field and none of them has been seen. **This is the gate.**
+2. **No search entry point.** `state.runLookup` exists and is tested, but no
+   button or command in the pane calls it. Deliberate while the flag is off.
 3. **The model still obeys hostile pages.** Containment is doing the work. Any
    change that weakens the verifier — a looser entity rule, a new fact kind —
-   re-opens the three classes it currently catches. Re-run both suites after
-   touching `verifyWebAnswer.js`.
+   re-opens the classes it currently catches. Re-run both suites after touching
+   `verifyWebAnswer.js`.
 4. **One host.** `id.wikipedia.org`. Adding another needs its own adapter and
    its own run of both suites; the HTML measurement used a local origin, not a
    real HTML host.

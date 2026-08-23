@@ -9,7 +9,9 @@ import {
   runTantular,
   testLocalModel
 } from "./tantularClient.js";
-import { isCloudSession, isPortalMode, loadMode, modeIsKnown } from "./companionUrl.js";
+import { isCloudSession, isPortalMode, loadMode, modeIsKnown, companionUrl } from "./companionUrl.js";
+import { createLookupController, createLocalCompanionPost } from "./chat/lookupController.js";
+import { MODE_LOCAL, MODE_LOCAL_SEARCH } from "./chat/lookupUi.js";
 import {
   getSelectionContext,
   getSelectedSlideTextContext,
@@ -85,6 +87,9 @@ const els = {
   modeBanner: document.querySelector("#mode-banner"),
   modeBannerText: document.querySelector("#mode-banner-text"),
   modeSelect: document.querySelector("#mode-select"),
+  lookupModeRow: document.querySelector("#lookup-mode-row"),
+  lookupModeToggle: document.querySelector("#lookup-mode-toggle"),
+  lookupResult: document.querySelector("#lookup-result-container"),
   modeHint: document.querySelector("#mode-hint"),
   modeConfirm: document.querySelector("#mode-confirm"),
   modeConfirmText: document.querySelector("#mode-confirm-text"),
@@ -270,6 +275,7 @@ function bindStaticEvents() {
     persistVisibleModelSettings("Pengaturan model disimpan dan aktif.");
   });
   els.modeSelect?.addEventListener("change", onModeSelectChange);
+  setUpLookup();
   els.modeConfirmYes?.addEventListener("click", () => applyMode("cloud"));
   els.modeConfirmNo?.addEventListener("click", () => { hideModeConfirm(); renderMode(); });
   els.model.addEventListener("input", renderModelCapability);
@@ -365,6 +371,70 @@ function renderMode() {
 
 function hideModeConfirm() {
   els.modeConfirm?.classList.add("hidden");
+}
+
+// --- approval-gated web lookup ---------------------------------------------
+//
+// Default OFF, and the toggle is not even shown unless the companion reports
+// the feature enabled. An always-refusing control teaches users to ignore
+// refusals.
+
+let lookupMode = MODE_LOCAL;
+
+function setUpLookup() {
+  if (!els.lookupModeToggle || !els.lookupModeRow) return;
+
+  const runLookup = createLookupController({
+    postLocal: createLocalCompanionPost({
+      fetchImpl: (...args) => fetch(...args), isCloudSession, companionUrl
+    }),
+    confirm: confirmLookupDisclosure,
+    container: els.lookupResult,
+    getHost: () => state.host,
+    onEdit: (answer) => { insertResultText(state.host, answer).catch(() => {}); }
+  });
+
+  els.lookupModeToggle.checked = false;
+  els.lookupModeToggle.addEventListener("change", () => {
+    lookupMode = els.lookupModeToggle.checked ? MODE_LOCAL_SEARCH : MODE_LOCAL;
+    // Turning it off clears any result on screen: a verified answer from a
+    // previous search must not sit there looking current in Mode Lokal.
+    if (lookupMode === MODE_LOCAL && els.lookupResult) {
+      els.lookupResult.innerHTML = "";
+      els.lookupResult.hidden = true;
+    }
+  });
+
+  // Expose the runner for the search entry point; nothing calls it until the
+  // user turns the mode on and types a query.
+  state.runLookup = (query) => runLookup({ mode: lookupMode, query });
+
+  // Ask the companion whether the feature exists at all. A cloud session has no
+  // local companion, so the toggle stays hidden there too.
+  if (isCloudSession()) return;
+  fetch(companionUrl("/api/lookup/status"))
+    .then((r) => r.json())
+    .then((status) => {
+      if (status?.enabled === true) els.lookupModeRow.hidden = false;
+    })
+    .catch(() => { /* no companion, no toggle */ });
+}
+
+// The dialog. Uses the pane's own confirm surface so the host and query are
+// shown verbatim — the user approves these exact bytes.
+async function confirmLookupDisclosure(dialog) {
+  const lines = [
+    dialog.warning,
+    "",
+    `Host  : ${dialog.host}`,
+    `Query : ${dialog.query}`,
+    `Panjang query: ${dialog.chars} karakter`,
+    "",
+    dialog.documentNote
+  ];
+  if (dialog.documentSource) lines.push(`Dokumen diperiksa: ${dialog.documentSource}`);
+  if (dialog.truncatedNote) lines.push(dialog.truncatedNote);
+  return Boolean(globalThis.confirm?.(lines.join("\n")));
 }
 
 function onModeSelectChange() {
