@@ -115,6 +115,15 @@ export function detectHost(readyInfo, globals = globalThis) {
   const fromContext = normalizeHostName(globals?.Office?.context?.host);
   if (fromContext !== "Office") return fromContext;
 
+  // Office.context.diagnostics.host: a plain string ("PowerPoint"), populated
+  // by hosts that leave BOTH info.host and Office.context.host empty, and
+  // present since Office 2016. It is the layer that survives when the host
+  // exposes no PowerPointApi/WordApi requirement set at all — an Office
+  // perpetual build, where every check below this line also answers "no" and
+  // the pane would otherwise degrade to "Office" with chat and Studio hidden.
+  const fromDiagnostics = normalizeHostName(globals?.Office?.context?.diagnostics?.host);
+  if (fromDiagnostics !== "Office") return fromDiagnostics;
+
   // Office.js only defines these namespaces in the host they belong to.
   if (typeof globals?.PowerPoint !== "undefined") return "PowerPoint";
   if (typeof globals?.Excel !== "undefined") return "Excel";
@@ -126,6 +135,17 @@ export function detectHost(readyInfo, globals = globalThis) {
     if (supported.call(null, "ExcelApi", "1.1")) return "Excel";
     if (supported.call(null, "WordApi", "1.1")) return "Word";
   }
+
+  // Last resort: the open file's own extension. Not guesswork — the host that
+  // opened a .pptx IS PowerPoint. Reached only when every API-level signal
+  // above came back empty, where the alternative is "Office" and a pane with
+  // no chat and no Studio.
+  const url = String(globals?.Office?.context?.document?.url || "").toLowerCase();
+  const extension = url.split("?")[0].split("#")[0].split(".").pop();
+  if (extension === "pptx" || extension === "ppt" || extension === "pptm") return "PowerPoint";
+  if (extension === "xlsx" || extension === "xls" || extension === "xlsm" || extension === "csv") return "Excel";
+  if (extension === "docx" || extension === "doc" || extension === "docm" || extension === "rtf") return "Word";
+
   return "Office";
 }
 

@@ -16,17 +16,20 @@ const CONTEXT_ORDER = [null, "selection", "document", "none"];
 export function mountChatPane({ host }) {
   const card = document.querySelector("#chat-card");
   if (!card) return;
+  // RETURN these promises. The caller in taskpane.js attaches the .catch that
+  // turns a mount failure into a visible message; a promise created here and
+  // dropped on the floor rejects where nothing is listening, so a broken
+  // Excel/PowerPoint chat looked exactly like a host that has no chat — an
+  // empty gap between the mode banner and the settings card, no error anywhere.
   if (host === "Excel") {
     // Agentic Excel chat: same card, different engine (plan-and-execute over
     // the open workbook instead of Word document pipelines).
-    import("./excelChat.js").then(({ mountExcelChatPane }) => mountExcelChatPane());
-    return;
+    return import("./excelChat.js").then(({ mountExcelChatPane }) => mountExcelChatPane());
   }
   if (host === "PowerPoint") {
     // Agentic deck chat: plan-and-execute over the active presentation instead
     // of the Word document pipelines.
-    import("./pptChat.js").then(({ mountPptChatPane }) => mountPptChatPane());
-    return;
+    return import("./pptChat.js").then(({ mountPptChatPane }) => mountPptChatPane());
   }
   if (host !== "Word") return;
   card.classList.remove("hidden");
