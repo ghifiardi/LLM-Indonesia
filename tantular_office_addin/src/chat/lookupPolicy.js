@@ -17,7 +17,7 @@
 // string. Nothing can be substituted between the user reading it and it
 // leaving the machine.
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 
 // Off unless the operator turns it on. Mode Lokal must keep its promise for
 // anyone who never opts in.
@@ -152,20 +152,67 @@ export function authorizeExecution({ pending, token, query, host,
   return { ok: true, entry };
 }
 
-// Audit: enough to reconstruct what left, and nothing more. Deliberately does
-// NOT record the document or the response body — an audit log that copies the
-// document defeats the point of not sending the document.
-export function auditRecord({ query, host, approved, at = new Date(),
-                              outcome = "sent", responseBytes = null }) {
+// Audit retention, decided 2026-08-23.
+//
+// The log previously stored every query in plaintext, including REJECTED ones.
+// That is the wrong default: if a model composes a leaky query and the user
+// declines it, the text they refused to send still lands on disk. The request
+// never left the machine, but the content was retained anyway — a smaller
+// version of the leak the approval gate exists to prevent.
+//
+// So queries are recorded as an HMAC of (host, query) plus a length. That keeps
+// the log useful — you can prove a known query did or did not occur, and see
+// how much text was involved — without keeping the text itself. Plaintext is a
+// debugging option that must be turned on deliberately.
+//
+// The HMAC key is per-install and local. A plain hash would be reversible for
+// short queries by brute force: "PT Sinar Mas" has a tiny search space.
+
+export function auditKey(env = process.env, readKey = null, writeKey = null) {
+  const fromEnv = String(env.TANTULAR_AUDIT_HMAC_KEY || "").trim();
+  if (fromEnv) return fromEnv;
+  if (readKey && writeKey) {
+    const existing = readKey();
+    if (existing) return existing;
+    const minted = randomUUID() + randomUUID();
+    writeKey(minted);
+    return minted;
+  }
+  return "";
+}
+
+export function queryDigest(query, host, key) {
+  const text = String(query || "");
   return {
+    query_hmac: key
+      ? createHmac("sha256", key).update(`${host}\n${text}`).digest("hex").slice(0, 32)
+      : createHash("sha256").update(`${host}\n${text}`).digest("hex").slice(0, 32),
+    query_chars: text.length,
+    query_hmac_keyed: Boolean(key)
+  };
+}
+
+export function plaintextAuditEnabled(env = process.env) {
+  return String(env.TANTULAR_AUDIT_PLAINTEXT || "").toLowerCase() === "true";
+}
+
+export function auditRecord({ query, host, approved, at = new Date(),
+                              outcome = "sent", responseBytes = null,
+                              reason = null, env = process.env, key = "" }) {
+  const record = {
     at: at.toISOString(),
     host,
-    query,
     approved: Boolean(approved),
     outcome,
+    reason,
     response_bytes: responseBytes,
-    _note: "query and host only; document text and response body are not logged"
+    ...queryDigest(query, host, key),
+    _note: "query recorded as a keyed digest; set TANTULAR_AUDIT_PLAINTEXT=true "
+           + "to also record the text (debugging only)"
   };
+  // Deliberate, explicit, off by default.
+  if (plaintextAuditEnabled(env)) record.query_plaintext = String(query || "");
+  return record;
 }
 
 // Everything fetched is attacker-controlled. The add-in emits edit contracts

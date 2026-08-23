@@ -83,26 +83,41 @@ test("an expired approval cannot be executed", () => {
   assert.equal(out.reason, "expired");
 });
 
-test("the audit records what left, and NOT the document or the response", () => {
-  const rec = auditRecord({ query: "inflasi 2026", host: "id.wikipedia.org",
-                            approved: true, responseBytes: 12345 });
-  assert.equal(rec.query, "inflasi 2026");
+test("the audit keeps a keyed digest, not the query text", () => {
+  // A rejected query must not persist in plaintext: if a model composed
+  // something leaky and the user declined, the text they refused to send would
+  // otherwise still land on disk.
+  const rec = auditRecord({ query: "kontrak PT Sinar Mas Rp 4,2 M",
+                            host: "id.wikipedia.org", approved: false,
+                            outcome: "refused:mismatch", key: "install-key" });
+  assert.ok(!JSON.stringify(rec).includes("Sinar Mas"),
+    "the audit must not contain the query text");
+  assert.equal(rec.query_chars, 29, "length is kept; the text is not");
+  assert.equal(rec.query_hmac_keyed, true);
   assert.equal(rec.host, "id.wikipedia.org");
-  assert.equal(rec.approved, true);
-  assert.ok(rec.at);
-  // Assert the SHAPE, not a keyword scan. The first version of this test
-  // grepped the serialised record for "document" and failed on the record's own
-  // explanatory note — a test that flags the thing it is documenting.
-  assert.deepEqual(Object.keys(rec).sort(),
-    ["_note", "approved", "at", "host", "outcome", "query", "response_bytes"],
-    "any new field is a new chance to leak content into the log");
-  assert.equal(rec.response_bytes, 12345, "size is enough; content is not logged");
-  // Feeding document text through the recorder must not smuggle it in: only the
-  // fields above exist, so there is nowhere for a body to go.
-  const withBody = auditRecord({ query: "q", host: "id.wikipedia.org", approved: true });
-  assert.equal(withBody.response_bytes, null);
-  assert.equal("body" in withBody, false);
-  assert.equal("document" in withBody, false);
+  assert.ok(rec.at && rec.outcome);
+});
+
+test("the digest is keyed, so short queries are not brute-forceable", () => {
+  const a = auditRecord({ query: "x", host: "h", approved: true, key: "key-a" });
+  const b = auditRecord({ query: "x", host: "h", approved: true, key: "key-b" });
+  assert.notEqual(a.query_hmac, b.query_hmac,
+    "an unkeyed hash of a short query can be reversed by guessing");
+});
+
+test("the same query and host digest identically under one key", () => {
+  const a = auditRecord({ query: "q", host: "h", approved: true, key: "k" });
+  const b = auditRecord({ query: "q", host: "h", approved: true, key: "k" });
+  assert.equal(a.query_hmac, b.query_hmac,
+    "the log must still answer: did THIS query ever occur?");
+});
+
+test("plaintext retention is off unless explicitly enabled", () => {
+  const off = auditRecord({ query: "rahasia", host: "h", approved: true, key: "k", env: {} });
+  assert.equal("query_plaintext" in off, false);
+  const on = auditRecord({ query: "rahasia", host: "h", approved: true, key: "k",
+                           env: { TANTULAR_AUDIT_PLAINTEXT: "true" } });
+  assert.equal(on.query_plaintext, "rahasia", "debugging must remain possible");
 });
 
 test("fetched pages are labelled untrusted and forbidden from driving edits", () => {

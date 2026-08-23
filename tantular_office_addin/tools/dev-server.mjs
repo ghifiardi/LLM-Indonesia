@@ -11,7 +11,7 @@ import {
 } from "../src/chat/ollamaBridge.js";
 import {
   lookupEnabled, allowedHosts, prepareLookup, authorizeExecution,
-  auditRecord, wrapUntrusted, resolveUrl
+  auditRecord, wrapUntrusted, resolveUrl, auditKey
 } from "../src/chat/lookupPolicy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +19,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Tokens issued by /api/lookup/prepare, consumed once by /api/lookup/execute.
 const pendingLookups = new Map();
 const LOOKUP_AUDIT = path.join(process.env.HOME || ".", ".tantular-lookup-audit.jsonl");
+const LOOKUP_AUDIT_KEY = path.join(process.env.HOME || ".", ".tantular-lookup-audit.key");
+// Per-install HMAC key, 0600. A plain hash would be brute-forceable for short
+// queries — "PT Sinar Mas" has a tiny search space — so the digest is keyed.
+const lookupAuditKey = auditKey(
+  process.env,
+  () => { try { return fs.readFileSync(LOOKUP_AUDIT_KEY, "utf8").trim(); } catch { return ""; } },
+  (value) => fs.writeFileSync(LOOKUP_AUDIT_KEY, value, { mode: 0o600 })
+);
 function appendLookupAudit(record) {
   try {
     fs.appendFileSync(LOOKUP_AUDIT, JSON.stringify(record) + "\n");
@@ -164,7 +172,7 @@ function handler(req, res) {
       if (url.pathname === "/api/lookup/prepare") {
         const prepared = prepareLookup({ query: body?.query, host: body?.host });
         if (!prepared.ok) {
-          appendLookupAudit(auditRecord({
+          appendLookupAudit(auditRecord({ key: lookupAuditKey,
             query: String(body?.query || ""), host: String(body?.host || ""),
             approved: false, outcome: `refused:${prepared.reason}`
           }));
@@ -184,7 +192,7 @@ function handler(req, res) {
         query: body?.query, host: body?.host
       });
       if (!authorized.ok) {
-        appendLookupAudit(auditRecord({
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
           query: String(body?.query || ""), host: String(body?.host || ""),
           approved: false, outcome: `refused:${authorized.reason}`
         }));
@@ -193,7 +201,7 @@ function handler(req, res) {
 
       const target = resolveUrl(authorized.entry.host, authorized.entry.query);
       if (!target) {
-        appendLookupAudit(auditRecord({
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
           query: authorized.entry.query, host: authorized.entry.host,
           approved: true, outcome: "refused:no_adapter"
         }));
@@ -214,7 +222,7 @@ function handler(req, res) {
           }
         });
         const text = await upstream.text();
-        appendLookupAudit(auditRecord({
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
           query: authorized.entry.query, host: authorized.entry.host,
           approved: true, outcome: `sent:${upstream.status}`,
           responseBytes: text.length
@@ -233,7 +241,7 @@ function handler(req, res) {
           untrusted: true, content: wrapUntrusted(authorized.entry.host, text.slice(0, 20_000))
         });
       } catch (error) {
-        appendLookupAudit(auditRecord({
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
           query: authorized.entry.query, host: authorized.entry.host,
           approved: true, outcome: `error:${error?.message || "fetch failed"}`
         }));
