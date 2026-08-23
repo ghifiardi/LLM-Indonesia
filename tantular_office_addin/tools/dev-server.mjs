@@ -13,8 +13,26 @@ import {
   lookupEnabled, allowedHosts, prepareLookup, authorizeExecution,
   auditRecord, wrapUntrusted, resolveUrl, auditKey
 } from "../src/chat/lookupPolicy.js";
+import { answerWithLookup } from "../src/chat/lookupAnswer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const LOOKUP_MODEL = process.env.TANTULAR_LOOKUP_MODEL || "tantular-office:0.5-9b";
+
+async function completeLocally(prompt) {
+  const response = await fetch("http://127.0.0.1:11434/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: LOOKUP_MODEL, stream: false, think: false,
+      messages: [{ role: "user", content: prompt }],
+      options: { temperature: 0 }
+    })
+  });
+  if (!response.ok) throw new Error(`model HTTP ${response.status}`);
+  const data = await response.json();
+  return data?.message?.content || "";
+}
 
 // Tokens issued by /api/lookup/prepare, consumed once by /api/lookup/execute.
 const pendingLookups = new Map();
@@ -235,11 +253,33 @@ function handler(req, res) {
             message: `Sumber menolak permintaan (HTTP ${upstream.status}).`
           });
         }
-        // Labelled, never handed over as instructions.
-        return reply(200, {
-          ok: true, host: authorized.entry.host, status: upstream.status,
-          untrusted: true, content: wrapUntrusted(authorized.entry.host, text.slice(0, 20_000))
+        // The page NEVER crosses to the pane. The answer is composed here,
+        // against the user's document, and checked before anything is
+        // returned — because the model obeys hostile pages 3 times in 7 and
+        // the pane cannot tell a corrupted answer from a good one.
+        const composed = await answerWithLookup({
+          document: String(body?.document || ""),
+          question: String(body?.question || ""),
+          untrusted: wrapUntrusted(authorized.entry.host, text.slice(0, 20_000)),
+          complete: (prompt) => completeLocally(prompt)
         });
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
+          query: authorized.entry.query, host: authorized.entry.host,
+          approved: true,
+          outcome: composed.ok ? "verified" : `blocked_by_verifier:${composed.reason}`
+        }));
+        if (!composed.ok) {
+          // 200, not an error status: the lookup ran correctly and the answer
+          // was refused. The pane must render this as "not trusted", which is
+          // a result, not a transport failure.
+          return reply(200, { ...composed, host: authorized.entry.host });
+        }
+        // NOT `status: upstream.status` — that overwrote the verdict field with
+        // 200, so a pane checking status === "verified" would never match and
+        // the trust signal would be silently absent. The upstream code goes in
+        // its own field.
+        return reply(200, { ...composed, host: authorized.entry.host,
+                            upstreamStatus: upstream.status });
       } catch (error) {
         appendLookupAudit(auditRecord({ key: lookupAuditKey,
           query: authorized.entry.query, host: authorized.entry.host,
