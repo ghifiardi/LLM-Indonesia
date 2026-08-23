@@ -11,11 +11,11 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Tantular" />
   <Description DefaultValue="Private Indonesian writing, document-safety, and text-classification assistant for Word, Excel, and PowerPoint." />
-  <IconUrl DefaultValue="https://workshop-web-gamma.vercel.app/assets/icon-32.png" />
-  <HighResolutionIconUrl DefaultValue="https://workshop-web-gamma.vercel.app/assets/icon-80.png" />
-  <SupportUrl DefaultValue="https://workshop-web-gamma.vercel.app/support.html" />
+  <IconUrl DefaultValue="https://office.tantular.ai/assets/icon-32.png" />
+  <HighResolutionIconUrl DefaultValue="https://office.tantular.ai/assets/icon-80.png" />
+  <SupportUrl DefaultValue="https://office.tantular.ai/support.html" />
   <AppDomains>
-    <AppDomain>https://workshop-web-gamma.vercel.app</AppDomain>
+    <AppDomain>https://office.tantular.ai</AppDomain>
     <AppDomain>https://localhost:3000</AppDomain>
   </AppDomains>
   <Hosts>
@@ -24,7 +24,7 @@
     <Host Name="Presentation" />
   </Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://workshop-web-gamma.vercel.app/src/taskpane.html" />
+    <SourceLocation DefaultValue="https://office.tantular.ai/src/taskpane.html" />
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
@@ -146,13 +146,13 @@
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16" DefaultValue="https://workshop-web-gamma.vercel.app/assets/icon-16.png" />
-        <bt:Image id="Icon.32" DefaultValue="https://workshop-web-gamma.vercel.app/assets/icon-32.png" />
-        <bt:Image id="Icon.80" DefaultValue="https://workshop-web-gamma.vercel.app/assets/icon-80.png" />
+        <bt:Image id="Icon.16" DefaultValue="https://office.tantular.ai/assets/icon-16.png" />
+        <bt:Image id="Icon.32" DefaultValue="https://office.tantular.ai/assets/icon-32.png" />
+        <bt:Image id="Icon.80" DefaultValue="https://office.tantular.ai/assets/icon-80.png" />
       </bt:Images>
       <bt:Urls>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://workshop-web-gamma.vercel.app/src/taskpane.html" />
-        <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://workshop-web-gamma.vercel.app/support.html" />
+        <bt:Url id="Taskpane.Url" DefaultValue="https://office.tantular.ai/src/taskpane.html" />
+        <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://office.tantular.ai/support.html" />
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="Commands.Group.Label" DefaultValue="Tantular" />

@@ -1,8 +1,8 @@
 {
-  "buildId": "2026-08-17.c26c01e",
-  "sourceSha": "c26c01e8831b58a9b0c1095c708975b741733ada",
-  "sourceDirty": false,
-  "builtAt": "2026-08-17T02:14:44.014Z",
+  "buildId": "2026-08-23.5429441+dirty",
+  "sourceSha": "5429441f798a5a2e325b1e89bf1c117856622333",
+  "sourceDirty": true,
+  "builtAt": "2026-08-23T15:43:09.232Z",
   "packageFormat": 1,
-  "baseUrl": "https://workshop-web-gamma.vercel.app"
+  "baseUrl": "https://office.tantular.ai"
 }

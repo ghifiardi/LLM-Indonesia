@@ -10,4 +10,4 @@ if ! npx office-addin-dev-certs verify >/dev/null 2>&1; then
 fi
 echo "Menjalankan Tantular Companion di https://localhost:3000"
 echo "Biarkan jendela ini tetap terbuka selama workshop."
-TANTULAR_ALLOWED_ORIGINS="https://workshop-web-gamma.vercel.app" npm start
+TANTULAR_ALLOWED_ORIGINS="https://office.tantular.ai" npm start

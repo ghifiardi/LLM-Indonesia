@@ -5,8 +5,16 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const out = path.join(root, "dist", "workshop-web");
 
-fs.rmSync(out, { recursive: true, force: true });
+// Wipe the build output, but keep .vercel/ — that directory is not build
+// output, it is the LINK to the Vercel project (projectId/orgId). A plain
+// rmSync(out) deletes it, and the next `vercel deploy` then stops on an
+// interactive "link to which project?" prompt, mid-release. Everything else
+// goes, so a file that no longer has a source cannot survive into a deploy.
 fs.mkdirSync(out, { recursive: true });
+for (const entry of fs.readdirSync(out)) {
+  if (entry === ".vercel") continue;
+  fs.rmSync(path.join(out, entry), { recursive: true, force: true });
+}
 
 copyDir(path.join(root, "src"), path.join(out, "src"));
 copyDir(path.join(root, "assets"), path.join(out, "assets"));

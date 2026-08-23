@@ -4,8 +4,56 @@ import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createWorkspaceStore, handleWorkspaceRequest } from "./workspace.mjs";
+import {
+  ollamaLineToOpenAiEvent,
+  openAiToOllamaBody,
+  parseOllamaResponse
+} from "../src/chat/ollamaBridge.js";
+import {
+  lookupEnabled, allowedHosts, prepareLookup, authorizeExecution,
+  auditRecord, wrapUntrusted, resolveUrl, auditKey
+} from "../src/chat/lookupPolicy.js";
+import { answerWithLookup } from "../src/chat/lookupAnswer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const LOOKUP_MODEL = process.env.TANTULAR_LOOKUP_MODEL || "tantular-office:0.5-9b";
+
+async function completeLocally(prompt) {
+  const response = await fetch("http://127.0.0.1:11434/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: LOOKUP_MODEL, stream: false, think: false,
+      messages: [{ role: "user", content: prompt }],
+      options: { temperature: 0 }
+    })
+  });
+  if (!response.ok) throw new Error(`model HTTP ${response.status}`);
+  const data = await response.json();
+  return data?.message?.content || "";
+}
+
+// Tokens issued by /api/lookup/prepare, consumed once by /api/lookup/execute.
+const pendingLookups = new Map();
+const LOOKUP_AUDIT = path.join(process.env.HOME || ".", ".tantular-lookup-audit.jsonl");
+const LOOKUP_AUDIT_KEY = path.join(process.env.HOME || ".", ".tantular-lookup-audit.key");
+// Per-install HMAC key, 0600. A plain hash would be brute-forceable for short
+// queries — "PT Sinar Mas" has a tiny search space — so the digest is keyed.
+const lookupAuditKey = auditKey(
+  process.env,
+  () => { try { return fs.readFileSync(LOOKUP_AUDIT_KEY, "utf8").trim(); } catch { return ""; } },
+  (value) => fs.writeFileSync(LOOKUP_AUDIT_KEY, value, { mode: 0o600 })
+);
+function appendLookupAudit(record) {
+  try {
+    fs.appendFileSync(LOOKUP_AUDIT, JSON.stringify(record) + "\n");
+  } catch {
+    // An unwritable audit log must not silently allow an unlogged request; the
+    // caller treats a throw here as a refusal.
+    throw new Error("audit log tidak dapat ditulis; permintaan dibatalkan");
+  }
+}
 const root = path.resolve(__dirname, "..");
 const port = Number(process.env.PORT || 3000);
 const allowedOrigins = new Set([
@@ -115,6 +163,142 @@ function handler(req, res) {
 
   if (url.pathname === "/api/ocr") {
     proxyOcr(req, res);
+    return;
+  }
+
+  // --- approval-gated web lookup: the ONLY outbound path ------------------
+  //
+  // Enforced in the companion rather than the pane. A pane-side check protects
+  // nothing: a bug or a later code path could call fetch directly. Here there
+  // is one door, and it is shut unless TANTULAR_LOOKUP_ENABLED=true.
+  // Read-only: lets the pane hide the toggle entirely when the feature is off,
+  // rather than offering a control that always refuses. No side effects and no
+  // token, so it cannot be a step toward egress.
+  if (url.pathname === "/api/lookup/status") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8",
+                         ...corsHeaders(req), "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ enabled: lookupEnabled(), hosts: allowedHosts() }));
+    return;
+  }
+
+  if (url.pathname === "/api/lookup/prepare" || url.pathname === "/api/lookup/execute") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json", ...corsHeaders(req) });
+      res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+      return;
+    }
+    readJsonBody(req, async (bodyError, body) => {
+      const reply = (status, payload) => {
+        res.writeHead(status, {
+          "Content-Type": "application/json; charset=utf-8",
+          ...corsHeaders(req), "Cache-Control": "no-store"
+        });
+        res.end(JSON.stringify(payload));
+      };
+      if (bodyError) return reply(400, { ok: false, error: bodyError.message });
+
+      if (url.pathname === "/api/lookup/prepare") {
+        const prepared = prepareLookup({ query: body?.query, host: body?.host,
+                                         document: body?.document });
+        if (!prepared.ok) {
+          appendLookupAudit(auditRecord({ key: lookupAuditKey,
+            query: String(body?.query || ""), host: String(body?.host || ""),
+            approved: false, outcome: `refused:${prepared.reason}`
+          }));
+          return reply(403, prepared);
+        }
+        pendingLookups.set(prepared.token, prepared);
+        // No request has left the machine at this point. Nothing does until
+        // the user reads `disclosure` and the pane calls execute.
+        return reply(200, {
+          ok: true, token: prepared.token, disclosure: prepared.disclosure,
+          expiresAt: prepared.expiresAt
+        });
+      }
+
+      const authorized = authorizeExecution({
+        pending: pendingLookups, token: body?.token,
+        query: body?.query, host: body?.host, document: body?.document
+      });
+      if (!authorized.ok) {
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
+          query: String(body?.query || ""), host: String(body?.host || ""),
+          approved: false, outcome: `refused:${authorized.reason}`
+        }));
+        return reply(403, authorized);
+      }
+
+      const target = resolveUrl(authorized.entry.host, authorized.entry.query);
+      if (!target) {
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
+          query: authorized.entry.query, host: authorized.entry.host,
+          approved: true, outcome: "refused:no_adapter"
+        }));
+        return reply(403, { ok: false, reason: "no_adapter",
+                            message: "Host tidak punya adapter pencarian." });
+      }
+      try {
+        const upstream = await fetch(target, {
+          redirect: "error",
+          headers: {
+            // Wikimedia rate-limits anonymous clients: the first real request
+            // came back 429. Their policy asks for a descriptive agent with
+            // contact info, and it also means our traffic is identifiable
+            // rather than hiding among generic clients.
+            "User-Agent": "TantularOffice/0.5 (local Office add-in; "
+                          + "https://ollama.com/ghifidanukusumo/tantular)",
+            "Accept": "application/json"
+          }
+        });
+        const text = await upstream.text();
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
+          query: authorized.entry.query, host: authorized.entry.host,
+          approved: true, outcome: `sent:${upstream.status}`,
+          responseBytes: text.length
+        }));
+        // A 429 or a 404 is not a lookup that worked. Reporting ok:true with an
+        // error status hands the model an error page as if it were an answer.
+        if (!upstream.ok) {
+          return reply(502, {
+            ok: false, reason: "upstream_status", status: upstream.status,
+            message: `Sumber menolak permintaan (HTTP ${upstream.status}).`
+          });
+        }
+        // The page NEVER crosses to the pane. The answer is composed here,
+        // against the user's document, and checked before anything is
+        // returned — because the model obeys hostile pages 3 times in 7 and
+        // the pane cannot tell a corrupted answer from a good one.
+        const composed = await answerWithLookup({
+          document: String(body?.document || ""),
+          question: String(body?.question || ""),
+          untrusted: wrapUntrusted(authorized.entry.host, text.slice(0, 20_000)),
+          complete: (prompt) => completeLocally(prompt)
+        });
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
+          query: authorized.entry.query, host: authorized.entry.host,
+          approved: true,
+          outcome: composed.ok ? "verified" : `blocked_by_verifier:${composed.reason}`
+        }));
+        if (!composed.ok) {
+          // 200, not an error status: the lookup ran correctly and the answer
+          // was refused. The pane must render this as "not trusted", which is
+          // a result, not a transport failure.
+          return reply(200, { ...composed, host: authorized.entry.host });
+        }
+        // NOT `status: upstream.status` — that overwrote the verdict field with
+        // 200, so a pane checking status === "verified" would never match and
+        // the trust signal would be silently absent. The upstream code goes in
+        // its own field.
+        return reply(200, { ...composed, host: authorized.entry.host,
+                            upstreamStatus: upstream.status });
+      } catch (error) {
+        appendLookupAudit(auditRecord({ key: lookupAuditKey,
+          query: authorized.entry.query, host: authorized.entry.host,
+          approved: true, outcome: `error:${error?.message || "fetch failed"}`
+        }));
+        return reply(502, { ok: false, error: String(error?.message || error) });
+      }
+    });
     return;
   }
 
@@ -303,39 +487,145 @@ function proxyChatCompletions(req, res) {
     return;
   }
 
-  const proxyReq = http.request(
-    {
-      hostname: "127.0.0.1",
-      port: 11434,
-      path: "/v1/chat/completions",
-      method: "POST",
-      headers: {
-        "Content-Type": req.headers["content-type"] || "application/json",
-        "Content-Length": req.headers["content-length"] || undefined
-      }
-    },
-    (proxyRes) => {
-      res.writeHead(proxyRes.statusCode || 502, {
-        "Content-Type": proxyRes.headers["content-type"] || "application/json; charset=utf-8",
-        ...corsHeaders(req),
-        "Cache-Control": "no-store"
+  readJsonBody(req, (error, body) => {
+    if (error) {
+      res.writeHead(error.status || 400, {
+        "Content-Type": "application/json; charset=utf-8",
+        ...corsHeaders(req)
       });
-      proxyRes.pipe(res);
+      res.end(JSON.stringify({ ok: false, error: error.message }));
+      return;
     }
-  );
 
-  proxyReq.on("error", (error) => {
-    res.writeHead(502, {
-      "Content-Type": "application/json; charset=utf-8",
-      ...corsHeaders(req)
-    });
-    res.end(JSON.stringify({
-      ok: false,
-      error: `Model proxy gagal: ${error.message}. Pastikan Ollama berjalan dan model Tantular tersedia.`
-    }));
+    const ollamaBody = openAiToOllamaBody(body);
+    const proxyReq = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: 11434,
+        path: "/api/chat",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(JSON.stringify(ollamaBody))
+        }
+      },
+      (proxyRes) => {
+        if ((proxyRes.statusCode || 502) >= 400) {
+          collectResponse(proxyRes, (collectError, raw) => {
+            if (collectError) {
+              writeModelProxyError(res, req, collectError);
+              return;
+            }
+            const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502);
+            res.writeHead(proxyRes.statusCode || 502, {
+              "Content-Type": "application/json; charset=utf-8",
+              ...corsHeaders(req),
+              "Cache-Control": "no-store"
+            });
+            res.end(JSON.stringify(payload));
+          });
+          return;
+        }
+        if (ollamaBody.stream) {
+          streamOllamaAsOpenAi(proxyRes, res, req);
+          return;
+        }
+        collectResponse(proxyRes, (collectError, raw) => {
+          if (collectError) {
+            writeModelProxyError(res, req, collectError);
+            return;
+          }
+          const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502);
+          res.writeHead(proxyRes.statusCode || 502, {
+            "Content-Type": "application/json; charset=utf-8",
+            ...corsHeaders(req),
+            "Cache-Control": "no-store"
+          });
+          res.end(JSON.stringify(payload));
+        });
+      }
+    );
+
+    proxyReq.on("error", (proxyError) => writeModelProxyError(res, req, proxyError));
+    proxyReq.end(JSON.stringify(ollamaBody));
   });
+}
 
-  req.pipe(proxyReq);
+const MAX_CHAT_BODY_BYTES = 256 * 1024;
+
+function readJsonBody(req, callback) {
+  let body = "";
+  let size = 0;
+  let finished = false;
+  const fail = (error) => {
+    if (finished) return;
+    finished = true;
+    callback(error);
+    req.destroy();
+  };
+  req.setEncoding("utf8");
+  req.on("data", (chunk) => {
+    size += Buffer.byteLength(chunk);
+    if (size > MAX_CHAT_BODY_BYTES) {
+      fail(Object.assign(new Error("Permintaan model terlalu besar."), { status: 413 }));
+      return;
+    }
+    body += chunk;
+  });
+  req.on("end", () => {
+    if (finished) return;
+    try {
+      finished = true;
+      callback(null, JSON.parse(body || "{}"));
+    } catch {
+      finished = true;
+      callback(Object.assign(new Error("Body harus JSON yang valid."), { status: 400 }));
+    }
+  });
+  req.on("error", (error) => fail(error));
+}
+
+function collectResponse(response, callback) {
+  const chunks = [];
+  response.on("data", (chunk) => chunks.push(chunk));
+  response.on("end", () => callback(null, Buffer.concat(chunks).toString("utf8")));
+  response.on("error", callback);
+}
+
+function streamOllamaAsOpenAi(proxyRes, res, req) {
+  res.writeHead(proxyRes.statusCode || 502, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    ...corsHeaders(req)
+  });
+  let pending = "";
+  proxyRes.on("data", (chunk) => {
+    pending += chunk.toString("utf8");
+    const lines = pending.split("\n");
+    pending = lines.pop() || "";
+    for (const line of lines) res.write(ollamaLineToOpenAiEvent(line));
+  });
+  proxyRes.on("end", () => {
+    if (pending.trim()) res.write(ollamaLineToOpenAiEvent(pending));
+    res.end("data: [DONE]\n\n");
+  });
+  proxyRes.on("error", () => res.end());
+}
+
+function writeModelProxyError(res, req, error) {
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  res.writeHead(error.status || 502, {
+    "Content-Type": "application/json; charset=utf-8",
+    ...corsHeaders(req)
+  });
+  res.end(JSON.stringify({
+    ok: false,
+    error: `Model proxy gagal: ${error.message}. Pastikan Ollama berjalan dan model Tantular tersedia.`
+  }));
 }
 
 function proxyOllamaModels(req, res) {

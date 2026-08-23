@@ -3,24 +3,34 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Build the Office profile locally from the official Ollama base so an old
-# published Tantular alias can never silently keep participants on Qwen3.
-# A registry model remains available as an explicit opt-in override.
-REGISTRY_MODEL="${TANTULAR_OFFICE_REGISTRY_MODEL:-}"
+# Pull the published profile by default. It was previously built locally from
+# qwen3.5:9b so that a stale published alias could not keep participants on an
+# old model — a sound reason at the time. It is reversed deliberately on
+# 2026-08-22: the registry alias now points at a measured artifact
+# (ghifidanukusumo/tantular:latest, Q8_0), and building locally from the
+# qwen3.5:9b tag reproduces a Q4_K_M profile that scores BELOW the gates —
+# voice 37/40 against a 0.95 bar. Building locally would hand users a model
+# nobody measured; pulling gives them the one that was.
+#
+# Set TANTULAR_OFFICE_BASE_MODEL to force the old local-build path.
+REGISTRY_MODEL="${TANTULAR_OFFICE_REGISTRY_MODEL:-ghifidanukusumo/tantular}"
 BASE_MODEL="${TANTULAR_OFFICE_BASE_MODEL:-qwen3.5:9b}"
-MODEL_NAME="${TANTULAR_OFFICE_MODEL_NAME:-tantular-office:0.4-9b}"
+MODEL_NAME="${TANTULAR_OFFICE_MODEL_NAME:-tantular-office:0.5-9b}"
 REGISTRY_TAG="latest"
 
-# Machines without enough RAM for a 9B model (~6.6GB weights) swap to disk and
-# time out on every Studio call. Use the lighter 4B variant there instead.
+# Machines without enough RAM swap to disk and time out on every Studio call.
+# The floor moved from 12GB to 16GB on 2026-08-22: it was set for the Q4_K_M
+# profile at ~6.6GB, and the default is now Q8_0 at 10GB. A 12GB machine
+# running 10GB of weights plus the OS is exactly the swapping case this check
+# exists to prevent.
 TOTAL_RAM_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
 LITE_MODE=0
-if [ -z "${TANTULAR_OFFICE_BASE_MODEL:-}" ] && [ "$TOTAL_RAM_GB" -gt 0 ] && [ "$TOTAL_RAM_GB" -lt 12 ]; then
+if [ -z "${TANTULAR_OFFICE_BASE_MODEL:-}" ] && [ "$TOTAL_RAM_GB" -gt 0 ] && [ "$TOTAL_RAM_GB" -lt 16 ]; then
   LITE_MODE=1
   BASE_MODEL="qwen3.5:4b"
   MODEL_NAME="tantular-office:lite"
   REGISTRY_TAG="lite"
-  echo "RAM terdeteksi ${TOTAL_RAM_GB}GB (<12GB): memakai model ringan $MODEL_NAME."
+  echo "RAM terdeteksi ${TOTAL_RAM_GB}GB (<16GB): memakai model ringan $MODEL_NAME."
 fi
 
 # The Ollama Mac app ships its CLI inside the bundle; it may not be on PATH

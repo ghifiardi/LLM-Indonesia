@@ -19,16 +19,26 @@ execFileSync(process.execPath, [
   "--out", path.join(out, "tantular-workshop-manifest.xml")
 ], { stdio: "inherit" });
 
-copy("tools/dev-server.mjs");
-copy("tools/doctor.mjs");
-copy("tools/doc-setup.mjs");
-copy("tools/start.mjs");
-// dev-server.mjs imports ./workspace.mjs. Shipping one without the other makes
-// the packaged dev server die at startup with ERR_MODULE_NOT_FOUND — and since
-// companionUrl() points a published task pane at https://localhost:3000, that
-// dev server is the attendee's only bridge to the local companion, so the model
-// stops answering entirely.
-copy("tools/workspace.mjs");
+// Ship each entry point WITH everything it imports, transitively.
+//
+// A hand-maintained copy list has broken this package twice: first
+// tools/workspace.mjs (a `./` sibling of dev-server.mjs), then
+// src/chat/ollamaBridge.js and the lookup modules it pulls in (`../src/...`).
+// Both failures look identical to an attendee — the companion dies at startup
+// with ERR_MODULE_NOT_FOUND — and because companionUrl() points the published
+// task pane at https://localhost:3000, a dead companion means the model stops
+// answering entirely.
+//
+// Walking the imports removes the class of bug instead of the instance: a new
+// import in any shipped tool is packaged automatically. Only reachable modules
+// are copied, so src/taskpane.html stays out and dev-server.mjs keeps
+// correctly detecting that it is running from a package, not the repo.
+copyModuleClosure([
+  "tools/dev-server.mjs",
+  "tools/doctor.mjs",
+  "tools/doc-setup.mjs",
+  "tools/start.mjs",
+]);
 copy("tools/install-office-model.sh");
 copy("tools/document-extractor.py");
 copy("models/Modelfile.office-9b");
@@ -107,28 +117,32 @@ fs.copyFileSync(
 
 // Verify the package can actually start BEFORE zipping it.
 //
-// The copy list above is hand-maintained, and shipping a module without its
-// imports has already broken a workshop once: dev-server.mjs imports
-// ./workspace.mjs, that copy line was missing, and the packaged companion died
-// at startup with ERR_MODULE_NOT_FOUND (fixed in a916adb). Attendees who
+// Shipping a module without its imports has broken a workshop twice:
+// dev-server.mjs imports ./workspace.mjs (fixed in a916adb), and later
+// ../src/chat/ollamaBridge.js plus the lookup modules behind it. Both times the
+// packaged companion died at startup with ERR_MODULE_NOT_FOUND. Attendees who
 // downloaded before the fix and after it followed identical instructions and
 // got different results, which is exactly what "some worked, some didn't"
 // looks like from the room.
 //
-// A comment cannot prevent the next one. These checks can: the build now fails
-// rather than shipping a package that cannot run.
+// copyModuleClosure() now walks the imports, so this is a second, independent
+// reading of the same graph — it re-derives the requirement from the SHIPPED
+// files rather than trusting the copier. The build fails rather than shipping a
+// package that cannot run.
 function verifyPackage(dir) {
   const problems = [];
 
-  // 1. Every relative import of every shipped .mjs must also be shipped.
-  const mjs = fs.readdirSync(path.join(dir, "tools")).filter((f) => f.endsWith(".mjs"));
-  for (const file of mjs) {
-    const source = fs.readFileSync(path.join(dir, "tools", file), "utf8");
-    const imports = [...source.matchAll(/(?:from|import\()\s*"(\.\/[^"]+)"/g)]
-      .map((m) => m[1].replace(/^\.\//, ""));
-    for (const dep of new Set(imports)) {
-      if (!fs.existsSync(path.join(dir, "tools", dep))) {
-        problems.push(`tools/${file} imports ./${dep}, which is NOT in the package`);
+  // 1. Every relative import of every shipped module must also be shipped.
+  //
+  // Both `./siblings` and `../src/...` count: the earlier version of this check
+  // only matched "./", so tools/dev-server.mjs importing ../src/chat/
+  // ollamaBridge.js sailed through the verifier and shipped a package that
+  // could not start. Walk the whole package, not just tools/.
+  const modules = allModules(dir);
+  for (const file of modules) {
+    for (const dep of new Set(relativeImportsOf(file, dir))) {
+      if (!fs.existsSync(path.join(dir, dep))) {
+        problems.push(`${file} imports ${dep}, which is NOT in the package`);
       }
     }
   }
@@ -162,7 +176,18 @@ function verifyPackage(dir) {
     console.error("\nTambahkan copy() yang hilang di tools/build-workshop-package.mjs.\n");
     process.exit(1);
   }
-  console.log(`Verifikasi paket OK: ${mjs.length} modul, impor lengkap, skrip cocok.`);
+  console.log(`Verifikasi paket OK: ${modules.length} modul, impor lengkap, skrip cocok.`);
+}
+
+// Every .mjs/.js in the package, as package-relative paths.
+function allModules(dir, prefix = "") {
+  const found = [];
+  for (const entry of fs.readdirSync(path.join(dir, prefix), { withFileTypes: true })) {
+    const relative = prefix ? path.join(prefix, entry.name) : entry.name;
+    if (entry.isDirectory()) found.push(...allModules(dir, relative));
+    else if (/\.(mjs|js)$/.test(entry.name)) found.push(relative);
+  }
+  return found;
 }
 verifyPackage(out);
 
@@ -204,6 +229,36 @@ function copy(relative) {
   const target = path.join(out, relative);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.copyFileSync(path.join(root, relative), target);
+}
+
+// Static relative imports of a JS/MJS source, as paths relative to `dir`.
+// The regex is declared inside the function on purpose: this file calls
+// copyModuleClosure() at top level, above these declarations, and a
+// module-scope `const` would still be in its temporal dead zone there.
+function relativeImportsOf(repoRelative, dir) {
+  const RELATIVE_IMPORT = /(?:\bfrom|\bimport\(|\bimport)\s*["'](\.[^"']+)["']/g;
+  const source = fs.readFileSync(path.join(dir, repoRelative), "utf8");
+  return [...source.matchAll(RELATIVE_IMPORT)].map((match) =>
+    path.relative(dir, path.resolve(path.dirname(path.join(dir, repoRelative)), match[1]))
+  );
+}
+
+// Copy each entry and everything it imports, preserving repo-relative layout so
+// the import specifiers still resolve inside the package.
+function copyModuleClosure(entries) {
+  const seen = new Set();
+  const queue = [...entries];
+  while (queue.length) {
+    const relative = queue.shift();
+    if (seen.has(relative)) continue;
+    seen.add(relative);
+    if (!fs.existsSync(path.join(root, relative))) {
+      throw new Error(`build list references ${relative}, which does not exist in the repo`);
+    }
+    copy(relative);
+    queue.push(...relativeImportsOf(relative, root));
+  }
+  console.log(`Modul disalin (termasuk impor): ${seen.size}`);
 }
 
 function installerScript() {

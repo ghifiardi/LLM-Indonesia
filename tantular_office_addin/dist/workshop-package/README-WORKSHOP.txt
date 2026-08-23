@@ -1,11 +1,11 @@
 WORKSHOP TANTULAR OFFICE (MAC & WINDOWS)
-Versi paket: 2026-08-17.c26c01e   (dibangun 2026-08-17 02:14 UTC)
+Versi paket: 2026-08-23.5429441+dirty   (dibangun 2026-08-23 15:43 UTC)
 Sebutkan versi ini bila melaporkan masalah — dua unduhan bisa punya nama sama
 tetapi isi berbeda.
 
 CARA PALING MUDAH — satu perintah (unduh + pasang semuanya otomatis):
-- Mac (Terminal):      curl -fsSL https://workshop-web-gamma.vercel.app/downloads/setup.sh | bash
-- Windows (PowerShell): irm https://workshop-web-gamma.vercel.app/downloads/setup.ps1 | iex
+- Mac (Terminal):      curl -fsSL https://office.tantular.ai/downloads/setup.sh | bash
+- Windows (PowerShell): irm https://office.tantular.ai/downloads/setup.ps1 | iex
 
 Prasyarat Node.js 18+ dan Ollama dipasang OTOMATIS oleh installer bila belum ada
 (Mac: Homebrew/installer resmi; Windows: winget). Unduhan manual bila perlu:
@@ -39,10 +39,10 @@ menjalankannya sendiri — tidak perlu perintah terpisah.
 Periksa kondisi kapan saja dengan `npm run doctor`.
 
 Task pane yang dihosting:
-https://workshop-web-gamma.vercel.app
+https://office.tantular.ai
 
 Privasi:
-https://workshop-web-gamma.vercel.app/privacy.html
+https://office.tantular.ai/privacy.html
 
 Dukungan:
-https://workshop-web-gamma.vercel.app/support.html
+https://office.tantular.ai/support.html

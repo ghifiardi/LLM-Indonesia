@@ -3,8 +3,8 @@
 ## Build order is not interchangeable
 
 ```bash
-node tools/build-workshop-web.mjs     --base-url https://workshop-web-gamma.vercel.app
-node tools/build-workshop-package.mjs --base-url https://workshop-web-gamma.vercel.app   # AFTER
+node tools/build-workshop-web.mjs     --base-url https://office.tantular.ai
+node tools/build-workshop-package.mjs --base-url https://office.tantular.ai   # AFTER
 cd dist/workshop-web
 vercel link --yes --project workshop-web --scope gatra    # .vercel is wiped every time
 vercel deploy --prod --yes
@@ -46,7 +46,7 @@ out that commit. The commit that *contains* the zip is always its child.
 ## Verifying a release
 
 ```bash
-curl -sLO https://workshop-web-gamma.vercel.app/downloads/tantular-workshop-mac.zip
+curl -sLO https://office.tantular.ai/downloads/tantular-workshop-mac.zip
 unzip -q tantular-workshop-mac.zip -d /tmp/check
 cat /tmp/check/workshop-build.json
 ```
@@ -58,13 +58,19 @@ deploy carried what you built.
 
 `build-workshop-package.mjs` fails before zipping if:
 
-- a shipped `.mjs` imports a relative module that is not in the package
-  (this is the `ERR_MODULE_NOT_FOUND` that broke a workshop — `a916adb`)
+- a shipped module imports a relative module that is not in the package,
+  `./sibling` or `../src/...` alike (this is the `ERR_MODULE_NOT_FOUND` that
+  broke a workshop twice — `a916adb`, then `src/chat/ollamaBridge.js`)
 - a launcher calls `npm run X` / `npm start` with no such script
 - a `package.json` script points at a file that is not shipped
 
-The copy list is hand-maintained. These checks exist because a comment could
-not prevent the second occurrence.
+The copy list is no longer hand-maintained: `copyModuleClosure()` walks the
+imports of each entry point and ships everything reachable, so a new import in
+a shipped tool is packaged automatically. Only reachable modules are copied —
+`src/taskpane.html` stays out, and the dev server keeps correctly detecting
+that it runs as a bridge, with the pane served from the web. The check above
+then re-derives the same graph from the SHIPPED files, as an independent
+reading rather than a restatement of the copier.
 
 ## Attendee-facing identity
 
