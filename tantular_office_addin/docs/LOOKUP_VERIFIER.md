@@ -74,21 +74,78 @@ is the honest product shape, but the difference is the wrapping, not the model.
 Which classes succeed also varies between runs. Assume the model can be fooled;
 the verifier is what makes that survivable.
 
+## The approval binds the document, not just the query
+
+`prepareLookup` requires the document and stores `documentHash` — a SHA-256 —
+in the token. `authorizeExecution` recomputes it and refuses
+`document_changed` if it differs, byte for byte.
+
+Without this, a user could approve "cari harga pasar" while looking at report A
+and have the answer verified against report B: protected strings drawn from a
+source they never saw when approving. The hash is stored rather than the text
+because the token lives in memory and must not hold document content.
+
+A lookup with **no** document is refused at prepare, before anything is sent.
+An answer with nothing to check against could only ever be refused, so paying
+one dialog is better than leaking a query for a result we would discard.
+
+## What the pane renders
+
+`src/chat/lookupResultView.js`. Two states and no third.
+
+| | verified | blocked |
+|---|---|---|
+| answer shown | yes | **never** |
+| edit control | present | **absent from the DOM**, not hidden |
+| findings | — | explained in Indonesian, with the raw strings |
+
+`answer` is `null` on every non-verified path and `canEdit` derives from the
+same value rather than being a separate field — two fields that can disagree
+eventually will. A blocked response that *carries* an answer (a future server
+change) still renders none. `ok: true` without `status: "verified"` is treated
+as blocked, so a partial or older response cannot inherit trust from `ok`
+alone. Findings and host names are escaped: they can quote a hostile page.
+
+`mountLookupResult()` attaches the edit handler only in the verified branch.
+Attaching it always and checking a flag inside would move the decision into the
+handler, where a later edit could lose it.
+
+## Response shapes measured
+
+| shape | classes | reached user |
+|---|---|---|
+| JSON envelope (Wikipedia adapter) | 7/7 | 0 |
+| raw HTML page | 7/7 | 0 |
+| **real `id.wikipedia.org`** | 1 benign query | verified, vendor preserved |
+
+The real-host run is `tests/lookupRemoteHost.test.mjs`, opt-in behind
+`TANTULAR_E2E_NETWORK=1`. A network test that runs by default would turn "no
+egress unless approved" into a slogan and make the suite depend on Wikimedia
+being up. It asserts that the fetched page never reaches the pane under either
+verdict.
+
 ## Still `false`
 
 Closed since the last review: the verifier is in the companion, it runs before
 anything reaches the pane, failure returns `blocked_by_verifier`, protected
 strings come from the real document, and the suite runs over HTTP.
 
+Closed since: the pane renders both states, the approval binds a document hash,
+two response shapes and one real remote host are measured.
+
 Open, and each one blocks enabling:
 
-1. **The pane does not render these states yet.** `verified` and
-   `blocked_by_verifier` are returned but no UI distinguishes them, so a user
-   would see nothing for a blocked answer.
-2. **The document is whatever the caller passes.** The pane must send the real
-   document text, and that wiring does not exist.
-3. **One host, one adapter.** `id.wikipedia.org` only, and its JSON envelope is
-   the shape all the e2e evidence rests on. A host returning raw HTML has not
-   been measured.
-4. **The e2e harness uses a local origin.** No run against a real remote host
-   has been done under the verifier.
+1. **The pane does not yet CALL the lookup.** `lookupResultView` renders a
+   response and `taskpane.html` has the container, but there is no mode
+   toggle, no approval dialog and no code path in `taskpane.js` that reaches
+   the companion. The rendering is proven; the trigger does not exist.
+2. **Nothing reads the Office document into the request.** The binding is
+   enforced end to end, but the pane must supply `document` from the real Word
+   or Excel body, and that reader is not written.
+3. **The model still obeys hostile pages.** Containment is doing the work. Any
+   change that weakens the verifier — a looser entity rule, a new fact kind —
+   re-opens the three classes it currently catches. Re-run both suites after
+   touching `verifyWebAnswer.js`.
+4. **One host.** `id.wikipedia.org`. Adding another needs its own adapter and
+   its own run of both suites; the HTML measurement used a local origin, not a
+   real HTML host.

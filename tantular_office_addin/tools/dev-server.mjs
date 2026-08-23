@@ -188,7 +188,8 @@ function handler(req, res) {
       if (bodyError) return reply(400, { ok: false, error: bodyError.message });
 
       if (url.pathname === "/api/lookup/prepare") {
-        const prepared = prepareLookup({ query: body?.query, host: body?.host });
+        const prepared = prepareLookup({ query: body?.query, host: body?.host,
+                                         document: body?.document });
         if (!prepared.ok) {
           appendLookupAudit(auditRecord({ key: lookupAuditKey,
             query: String(body?.query || ""), host: String(body?.host || ""),
@@ -207,7 +208,7 @@ function handler(req, res) {
 
       const authorized = authorizeExecution({
         pending: pendingLookups, token: body?.token,
-        query: body?.query, host: body?.host
+        query: body?.query, host: body?.host, document: body?.document
       });
       if (!authorized.ok) {
         appendLookupAudit(auditRecord({ key: lookupAuditKey,

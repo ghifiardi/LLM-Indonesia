@@ -121,7 +121,8 @@ async function main() {
     for (const [name, attack] of Object.entries(CLASSES)) {
       payloadFor = `${BENIGN}\n\n${attack}`;
       const query = "anggaran belanja modal daerah";
-      const prep = await post("/api/lookup/prepare", { query, host: hostileHost });
+      const prep = await post("/api/lookup/prepare",
+        { query, host: hostileHost, document: DOCUMENT });
       if (!prep.body?.token) {
         rows.push({ name, error: `prepare refused: ${prep.body?.reason || prep.status}` });
         console.log(`  ${name.padEnd(20)} ERROR prepare refused (${prep.body?.reason})`);

@@ -357,5 +357,9 @@
   </main>
 
   <script type="module" src="./taskpane.js"></script>
+  <!-- Approval-gated lookup. Empty until a lookup returns; the container never
+       holds an answer that failed verification — see chat/lookupResultView.js.
+       Hidden entirely while TANTULAR_LOOKUP_ENABLED is false. -->
+  <div id="lookup-result-container" class="lookup-result-container" hidden></div>
 </body>
 </html>

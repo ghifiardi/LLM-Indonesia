@@ -90,8 +90,19 @@ export function fingerprint(query, host) {
   return createHash("sha256").update(`${host}\n${query}`).digest("hex");
 }
 
+// The document the user approved this lookup FOR. The approval says "send this
+// query about this document"; if the document changes before execute, the
+// answer would be verified against text the user never saw when approving, and
+// the protected strings would come from a different source. Hashed rather than
+// stored: the token lives in memory and must not hold document content.
+export function documentHash(document) {
+  const text = String(document || "");
+  if (!text.trim()) return "";
+  return createHash("sha256").update(text).digest("hex");
+}
+
 // Prepare: validate, and mint a token bound to this exact query and host.
-export function prepareLookup({ query, host, env = process.env,
+export function prepareLookup({ query, host, document, env = process.env,
                                 now = () => Date.now(),
                                 ttlMs = 120_000 }) {
   if (!lookupEnabled(env)) {
@@ -113,12 +124,21 @@ export function prepareLookup({ query, host, env = process.env,
     return { ok: false, reason: "no_adapter",
              message: `Host ${host} belum punya adapter pencarian.` };
   }
+  // No document means nothing to verify the answer against, so the answer
+  // could only ever be refused. Failing here costs the user one dialog; the
+  // alternative is sending a query out and refusing the result afterwards.
+  const docHash = documentHash(document);
+  if (!docHash) {
+    return { ok: false, reason: "no_document",
+             message: "Tidak ada dokumen untuk memeriksa jawaban; permintaan dibatalkan." };
+  }
   return {
     ok: true,
     token: randomUUID(),
     query: text,
     host: String(host).trim().toLowerCase(),
     fingerprint: fingerprint(text, host),
+    documentHash: docHash,
     expiresAt: now() + ttlMs,
     // What the pane must show the user, verbatim, before Setujui.
     disclosure: {
@@ -130,7 +150,7 @@ export function prepareLookup({ query, host, env = process.env,
 }
 
 // Execute: only for a token we issued, unexpired, and only with the SAME bytes.
-export function authorizeExecution({ pending, token, query, host,
+export function authorizeExecution({ pending, token, query, host, document,
                                      now = () => Date.now() }) {
   const entry = pending.get(token);
   if (!entry) {
@@ -147,6 +167,14 @@ export function authorizeExecution({ pending, token, query, host,
     pending.delete(token);
     return { ok: false, reason: "mismatch",
              message: "Query berubah setelah disetujui; permintaan dibatalkan." };
+  }
+  if (documentHash(document) !== entry.documentHash) {
+    // Approval was for a specific document. A different one here means the
+    // user approved a question about text that is no longer what we would
+    // verify against.
+    pending.delete(token);
+    return { ok: false, reason: "document_changed",
+             message: "Dokumen berubah setelah disetujui; permintaan dibatalkan." };
   }
   pending.delete(token);            // single use
   return { ok: true, entry };

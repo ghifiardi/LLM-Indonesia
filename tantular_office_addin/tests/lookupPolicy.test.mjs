@@ -28,6 +28,9 @@ test("with the flag off, prepare refuses — there is nothing to approve", () =>
   assert.equal(out.token, undefined, "a token must not exist when disabled");
 });
 
+// The approval binds query AND document. Every prepare below needs one.
+const DOC = "Vendor utama PT Sinar Mas. Pagu Rp 1.750.000.000.";
+
 test("hosts are matched exactly, so lookalikes are refused", () => {
   assert.equal(hostAllowed("id.wikipedia.org"), true);
   for (const bad of ["evil.com", "id.wikipedia.org.attacker.com",
@@ -52,12 +55,16 @@ test("execution requires a token that prepare actually issued", () => {
 test("THE CORE GUARANTEE: the sent query must be byte-identical to the approved one", () => {
   const pending = new Map();
   const prepared = prepareLookup({ query: "UU Cipta Kerja",
-                                   host: "id.wikipedia.org", env: ON });
+                                   host: "id.wikipedia.org", env: ON, document: DOC });
+  // Without this, a prepare that REFUSED would leave no fingerprint and the
+  // mismatch below would fire for the wrong reason — the test would pass while
+  // checking nothing. It did exactly that when the document became required.
+  assert.equal(prepared.ok, true, "prepare must succeed for this test to mean anything");
   pending.set(prepared.token, prepared);
   // A single extra word — as a model or a bug might add — invalidates it.
   const tampered = authorizeExecution({
     pending, token: prepared.token, host: "id.wikipedia.org",
-    query: "UU Cipta Kerja PT Sinar Mas"
+    query: "UU Cipta Kerja PT Sinar Mas", document: DOC
   });
   assert.equal(tampered.ok, false);
   assert.equal(tampered.reason, "mismatch",
@@ -66,9 +73,11 @@ test("THE CORE GUARANTEE: the sent query must be byte-identical to the approved 
 
 test("a token is single use", () => {
   const pending = new Map();
-  const p = prepareLookup({ query: "inflasi 2026", host: "id.wikipedia.org", env: ON });
+  const p = prepareLookup({ query: "inflasi 2026", host: "id.wikipedia.org", env: ON,
+                            document: DOC });
   pending.set(p.token, p);
-  const args = { pending, token: p.token, query: "inflasi 2026", host: "id.wikipedia.org" };
+  const args = { pending, token: p.token, query: "inflasi 2026",
+                 host: "id.wikipedia.org", document: DOC };
   assert.equal(authorizeExecution({ ...args }).ok, true);
   assert.equal(authorizeExecution({ ...args }).ok, false, "replay must fail");
 });
@@ -76,10 +85,11 @@ test("a token is single use", () => {
 test("an expired approval cannot be executed", () => {
   const pending = new Map();
   const p = prepareLookup({ query: "x", host: "id.wikipedia.org", env: ON,
-                            now: () => 0, ttlMs: 1000 });
+                            now: () => 0, ttlMs: 1000, document: DOC });
   pending.set(p.token, p);
   const out = authorizeExecution({ pending, token: p.token, query: "x",
-                                   host: "id.wikipedia.org", now: () => 5000 });
+                                   host: "id.wikipedia.org", document: DOC,
+                                   now: () => 5000 });
   assert.equal(out.reason, "expired");
 });
 
