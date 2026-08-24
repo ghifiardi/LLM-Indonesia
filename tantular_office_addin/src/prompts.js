@@ -108,7 +108,20 @@ export function normalizeHostName(hostName) {
 // So never trust one source. Fall back to Office.context.host, then to the
 // host-specific globals Office.js injects (PowerPoint/Word/Excel namespaces),
 // then to the requirement sets. Any one of them identifying the host is enough.
+//
+// Checked first: manifest.xml gives each Host its own SourceLocation
+// (?host=Word / ?host=Excel / ?host=PowerPoint baked in at build time), so
+// this is the loader itself saying which host opened the pane — true even on
+// a host old enough to leave info.host, Office.context.host, diagnostics.host,
+// and every requirement set empty, and true for an unsaved document with no
+// file extension to fall back to. Absent only in the local browser-preview
+// path, which never reaches Office.onReady and so never calls this at all.
 export function detectHost(readyInfo, globals = globalThis) {
+  const fromQuery = normalizeHostName(
+    new URLSearchParams(globals?.location?.search || "").get("host")
+  );
+  if (fromQuery !== "Office") return fromQuery;
+
   const fromReady = normalizeHostName(readyInfo?.host);
   if (fromReady !== "Office") return fromReady;
 

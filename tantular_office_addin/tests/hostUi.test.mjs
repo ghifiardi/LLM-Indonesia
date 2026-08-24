@@ -36,6 +36,24 @@ test("detectHost: uses info.host when Office populates it", () => {
   assert.equal(detectHost({ host: "Word" }, {}), "Word");
 });
 
+// manifest.xml loads this page with ?host=<Name> baked into each Host's own
+// SourceLocation. This must win over every other signal, because it is the
+// only one guaranteed correct even when the host populates NOTHING (no
+// info.host, no Office.context.host, no diagnostics.host, no requirement
+// sets) and the document is unsaved (no extension to fall back to) — the
+// combination that still left the pane degrading to "Office" after every
+// other fallback was added.
+test("detectHost: the manifest's ?host= query param wins over everything, including a blank host", () => {
+  const globals = { location: { search: "?host=PowerPoint" } };
+  assert.equal(detectHost({}, globals), "PowerPoint");
+  assert.equal(detectHost({ host: "Word" }, globals), "PowerPoint");
+});
+
+test("detectHost: missing ?host= falls through to the other signals unaffected", () => {
+  const globals = { location: { search: "" }, Office: { context: { host: "Excel" } } };
+  assert.equal(detectHost({}, globals), "Excel");
+});
+
 test("detectHost: falls back to Office.context.host when info.host is empty", () => {
   // Observed on Mac hosts: onReady fires with no host field.
   const globals = { Office: { context: { host: "PowerPoint" } } };

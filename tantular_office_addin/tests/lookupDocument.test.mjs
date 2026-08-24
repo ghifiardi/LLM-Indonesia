@@ -26,16 +26,38 @@ function mockExcel({ values, address = "Sheet1!A1:B2" }) {
     sync: async () => {} }) };
 }
 
-function mockPowerPoint(slides, { supported = true } = {}) {
-  globalThis.PowerPoint = { run: async (fn) => fn({
-    presentation: supported ? { getSelectedSlides: () => ({
-      items: slides.map((lines) => ({
-        load() {},
-        shapes: { items: lines.map((t) => ({ textFrame: { textRange: { text: t } } })),
-                  load() {} }
-      })),
-      load() {} }) } : {},
-    sync: async () => {} }) };
+function mockPowerPoint(slides, { supported = true, requireLoad = false } = {}) {
+  globalThis.PowerPoint = { run: async (fn) => {
+    const pending = new Set();
+    const loaded = new Set();
+    const ranges = slides.map((lines) => lines.map((text) => {
+      const range = {
+        load(prop) {
+          if (prop === "text") pending.add(range);
+        },
+        get text() {
+          if (requireLoad && !loaded.has(range)) {
+            throw new Error("PropertyNotLoaded: text");
+          }
+          return text;
+        }
+      };
+      return range;
+    }));
+    return fn({
+      presentation: supported ? { getSelectedSlides: () => ({
+        items: ranges.map((slideRanges) => ({
+          load() {},
+          shapes: { items: slideRanges.map((textRange) => ({ textFrame: { textRange } })),
+                    load() {} }
+        })),
+        load() {} }) } : {},
+      sync: async () => {
+        for (const range of pending) loaded.add(range);
+        pending.clear();
+      }
+    });
+  } };
 }
 
 test.afterEach(clearHosts);
@@ -78,6 +100,16 @@ test("PowerPoint: the selected slides' text is read", async () => {
   assert.equal(out.ok, true);
   assert.ok(out.text.includes("PT Sinar Mas"));
   assert.ok(out.text.includes("Slide 2"));
+});
+
+test("PowerPoint: text is loaded and synced before it is read", async () => {
+  // This matches the Office proxy contract more closely than an eager property
+  // mock. The old reader failed here with PropertyNotLoaded even while its
+  // hand-written happy-path mock passed.
+  mockPowerPoint([["Vendor PT Sinar Mas"]], { requireLoad: true });
+  const out = await readLookupDocument("PowerPoint");
+  assert.equal(out.ok, true);
+  assert.ok(out.text.includes("PT Sinar Mas"));
 });
 
 test("PowerPoint: no selection is refused", async () => {

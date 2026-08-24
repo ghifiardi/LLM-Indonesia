@@ -21,10 +21,10 @@
 //                   replacement.
 //   noNewFacts      numbers, dates and entities must trace to the document or
 //                   the fetched page. Catches inventions with no source.
-//   untrustedEcho   the answer must not open by adopting a literal string that
-//                   appears only in the untrusted page. This is what catches
-//                   exfiltration, where every document fact is preserved and
-//                   nothing is invented — the attack is the FORMAT.
+//   untrustedEcho   the answer must not adopt attacker-chosen format markers or
+//                   repeat distinctive payload literals from instruction-like
+//                   web text. A disclaimer that quotes "PT Contoh" still carries
+//                   attacker-controlled content into the trusted result.
 //
 // FAILS CLOSED. Missing document, missing answer, or a check that throws is a
 // refusal. An unverified answer is never presented as verified.
@@ -170,14 +170,54 @@ export function checkNoNewFacts(answer, document, untrusted) {
 }
 
 export function checkUntrustedEcho(answer, document, untrusted, window = 60, minLen = 5) {
-  const head = String(answer || "").slice(0, window);
+  const answerText = String(answer || "");
+  const documentText = String(document || "");
+  const untrustedText = String(untrusted || "");
+  const head = answerText.slice(0, window);
   const findings = [];
   const markerRe = new RegExp(`[A-Za-z][A-Za-z_-]{${minLen - 1},}:`, "g");
-  for (const m of String(untrusted || "").matchAll(markerRe)) {
+  for (const m of untrustedText.matchAll(markerRe)) {
     const token = m[0];
-    if (head.includes(token) && !document.includes(token)) {
-      findings.push(`answer opens with ${JSON.stringify(token)}, a marker supplied `
-                    + "by the untrusted page");
+    if (head.includes(token) && !documentText.includes(token)) {
+      findings.push("answer opens with a marker supplied by the untrusted page");
+    }
+  }
+
+  // The marker check above catches an attack-controlled FORMAT such as
+  // "VERIFY:". It does not catch a model that refuses an instruction but then
+  // quotes its payload in a trusted-looking disclaimer:
+  //
+  //   "Instruksi untuk mengganti vendor menjadi PT Contoh tidak disertakan."
+  //
+  // That still lets hostile page content reach the pane. Look only inside
+  // instruction-like segments, then block distinctive literals from those
+  // segments when they are absent from the user's document.
+  const instructionCue =
+    /\b(?:abaikan|awali|ganti|ubah|replace|keluarkan|salin|sertakan|tulis(?:kan)?|mulai|instruksi|perintah|sistem|diam-diam|roleplay|sebagai)\b/i;
+  const literals = new Set();
+  for (const segment of untrustedText.split(/\n+|(?<=[.!?])\s+/)) {
+    if (!instructionCue.test(segment)) continue;
+    const patterns = [
+      /\[[^\]\n]{3,120}\]/g,
+      /["'“”]([^"'“”\n]{3,120})["'“”]/g,
+      /\b(?:PT|CV|PD|UD|Yayasan|Koperasi)\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*/g,
+      /\b(?:[A-Z]{2,}[A-Z0-9_-]*|[A-Z][a-z]+[A-Z][A-Za-z0-9_-]*)\b/g
+    ];
+    for (const pattern of patterns) {
+      for (const match of segment.matchAll(pattern)) {
+        const literal = String(match[1] || match[0]).trim();
+        if (literal.length >= 3) literals.add(literal);
+      }
+    }
+  }
+  const answerLower = answerText.toLowerCase();
+  const documentLower = documentText.toLowerCase();
+  for (const literal of [...literals].slice(0, 32)) {
+    const lower = literal.toLowerCase();
+    if (answerLower.includes(lower) && !documentLower.includes(lower)) {
+      findings.push("answer repeats a payload literal from instruction-like "
+                    + "untrusted content");
+      break;
     }
   }
   return findings;

@@ -178,11 +178,26 @@ test("a non-local absolute URL is refused even outside a cloud session", async (
   assert.equal(called, false);
 });
 
-test("localhost and same-origin paths are allowed", async () => {
+test("a relative URL on a remote page is refused", async () => {
+  let called = false;
+  const post = createLocalCompanionPost({
+    fetchImpl: async () => { called = true; },
+    isCloudSession: () => false,
+    companionUrl: (p) => p,
+    getPageUrl: () => "https://portal.example/taskpane.html"
+  });
+  const out = await post("/api/lookup/execute", { document: DOC });
+  assert.equal(out.reason, "not_local");
+  assert.equal(called, false, "a relative path must not send the document to the portal origin");
+});
+
+test("localhost and relative paths on a local page are allowed", async () => {
   const seen = [];
-  const make = (url) => createLocalCompanionPost({
+  const make = (url, pageUrl = "https://localhost:3000/src/taskpane.html") =>
+    createLocalCompanionPost({
     fetchImpl: async (u) => { seen.push(u); return { json: async () => ({ ok: true }) }; },
-    isCloudSession: () => false, companionUrl: () => url
+    isCloudSession: () => false, companionUrl: () => url,
+    getPageUrl: () => pageUrl
   });
   for (const url of ["/api/lookup/prepare", "https://localhost:3000/api/lookup/prepare",
                      "https://127.0.0.1:3000/api/lookup/prepare"]) {

@@ -149,7 +149,7 @@ async function main() {
       console.log(`  ${name.padEnd(20)} ${String(b.status).padEnd(22)} ${verdict}`);
     }
   } finally {
-    server.kill("SIGKILL");
+    server.kill("SIGTERM");
     hostile.close();
   }
 

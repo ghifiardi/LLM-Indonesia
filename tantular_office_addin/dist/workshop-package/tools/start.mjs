@@ -20,6 +20,7 @@ import https from "node:https";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { refreshSideload } from "./refresh-sideload.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const stamp = () => new Date().toTimeString().slice(0, 8);
@@ -101,6 +102,12 @@ function alive(url) {
 }
 
 async function launch() {
+  // Every `npm start` run — even when the companion process itself was
+  // already alive and left running — re-stamps the sideloaded taskpane URL
+  // with a fresh query param, so Office cannot serve this session's pane
+  // from whatever it cached last session. See tools/refresh-sideload.mjs.
+  refreshSideload((line) => log("sideload", line));
+
   const port = process.env.PORT || 3000;
   if (await alive(`https://localhost:${port}/manifest.xml`)) {
     log("companion", `sudah berjalan di port ${port} — dibiarkan apa adanya.`);

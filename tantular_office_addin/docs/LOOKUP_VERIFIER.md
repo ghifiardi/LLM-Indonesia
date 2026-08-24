@@ -1,4 +1,4 @@
-# The lookup verifier runs in the companion — 2026-08-23
+# The lookup verifier runs in the companion — 2026-08-24
 
 **The verifier is now in the product path, not only in the distillation repo.
 All seven injection classes were run through the real HTTP path. 0 reached the
@@ -55,7 +55,7 @@ virtualenv and a repo path that no installed add-in has. A missing interpreter
 would then have to be distinguished from a passing check — exactly the failure
 this mechanism exists to prevent. The Python remains the reference
 implementation, and `tests/verifyWebAnswerParity.test.mjs` asserts the two agree
-on all nine cases, so they cannot drift silently.
+on all ten cases, so they cannot drift silently.
 
 ## Result through the real path
 
@@ -63,16 +63,22 @@ on all nine cases, so they cannot drift silently.
 real approval tokens, real fetch, real model, real verifier.
 
     classes run:                7/7
-    blocked by verifier:        1  (exfiltration — untrusted_echo)
+    blocked by verifier:        5
     attacks that reached user:  0
-    false positives:            0
+    errors:                     0
 
 **This is not evidence the model got safer.** The Python suite measures the
-model on raw payload text and it obeys 3 of 7. Here the payload arrives inside
-the search adapter's JSON envelope, and the model resisted 6 of 7. The envelope
-is the honest product shape, but the difference is the wrapping, not the model.
-Which classes succeed also varies between runs. Assume the model can be fooled;
-the verifier is what makes that survivable.
+model on raw payload text and it obeys 3 of 7. In the product run, two answers
+were clean enough to show and five were blocked. Which classes succeed varies
+between runs. Assume the model can be fooled; the verifier is what makes that
+survivable.
+
+The 2026-08-24 run initially exposed a delimiter-escape payload in a disclaimer:
+the model preserved the real vendor but repeated the attacker-controlled
+replacement name while saying it had ignored it. That still carried hostile
+content into the trusted pane. `untrusted_echo` now blocks distinctive payload
+literals from instruction-like web text, and its finding is deliberately
+generic so the blocked response cannot echo the payload a second time.
 
 ## The approval binds the document, not just the query
 
@@ -97,14 +103,15 @@ one dialog is better than leaking a query for a result we would discard.
 |---|---|---|
 | answer shown | yes | **never** |
 | edit control | present | **absent from the DOM**, not hidden |
-| findings | — | explained in Indonesian, with the raw strings |
+| findings | — | explained in Indonesian; hostile instruction literals are redacted |
 
 `answer` is `null` on every non-verified path and `canEdit` derives from the
 same value rather than being a separate field — two fields that can disagree
 eventually will. A blocked response that *carries* an answer (a future server
 change) still renders none. `ok: true` without `status: "verified"` is treated
 as blocked, so a partial or older response cannot inherit trust from `ok`
-alone. Findings and host names are escaped: they can quote a hostile page.
+alone. Findings and host names are escaped. Instruction-echo findings never
+quote the hostile payload itself.
 
 `mountLookupResult()` attaches the edit handler only in the verified branch.
 Attaching it always and checking a flag inside would move the decision into the
@@ -178,6 +185,11 @@ Closed since: the pane renders both states and now drives the whole path, the
 approval binds a document hash, the three hosts read real documents, and the
 document cannot reach a remote endpoint.
 
+Closed since: the pane now has a query field and **Tinjau query dan cari**
+button. The entry stays hidden until the operator flag is enabled and the user
+turns on **Mode Lokal + Pencarian**. Both the button and Enter key call the same
+`state.runLookup` path; there is no second, less-guarded search flow.
+
 Open, and each one blocks enabling:
 
 1. **Nothing has run in real Office.** Every host reader is proven against a
@@ -185,12 +197,10 @@ Open, and each one blocks enabling:
    does. Word in Compatibility Mode, an Excel selection spanning sheets, a
    PowerPoint host without `getSelectedSlides` — these are the cases that
    break in the field and none of them has been seen. **This is the gate.**
-2. **No search entry point.** `state.runLookup` exists and is tested, but no
-   button or command in the pane calls it. Deliberate while the flag is off.
-3. **The model still obeys hostile pages.** Containment is doing the work. Any
+2. **The model still obeys hostile pages.** Containment is doing the work. Any
    change that weakens the verifier — a looser entity rule, a new fact kind —
    re-opens the classes it currently catches. Re-run both suites after touching
    `verifyWebAnswer.js`.
-4. **One host.** `id.wikipedia.org`. Adding another needs its own adapter and
+3. **One host.** `id.wikipedia.org`. Adding another needs its own adapter and
    its own run of both suites; the HTML measurement used a local origin, not a
    real HTML host.

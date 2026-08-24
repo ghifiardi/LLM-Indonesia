@@ -35,7 +35,7 @@
             <Description resid="GetStarted.Description" />
             <LearnMoreUrl resid="GetStarted.LearnMoreUrl" />
           </GetStarted>
-          <FunctionFile resid="Taskpane.Url" />
+          <FunctionFile resid="Taskpane.Url.Word" />
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
             <OfficeTab id="TabHome">
               <Group id="Tantular.Word.Group">
@@ -58,7 +58,7 @@
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
-                    <SourceLocation resid="Taskpane.Url" />
+                    <SourceLocation resid="Taskpane.Url.Word" />
                   </Action>
                 </Control>
               </Group>
@@ -73,7 +73,7 @@
             <Description resid="GetStarted.Description" />
             <LearnMoreUrl resid="GetStarted.LearnMoreUrl" />
           </GetStarted>
-          <FunctionFile resid="Taskpane.Url" />
+          <FunctionFile resid="Taskpane.Url.Excel" />
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
             <OfficeTab id="TabHome">
               <Group id="Tantular.Excel.Group">
@@ -96,7 +96,7 @@
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
-                    <SourceLocation resid="Taskpane.Url" />
+                    <SourceLocation resid="Taskpane.Url.Excel" />
                   </Action>
                 </Control>
               </Group>
@@ -111,7 +111,7 @@
             <Description resid="GetStarted.Description" />
             <LearnMoreUrl resid="GetStarted.LearnMoreUrl" />
           </GetStarted>
-          <FunctionFile resid="Taskpane.Url" />
+          <FunctionFile resid="Taskpane.Url.PowerPoint" />
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
             <OfficeTab id="TabHome">
               <Group id="Tantular.PowerPoint.Group">
@@ -134,7 +134,7 @@
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
-                    <SourceLocation resid="Taskpane.Url" />
+                    <SourceLocation resid="Taskpane.Url.PowerPoint" />
                   </Action>
                 </Control>
               </Group>
@@ -150,7 +150,13 @@
         <bt:Image id="Icon.80" DefaultValue="https://localhost:3000/assets/icon-80.png" />
       </bt:Images>
       <bt:Urls>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/src/taskpane.html" />
+        <!-- One URL per host, each carrying its own ?host= so the taskpane can
+             identify its host from the loader alone — no reliance on
+             info.host/diagnostics.host/requirement sets, which some Office
+             builds leave empty (see detectHost in src/prompts.js). -->
+        <bt:Url id="Taskpane.Url.Word" DefaultValue="https://localhost:3000/src/taskpane.html?host=Word" />
+        <bt:Url id="Taskpane.Url.Excel" DefaultValue="https://localhost:3000/src/taskpane.html?host=Excel" />
+        <bt:Url id="Taskpane.Url.PowerPoint" DefaultValue="https://localhost:3000/src/taskpane.html?host=PowerPoint" />
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://localhost:3000/docs/MVP_PLAN.md" />
       </bt:Urls>
       <bt:ShortStrings>

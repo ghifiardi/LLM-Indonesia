@@ -37,6 +37,62 @@ export function searchAllowed(mode) {
   return normaliseMode(mode) === MODE_LOCAL_SEARCH;
 }
 
+// Wire the deliberately small lookup entry surface without depending on a DOM
+// library. Keeping it here makes the important negative behavior testable:
+// off means hidden controls and a cleared result; one click means one run with
+// the mode and query captured before the approval flow starts.
+export function bindLookupEntry({ toggle, controls, input, button, result, run }) {
+  let mode = MODE_LOCAL;
+  let running = false;
+
+  const clearResult = () => {
+    if (!result) return;
+    result.innerHTML = "";
+    result.hidden = true;
+  };
+
+  const applyToggle = () => {
+    mode = toggle?.checked ? MODE_LOCAL_SEARCH : MODE_LOCAL;
+    if (controls) controls.hidden = mode === MODE_LOCAL;
+    if (mode === MODE_LOCAL) clearResult();
+    else input?.focus?.();
+    return mode;
+  };
+
+  const execute = async (query) => {
+    if (running) return { ok: false, reason: "busy" };
+    running = true;
+    if (toggle) toggle.disabled = true;
+    if (input) input.disabled = true;
+    if (button) button.disabled = true;
+    try {
+      return await run({ mode, query: String(query ?? "") });
+    } finally {
+      running = false;
+      if (toggle) toggle.disabled = false;
+      if (input) input.disabled = false;
+      if (button) button.disabled = false;
+    }
+  };
+
+  if (toggle) {
+    toggle.checked = false;
+    toggle.addEventListener("change", applyToggle);
+  }
+  if (controls) controls.hidden = true;
+  button?.addEventListener("click", () => execute(input?.value));
+  input?.addEventListener("keydown", (event) => {
+    if (event?.key !== "Enter") return;
+    event.preventDefault?.();
+    return execute(input.value);
+  });
+
+  return {
+    run: (query) => execute(query),
+    getMode: () => mode
+  };
+}
+
 // What the dialog must show. The user approves THIS, byte for byte, and the
 // server will refuse anything else.
 export function approvalDialogModel(disclosure) {

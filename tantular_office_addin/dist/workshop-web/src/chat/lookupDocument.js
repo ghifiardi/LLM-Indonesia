@@ -89,10 +89,29 @@ async function readPowerPoint() {
       try { slide.shapes.load("items"); } catch { /* older hosts */ }
     }
     await context.sync();
-    const texts = slides.map((slide, index) => {
-      const shapes = slide.shapes?.items || [];
-      const lines = shapes
-        .map((shape) => String(shape.textFrame?.textRange?.text ?? "").trim())
+
+    // Office proxy properties cannot be read just because their parent
+    // collection was loaded. Queue each text range explicitly, sync once, then
+    // read it. A hand-written mock that exposes `.text` eagerly hides this
+    // requirement; real Office throws PropertyNotLoaded instead.
+    const rangesBySlide = slides.map((slide) => {
+      const ranges = [];
+      for (const shape of slide.shapes?.items || []) {
+        try {
+          const range = shape.textFrame.textRange;
+          range.load("text");
+          ranges.push(range);
+        } catch {
+          // Images and other non-text shapes are expected and ignored.
+        }
+      }
+      return ranges;
+    });
+    await context.sync();
+
+    const texts = rangesBySlide.map((ranges, index) => {
+      const lines = ranges
+        .map((range) => String(range.text ?? "").trim())
         .filter(Boolean);
       return `Slide ${index + 1}\n${lines.join("\n")}`;
     });

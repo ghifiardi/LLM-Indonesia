@@ -24,7 +24,7 @@
     <Host Name="Presentation" />
   </Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://office.tantular.ai/src/taskpane.html" />
+    <SourceLocation DefaultValue="https://office.tantular.ai/src/taskpane" />
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
@@ -36,7 +36,7 @@
             <Description resid="GetStarted.Description" />
             <LearnMoreUrl resid="GetStarted.LearnMoreUrl" />
           </GetStarted>
-          <FunctionFile resid="Taskpane.Url" />
+          <FunctionFile resid="Taskpane.Url.Word" />
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
             <OfficeTab id="TabHome">
               <Group id="Tantular.Word.Group">
@@ -59,7 +59,7 @@
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
-                    <SourceLocation resid="Taskpane.Url" />
+                    <SourceLocation resid="Taskpane.Url.Word" />
                   </Action>
                 </Control>
               </Group>
@@ -74,7 +74,7 @@
             <Description resid="GetStarted.Description" />
             <LearnMoreUrl resid="GetStarted.LearnMoreUrl" />
           </GetStarted>
-          <FunctionFile resid="Taskpane.Url" />
+          <FunctionFile resid="Taskpane.Url.Excel" />
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
             <OfficeTab id="TabHome">
               <Group id="Tantular.Excel.Group">
@@ -97,7 +97,7 @@
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
-                    <SourceLocation resid="Taskpane.Url" />
+                    <SourceLocation resid="Taskpane.Url.Excel" />
                   </Action>
                 </Control>
               </Group>
@@ -112,7 +112,7 @@
             <Description resid="GetStarted.Description" />
             <LearnMoreUrl resid="GetStarted.LearnMoreUrl" />
           </GetStarted>
-          <FunctionFile resid="Taskpane.Url" />
+          <FunctionFile resid="Taskpane.Url.PowerPoint" />
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
             <OfficeTab id="TabHome">
               <Group id="Tantular.PowerPoint.Group">
@@ -135,7 +135,7 @@
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
-                    <SourceLocation resid="Taskpane.Url" />
+                    <SourceLocation resid="Taskpane.Url.PowerPoint" />
                   </Action>
                 </Control>
               </Group>
@@ -151,7 +151,13 @@
         <bt:Image id="Icon.80" DefaultValue="https://office.tantular.ai/assets/icon-80.png" />
       </bt:Images>
       <bt:Urls>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://office.tantular.ai/src/taskpane.html" />
+        <!-- One URL per host, each carrying its own ?host= so the taskpane can
+             identify its host from the loader alone — no reliance on
+             info.host/diagnostics.host/requirement sets, which some Office
+             builds leave empty (see detectHost in src/prompts.js). -->
+        <bt:Url id="Taskpane.Url.Word" DefaultValue="https://office.tantular.ai/src/taskpane?host=Word" />
+        <bt:Url id="Taskpane.Url.Excel" DefaultValue="https://office.tantular.ai/src/taskpane?host=Excel" />
+        <bt:Url id="Taskpane.Url.PowerPoint" DefaultValue="https://office.tantular.ai/src/taskpane?host=PowerPoint" />
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://office.tantular.ai/support.html" />
       </bt:Urls>
       <bt:ShortStrings>

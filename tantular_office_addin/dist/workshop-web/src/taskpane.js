@@ -11,7 +11,7 @@ import {
 } from "./tantularClient.js";
 import { isCloudSession, isPortalMode, loadMode, modeIsKnown, companionUrl } from "./companionUrl.js";
 import { createLookupController, createLocalCompanionPost } from "./chat/lookupController.js";
-import { MODE_LOCAL, MODE_LOCAL_SEARCH } from "./chat/lookupUi.js";
+import { bindLookupEntry } from "./chat/lookupUi.js";
 import {
   getSelectionContext,
   getSelectedSlideTextContext,
@@ -89,6 +89,9 @@ const els = {
   modeSelect: document.querySelector("#mode-select"),
   lookupModeRow: document.querySelector("#lookup-mode-row"),
   lookupModeToggle: document.querySelector("#lookup-mode-toggle"),
+  lookupSearchControls: document.querySelector("#lookup-search-controls"),
+  lookupQuery: document.querySelector("#lookup-query"),
+  lookupRun: document.querySelector("#lookup-run"),
   lookupResult: document.querySelector("#lookup-result-container"),
   modeHint: document.querySelector("#mode-hint"),
   modeConfirm: document.querySelector("#mode-confirm"),
@@ -411,8 +414,6 @@ function hideModeConfirm() {
 // the feature enabled. An always-refusing control teaches users to ignore
 // refusals.
 
-let lookupMode = MODE_LOCAL;
-
 function setUpLookup() {
   if (!els.lookupModeToggle || !els.lookupModeRow) return;
 
@@ -426,20 +427,18 @@ function setUpLookup() {
     onEdit: (answer) => { insertResultText(state.host, answer).catch(() => {}); }
   });
 
-  els.lookupModeToggle.checked = false;
-  els.lookupModeToggle.addEventListener("change", () => {
-    lookupMode = els.lookupModeToggle.checked ? MODE_LOCAL_SEARCH : MODE_LOCAL;
-    // Turning it off clears any result on screen: a verified answer from a
-    // previous search must not sit there looking current in Mode Lokal.
-    if (lookupMode === MODE_LOCAL && els.lookupResult) {
-      els.lookupResult.innerHTML = "";
-      els.lookupResult.hidden = true;
-    }
+  const entry = bindLookupEntry({
+    toggle: els.lookupModeToggle,
+    controls: els.lookupSearchControls,
+    input: els.lookupQuery,
+    button: els.lookupRun,
+    result: els.lookupResult,
+    run: runLookup
   });
 
-  // Expose the runner for the search entry point; nothing calls it until the
-  // user turns the mode on and types a query.
-  state.runLookup = (query) => runLookup({ mode: lookupMode, query });
+  // The visible button and Enter key use this same runner; exposing it also
+  // keeps the path available to future commands without creating a second flow.
+  state.runLookup = entry.run;
 
   // Ask the companion whether the feature exists at all. A cloud session has no
   // local companion, so the toggle stays hidden there too.

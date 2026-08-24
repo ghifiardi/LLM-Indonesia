@@ -119,7 +119,14 @@ export const HOST = "id.wikipedia.org";
 // only, and the whole promise printed in the pane is that it stays on this
 // machine. So this refuses outright in a cloud session rather than quietly
 // posting the document to a remote endpoint.
-export function createLocalCompanionPost({ fetchImpl, isCloudSession, companionUrl }) {
+export function createLocalCompanionPost({
+  fetchImpl,
+  isCloudSession,
+  companionUrl,
+  // Injected in tests. In a browser this is the page that a relative companion
+  // URL would actually resolve against.
+  getPageUrl = () => globalThis.location?.href || "https://localhost/"
+}) {
   return async function postLocal(path, body) {
     if (isCloudSession()) {
       return { ok: false, reason: "cloud_session",
@@ -127,15 +134,22 @@ export function createLocalCompanionPost({ fetchImpl, isCloudSession, companionU
                         + "dokumen tidak dikirim ke server." };
     }
     const url = companionUrl(path);
-    // A resolved absolute URL must still point at this machine. Belt and
-    // braces: the cloud check above is about the user's mode, this is about
-    // where the bytes actually go.
-    if (/^https?:\/\//i.test(url)) {
-      const { hostname } = new URL(url);
-      if (!["localhost", "127.0.0.1", "::1"].includes(hostname.toLowerCase())) {
-        return { ok: false, reason: "not_local",
-                 message: "Companion bukan lokal; permintaan dibatalkan." };
-      }
+    // Resolve relative paths too. `/api/...` is local on the localhost dev
+    // server, but it is a REMOTE same-origin request when the identical pane is
+    // opened on the hosted portal. Checking only already-absolute URLs would
+    // silently let the document follow that relative path off the machine.
+    let resolved;
+    try {
+      resolved = new URL(url, getPageUrl());
+    } catch {
+      return { ok: false, reason: "not_local",
+               message: "Alamat Companion tidak valid; permintaan dibatalkan." };
+    }
+    const hostname = resolved.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (!["localhost", "127.0.0.1", "::1"].includes(hostname)
+        || !["http:", "https:"].includes(resolved.protocol)) {
+      return { ok: false, reason: "not_local",
+               message: "Companion bukan lokal; permintaan dibatalkan." };
     }
     try {
       const response = await fetchImpl(url, {

@@ -1,8 +1,8 @@
 {
-  "buildId": "2026-08-23.5fbd6ac",
-  "sourceSha": "5fbd6ac5eaf76724234eca9c89132b684ff5436d",
-  "sourceDirty": false,
-  "builtAt": "2026-08-23T16:29:08.043Z",
+  "buildId": "2026-08-24.5b56073+dirty",
+  "sourceSha": "5b56073804b1d38d298c2fd86e88fede22778c81",
+  "sourceDirty": true,
+  "builtAt": "2026-08-24T10:16:47.322Z",
   "packageFormat": 1,
   "baseUrl": "https://office.tantular.ai"
 }

@@ -92,6 +92,19 @@
             Dokumen tetap di komputer ini. Hanya query yang Anda setujui yang
             dikirim keluar, dan jawaban diperiksa terhadap dokumen Anda.
           </p>
+          <div id="lookup-search-controls" class="lookup-search-controls" hidden>
+            <label for="lookup-query">
+              Query pencarian
+              <input id="lookup-query" type="search" autocomplete="off"
+                     placeholder="Contoh: perkembangan inflasi Indonesia 2026" />
+            </label>
+            <button id="lookup-run" class="secondary full-width-button" type="button">
+              Tinjau query dan cari
+            </button>
+          </div>
+          <!-- Empty until a lookup returns. A blocked response never carries an
+               answer or edit control; see chat/lookupResultView.js. -->
+          <div id="lookup-result-container" class="lookup-result-container" hidden></div>
         </div>
         <div id="mode-confirm" class="mode-confirm hidden">
           <p id="mode-confirm-text" class="hint model-warning"></p>
@@ -371,9 +384,5 @@
   </main>
 
   <script type="module" src="./taskpane.js"></script>
-  <!-- Approval-gated lookup. Empty until a lookup returns; the container never
-       holds an answer that failed verification — see chat/lookupResultView.js.
-       Hidden entirely while TANTULAR_LOOKUP_ENABLED is false. -->
-  <div id="lookup-result-container" class="lookup-result-container" hidden></div>
 </body>
 </html>

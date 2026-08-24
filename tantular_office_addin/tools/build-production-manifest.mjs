@@ -15,7 +15,14 @@ let xml = fs.readFileSync(path.join(root, "manifest.xml"), "utf8");
 xml = xml
   .replace("<Version>0.9.0.0</Version>", "<Version>1.0.0.0</Version>")
   .replaceAll("https://localhost:3000/assets/", `${baseUrl}/assets/`)
-  .replaceAll("https://localhost:3000/src/taskpane.html", `${baseUrl}/src/taskpane.html`)
+  // Extensionless, not /src/taskpane.html: the production host serves this
+  // behind Vercel's cleanUrls, which 308-redirects .html to the bare path.
+  // The dev server has no such rewrite, so localhost keeps the .html form —
+  // only the production target skips the hop, since Office's own task pane
+  // webview loading a URL it then gets redirected away from (now carrying a
+  // manifest-injected ?host= query string) is exactly the kind of thing an
+  // older/limited host WebView is free to choke on.
+  .replaceAll("https://localhost:3000/src/taskpane.html", `${baseUrl}/src/taskpane`)
   .replace('https://localhost:3000/README.md', `${baseUrl}/support.html`)
   .replace('https://localhost:3000/docs/MVP_PLAN.md', `${baseUrl}/support.html`)
   .replace(

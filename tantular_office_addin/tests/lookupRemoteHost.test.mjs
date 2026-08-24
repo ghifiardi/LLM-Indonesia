@@ -67,7 +67,7 @@ test("a real Wikipedia lookup produces a verified or blocked verdict, never raw 
            TANTULAR_LOOKUP_HOSTS: "id.wikipedia.org" },
     stdio: ["ignore", "ignore", "ignore"]
   });
-  t.after(() => server.kill("SIGKILL"));
+  t.after(() => server.kill("SIGTERM"));
   for (let i = 0; i < 60; i++) {
     if (server.exitCode !== null) throw new Error(`companion exited (${server.exitCode})`);
     try { await post(port, "/api/lookup/prepare", {}); break; }

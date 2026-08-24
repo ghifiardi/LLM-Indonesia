@@ -56,6 +56,43 @@ function appendLookupAudit(record) {
 }
 const root = path.resolve(__dirname, "..");
 const port = Number(process.env.PORT || 3000);
+
+// Office's task pane WebView (WKWebView on Mac, confirmed on this project's
+// own test hosts) has been observed serving a stale ES module graph across
+// app relaunches even though every response here already sends
+// Cache-Control: no-store — the only reliable workaround found was the
+// user manually picking "Clear Web Cache" from the pane's right-click menu
+// and reloading, every single time. That is not a workshop-safe fix.
+//
+// So force it at the URL level instead of the header level: every relative
+// import specifier in every .js/.html response gets a ?v=<boot token>
+// appended, unique per server run. A cache keyed by URL cannot return stale
+// content for a URL it has never seen — the whole module graph becomes
+// unreachable from cache the instant the dev server restarts, no manual step
+// required. Within one server run the token is stable, so normal caching
+// still applies and nothing is fetched twice for no reason.
+const CACHE_BUST = String(Date.now());
+
+function withCacheBust(specifier) {
+  if (!specifier.startsWith(".")) return specifier; // leave bare/absolute URLs (e.g. office.js CDN) alone
+  const sep = specifier.includes("?") ? "&" : "?";
+  return `${specifier}${sep}v=${CACHE_BUST}`;
+}
+
+function bustModuleCache(text, ext) {
+  if (ext === ".js" || ext === ".mjs") {
+    return text
+      .replace(/(from\s+["'])(\.[^"']+\.m?js)(["'])/g, (m, pre, spec, post) => `${pre}${withCacheBust(spec)}${post}`)
+      .replace(/(import\(\s*["'])(\.[^"']+\.m?js)(["']\s*\))/g, (m, pre, spec, post) => `${pre}${withCacheBust(spec)}${post}`);
+  }
+  if (ext === ".html") {
+    return text.replace(
+      /(<script\s+type="module"\s+src=")([^"]+)(")/g,
+      (m, pre, src, post) => `${pre}${withCacheBust(src)}${post}`
+    );
+  }
+  return text;
+}
 const allowedOrigins = new Set([
   "https://localhost:3000",
   "https://127.0.0.1:3000",
@@ -270,7 +307,10 @@ function handler(req, res) {
         // the pane cannot tell a corrupted answer from a good one.
         const composed = await answerWithLookup({
           document: String(body?.document || ""),
-          question: String(body?.question || ""),
+          // Use the token-bound query, not a separate caller-supplied question.
+          // This is the exact text the user reviewed and the companion
+          // authorized before it left the machine.
+          question: authorized.entry.query,
           untrusted: wrapUntrusted(authorized.entry.host, text.slice(0, 20_000)),
           complete: (prompt) => completeLocally(prompt)
         });
@@ -347,13 +387,17 @@ function handler(req, res) {
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
       return;
     }
-    const type = mime.get(path.extname(filePath).toLowerCase()) || "application/octet-stream";
+    const ext = path.extname(filePath).toLowerCase();
+    const type = mime.get(ext) || "application/octet-stream";
+    const body = ext === ".js" || ext === ".mjs" || ext === ".html"
+      ? Buffer.from(bustModuleCache(data.toString("utf8"), ext), "utf8")
+      : data;
     res.writeHead(200, {
       "Content-Type": type,
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*"
     });
-    res.end(data);
+    res.end(body);
   });
 }
 

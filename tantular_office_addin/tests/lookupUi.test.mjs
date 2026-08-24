@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   MODE_LOCAL, MODE_LOCAL_SEARCH, normaliseMode, bannerFor, searchAllowed,
-  approvalDialogModel, createApprovalFlow
+  approvalDialogModel, createApprovalFlow, bindLookupEntry
 } from "../src/chat/lookupUi.js";
 
 function harness({ confirmAnswer = true, prepared = null } = {}) {
@@ -114,4 +114,84 @@ test("an empty disclosure is refused rather than shown as a blank dialog", async
   assert.equal(out.reason, "nothing_to_show");
   assert.equal(calls.execute.length, 0);
   assert.equal(approvalDialogModel({ host: "", query: "" }).valid, false);
+});
+
+function fakeElement(initial = {}) {
+  const handlers = {};
+  return {
+    hidden: false, checked: false, disabled: false, value: "", innerHTML: "",
+    focused: false,
+    ...initial,
+    addEventListener(type, fn) { handlers[type] = fn; },
+    fire(type, event = {}) { return handlers[type]?.(event); },
+    focus() { this.focused = true; }
+  };
+}
+
+test("the visible lookup entry is off and hidden until the toggle is enabled", async () => {
+  const toggle = fakeElement();
+  const controls = fakeElement();
+  const input = fakeElement({ value: "Candi Borobudur" });
+  const button = fakeElement();
+  const result = fakeElement({ hidden: false, innerHTML: "jawaban lama" });
+  const calls = [];
+  bindLookupEntry({
+    toggle, controls, input, button, result,
+    run: async (args) => { calls.push(args); return { ok: true }; }
+  });
+
+  assert.equal(toggle.checked, false);
+  assert.equal(controls.hidden, true);
+
+  toggle.checked = true;
+  await toggle.fire("change");
+  assert.equal(controls.hidden, false);
+  assert.equal(input.focused, true);
+
+  await button.fire("click");
+  assert.deepEqual(calls, [{ mode: MODE_LOCAL_SEARCH, query: "Candi Borobudur" }]);
+  assert.equal(toggle.disabled, false);
+  assert.equal(input.disabled, false);
+  assert.equal(button.disabled, false);
+});
+
+test("turning lookup off hides the entry and clears the previous result", async () => {
+  const toggle = fakeElement();
+  const controls = fakeElement();
+  const input = fakeElement();
+  const button = fakeElement();
+  const result = fakeElement({ hidden: false, innerHTML: "jawaban terverifikasi" });
+  bindLookupEntry({
+    toggle, controls, input, button, result,
+    run: async () => ({ ok: true })
+  });
+
+  toggle.checked = true;
+  await toggle.fire("change");
+  result.hidden = false;
+  result.innerHTML = "jawaban terverifikasi";
+
+  toggle.checked = false;
+  await toggle.fire("change");
+  assert.equal(controls.hidden, true);
+  assert.equal(result.hidden, true);
+  assert.equal(result.innerHTML, "");
+});
+
+test("Enter submits the exact visible query through the same guarded runner", async () => {
+  const toggle = fakeElement();
+  const input = fakeElement({ value: "inflasi Indonesia 2026" });
+  const calls = [];
+  const entry = bindLookupEntry({
+    toggle, controls: fakeElement(), input, button: fakeElement(), result: fakeElement(),
+    run: async (args) => { calls.push(args); return { ok: true }; }
+  });
+  toggle.checked = true;
+  await toggle.fire("change");
+
+  let prevented = false;
+  await input.fire("keydown", { key: "Enter", preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.deepEqual(calls, [{ mode: MODE_LOCAL_SEARCH, query: "inflasi Indonesia 2026" }]);
+  assert.equal(entry.getMode(), MODE_LOCAL_SEARCH);
 });
