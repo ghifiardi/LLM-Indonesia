@@ -25,6 +25,8 @@ from typing import Any
 
 from .anchors import (
     DatasetIdentity,
+    ThresholdError,
+    load_thresholds,
     is_development_anchor_location,
     resolve_anchors_dir,
 )
@@ -181,7 +183,7 @@ def run_audit(
             )
 
     store.insert_audit(record)
-    store.append_event(
+    audit_event = store.append_event(
         AUDIT_EVENT,
         candidate_id=candidate.candidate_id,
         payload={
@@ -191,6 +193,17 @@ def run_audit(
             "num_cases": record.num_cases,
         },
     )
+    from .budget import COUNTER_AUDITS, record as record_budget
+
+    record_budget(store, COUNTER_AUDITS, audit_event.event_id, candidate.candidate_id)
+    try:
+        _identity, _gate, budget_limits = load_thresholds(resolved_anchors)
+    except ThresholdError:
+        budget_limits = None
+    if budget_limits is not None:
+        from .budget import enforce
+
+        enforce(store, budget_limits)
     return AuditOutcome(
         record=record,
         anchors_dir=resolved_anchors,

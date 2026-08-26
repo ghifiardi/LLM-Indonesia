@@ -72,6 +72,8 @@ VETO_REPLAY = "replay_determinism"
 VETO_AUDIT_CURRENCY = "audit_currency"
 VETO_SAFETY_FLOOR = "safety_floor"
 VETO_HOLDOUT = "holdout_no_regression"
+VETO_BUDGET = "budget_available"
+VETO_NOT_FROZEN = "not_frozen"
 
 #: Vetoes about the candidate itself, which no amount of running audits or
 #: fixing thresholds can satisfy. Only these retire a candidate to `rejected`;
@@ -91,6 +93,8 @@ VETO_NAMES = (
     VETO_REPLAY,
     VETO_SAFETY_FLOOR,
     VETO_HOLDOUT,
+    VETO_BUDGET,
+    VETO_NOT_FROZEN,
 )
 
 
@@ -262,8 +266,9 @@ def evaluate_gate(
     thresholds: GateThresholds | None = None
     threshold_identity: ThresholdIdentity | None = None
     threshold_error = ""
+    budget_limits = None
     try:
-        threshold_identity, thresholds, _budget = load_thresholds(resolved_anchors)
+        threshold_identity, thresholds, budget_limits = load_thresholds(resolved_anchors)
     except ThresholdError as exc:
         threshold_error = str(exc)
 
@@ -309,6 +314,8 @@ def evaluate_gate(
     )
     vetoes.append(_veto_safety_floor(candidate_audit, thresholds, has_holdout))
     vetoes.append(_veto_holdout(candidate_audit, champion_audit, thresholds, has_holdout))
+    vetoes.append(_veto_budget(store, budget_limits))
+    vetoes.append(_veto_not_frozen(store))
     vetoes.extend(extra_vetoes)
 
     verdict = GateVerdict(
@@ -327,7 +334,7 @@ def evaluate_gate(
         passed=all(veto.passed for veto in vetoes),
     )
     store.insert_gate_verdict(verdict)
-    store.append_event(
+    event = store.append_event(
         "gate_evaluated",
         candidate_id=candidate.candidate_id,
         payload={
@@ -336,10 +343,67 @@ def evaluate_gate(
             "failed": [veto.name for veto in verdict.failures()],
         },
     )
+
+    from . import budget as budget_module
+
+    replay = next((v for v in verdict.vetoes if v.name == VETO_REPLAY), None)
+    if replay is not None and replay.observed.get("replayed_public") is not None:
+        # The replay really ran a candidate in a child process, so it costs a
+        # candidate execution like any other.
+        budget_module.record(
+            store,
+            budget_module.COUNTER_CANDIDATE_EXECUTIONS,
+            event.event_id,
+            candidate.candidate_id,
+        )
+    if budget_limits is not None:
+        budget_module.enforce(store, budget_limits)
     return verdict
 
 
 # --- individual vetoes ------------------------------------------------------
+
+
+def _veto_budget(store: ResidentStore, limits: Any) -> VetoResult:
+    """No counter over its limit.
+
+    The snapshot is taken once here, so every number in this verdict describes
+    the same moment.
+    """
+
+    if limits is None:
+        return _not_evaluable(VETO_BUDGET, "budget limits unavailable")
+    from .budget import snapshot
+
+    view = snapshot(store, limits)
+    breaches = view.breaches()
+    consecutive = store.consecutive_gate_failures()
+    gate_over = consecutive > limits.max_consecutive_gate_failures
+    observed = {**view.to_dict(), "consecutive_gate_failures": consecutive}
+    if breaches or gate_over:
+        parts = []
+        if breaches:
+            parts.append("over budget for " + ", ".join(sorted(breaches)))
+        if gate_over:
+            parts.append(f"{consecutive} consecutive gate failures")
+        return VetoResult(
+            name=VETO_BUDGET, passed=False, detail="; ".join(parts), observed=observed
+        )
+    return VetoResult(name=VETO_BUDGET, passed=True, observed=observed)
+
+
+def _veto_not_frozen(store: ResidentStore) -> VetoResult:
+    from .freeze import active_freeze
+
+    current = active_freeze(store)
+    if current is None:
+        return VetoResult(name=VETO_NOT_FROZEN, passed=True)
+    return VetoResult(
+        name=VETO_NOT_FROZEN,
+        passed=False,
+        detail=f"the resident is frozen ({current.freeze_id}): {current.reason}",
+        observed={"freeze_id": current.freeze_id},
+    )
 
 
 def _veto_tier(candidate: Candidate) -> VetoResult:

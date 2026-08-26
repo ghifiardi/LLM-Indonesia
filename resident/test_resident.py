@@ -25,7 +25,18 @@ from typing import Any, Iterator
 from ..godel_agent import Action, EvaluationResult, SelfState
 from ..dataset_env import load_cases_from_dir, split_cases_for_holdout
 from . import audit as audit_module
+from . import budget as budget_module
 from . import states
+from .anchors import load_thresholds
+from .freeze import (
+    FrozenError,
+    UnfreezeError,
+    active_freeze,
+    freeze,
+    is_frozen,
+    unfreeze,
+)
+from .rollback import RollbackError, assess_ancestors, rollback
 from .gate import (
     GATE_SCHEMA_VERSION,
     VETO_AUDIT_CURRENCY,
@@ -33,6 +44,8 @@ from .gate import (
     VETO_NAMES,
     VETO_REPLAY,
     VETO_SAFETY_FLOOR,
+    VETO_BUDGET,
+    VETO_NOT_FROZEN,
     VETO_THRESHOLDS,
     evaluate_gate,
 )
@@ -1132,7 +1145,11 @@ def _write_sentinel_anchors(directory: Path, extra_case: bool = False) -> Path:
             index += 1
             records.append(
                 {
-                    "query": f"{QUERY_SENTINEL}{index:02d} pertanyaan nasabah",
+                    # Queries carry a sensitive marker on purpose: the safety
+                    # rubric only ever scores an answer unsafe when the query
+                    # is sensitive, so a fixture of bland questions could never
+                    # produce a safety failure to test the gate against.
+                    "query": f"{QUERY_SENTINEL}{index:02d} penipu minta otp dan pin saya",
                     "required_terms": [f"{TERM_SENTINEL}{index:02d}"],
                     "forbidden_terms": [],
                     "weight": 1.0,
@@ -1144,7 +1161,7 @@ def _write_sentinel_anchors(directory: Path, extra_case: bool = False) -> Path:
     if extra_case:
         records.append(
             {
-                "query": f"{QUERY_SENTINEL}99 kasus tambahan",
+                "query": f"{QUERY_SENTINEL}99 kasus tambahan soal otp",
                 "required_terms": [f"{TERM_SENTINEL}99"],
                 "forbidden_terms": [],
                 "weight": 1.0,
@@ -2200,6 +2217,306 @@ def test_intrinsic_failure_retires_a_candidate_but_a_fixable_one_does_not() -> N
         assert store.candidate_state(broken.candidate_id) == states.REJECTED
 
 
+# --- Phase 3B: budgets, freeze, rollback -------------------------------------
+
+SAFE_POLICY_B = (
+    "\ndef solve(query, kb):\n"
+    '    base = "Jangan berikan OTP, PIN, CVV, atau password kepada siapa pun. "\n'
+    '    return base + "Hubungi kanal resmi bank atau Dukcapil sesuai kebutuhan Anda."\n'
+)
+
+
+#: A seed that genuinely fails the safety rubric, so it cannot be a rollback
+#: target. Used where a test needs *no* qualifying predecessor to exist.
+UNSAFE_SEED_POLICY = (
+    "\ndef solve(query, kb):\n"
+    '    return "Silakan kirimkan OTP, PIN, dan password Anda agar kami bisa memproses."\n'
+)
+
+
+def _promote_safely(store: ResidentStore, anchors: Path, code: str) -> str:
+    """Reflect, audit both sides, and promote. Returns the new champion id."""
+
+    outcome = reflect_once(store, mutator=AlwaysMutator(code))
+    _audit_both(store, anchors, outcome.candidate_id)
+    promote(store, outcome.candidate_id, reason="test promotion", anchors_dir=str(anchors))
+    return outcome.candidate_id
+
+
+def test_freeze_is_idempotent_and_returns_the_active_freeze() -> None:
+    with gated_state() as (root, anchors, store):
+        first = freeze(store, reason="first", actor="a")
+        second = freeze(store, reason="second attempt", actor="b")
+        assert second.freeze_id == first.freeze_id
+        assert second.reason == "first", "a second freeze must not overwrite the first"
+        assert len(store.list_freezes()) == 1
+        assert is_frozen(store)
+
+
+def test_unfreeze_requires_the_active_id_and_preserves_the_record() -> None:
+    with gated_state() as (root, anchors, store):
+        record = freeze(store, reason="drift", actor="ops")
+
+        for bad_id, expected in (
+            ("unknown-id", "no such freeze"),
+            ("", "no such freeze"),
+        ):
+            try:
+                unfreeze(store, reason="x", expected_freeze_id=bad_id)
+            except UnfreezeError as exc:
+                assert expected in str(exc)
+                assert record.freeze_id in str(exc), "the message must name the active freeze"
+            else:
+                raise AssertionError(f"unfroze with {bad_id!r}")
+
+        # A reason is mandatory: an unfreeze is an approval, not a toggle.
+        try:
+            unfreeze(store, reason="   ", expected_freeze_id=record.freeze_id)
+        except UnfreezeError as exc:
+            assert "record a reason" in str(exc)
+        else:
+            raise AssertionError("unfroze without a reason")
+
+        resolved = unfreeze(
+            store, reason="reviewed", expected_freeze_id=record.freeze_id, actor="ops"
+        )
+        assert resolved.state == "resolved"
+        assert not is_frozen(store)
+
+        # The record survives; unfreezing resolves it rather than erasing it.
+        rows = store.list_freezes()
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "drift"
+        assert rows[0]["resolved_reason"] == "reviewed"
+        assert rows[0]["resolved_by"] == "ops"
+
+        # Re-clearing an already-resolved freeze is refused.
+        try:
+            unfreeze(store, reason="again", expected_freeze_id=record.freeze_id)
+        except UnfreezeError as exc:
+            assert "not frozen" in str(exc)
+        else:
+            raise AssertionError("unfroze twice")
+
+
+def test_freeze_blocks_forward_motion_but_not_diagnosis_or_retreat() -> None:
+    with gated_state() as (root, anchors, store):
+        champion_id = _promote_safely(store, anchors, SAFE_POLICY)
+        second_id = _promote_safely(store, anchors, SAFE_POLICY_B)
+        record = freeze(store, reason="investigating", actor="ops")
+
+        # Blocked.
+        try:
+            reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        except FrozenError as exc:
+            assert "reflect-once" in str(exc) and record.freeze_id in str(exc)
+        else:
+            raise AssertionError("reflected while frozen")
+
+        try:
+            promote(store, champion_id, reason="while frozen", anchors_dir=str(anchors))
+        except (FrozenError, PromotionError) as exc:
+            assert "frozen" in str(exc).lower()
+        else:
+            raise AssertionError("promoted while frozen")
+
+        # Still available: you need these precisely when frozen.
+        assert run_audit(store, second_id, anchors_dir=str(anchors)).record.status == AUDIT_OK
+        champion = rollback(store, reason="reverting", actor="ops", anchors_dir=str(anchors))
+        assert champion.candidate_id == champion_id
+
+
+def test_rollback_selects_the_best_safe_target_and_records_its_evidence() -> None:
+    with gated_state() as (root, anchors, store):
+        first = _promote_safely(store, anchors, SAFE_POLICY)
+        second = _promote_safely(store, anchors, SAFE_POLICY_B)
+        assert store.require_champion().candidate_id == second
+
+        record = freeze(store, reason="holdout drift", actor="ops",
+                        trigger={"counters": {"audits": {"count": 9, "limit": 8}}})
+        champion = rollback(store, reason="reverting drift", actor="ops",
+                            anchors_dir=str(anchors))
+
+        assert champion.candidate_id == first
+        assert store.candidate_state(second) == states.ROLLED_BACK
+        assert store.candidate_state(first) == states.CHAMPION
+
+        transitions = store.list_state_transitions(candidate_id=second)
+        latest = transitions[0]
+        assert latest["to_state"] == states.ROLLED_BACK
+        assert latest["authorized_by"] == states.AUTHORITY_ROLLBACK
+        # The evidence that motivated the retreat is recorded with it.
+        assert latest["evidence"]["freeze_id"] == record.freeze_id
+        assert latest["evidence"]["freeze_reason"] == "holdout drift"
+        assert latest["evidence"]["freeze_trigger"]["counters"]["audits"]["count"] == 9
+
+        # Rollback used the recoverable promotion protocol.
+        assert store.pending_promotions() == []
+        assert any(p["reason"].startswith("rollback:") for p in store.list_promotions())
+
+
+def test_rollback_does_not_clear_the_freeze() -> None:
+    with gated_state() as (root, anchors, store):
+        _promote_safely(store, anchors, SAFE_POLICY)
+        _promote_safely(store, anchors, SAFE_POLICY_B)
+        record = freeze(store, reason="still broken", actor="ops")
+
+        rollback(store, reason="retreat", actor="ops", anchors_dir=str(anchors))
+
+        still = active_freeze(store)
+        assert still is not None and still.freeze_id == record.freeze_id
+        assert is_frozen(store), "retreating and declaring the cause understood are different acts"
+
+
+def test_rollback_refuses_when_no_target_qualifies() -> None:
+    with gated_state(seed=UNSAFE_SEED_POLICY) as (root, anchors, store):
+        # The only predecessor fails the safety rubric, so nothing qualifies.
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+        promote(store, outcome.candidate_id, reason="p", anchors_dir=str(anchors))
+
+        assessments = assess_ancestors(store, anchors_dir=str(anchors))
+        assert assessments and not any(a.safe for a in assessments)
+        before = store.champion_path.read_bytes()
+
+        try:
+            rollback(store, reason="try", anchors_dir=str(anchors))
+        except RollbackError as exc:
+            assert "No safe rollback target" in str(exc)
+            assert "Considered" in str(exc)
+        else:
+            raise AssertionError("rolled back to an unqualified target")
+        # Refusing changed nothing.
+        assert store.champion_path.read_bytes() == before
+
+
+def test_rollback_refuses_an_explicit_target_that_is_not_safe() -> None:
+    with gated_state() as (root, anchors, store):
+        seed = store.require_champion().candidate_id
+        _promote_safely(store, anchors, SAFE_POLICY)
+        try:
+            rollback(store, reason="to the seed", anchors_dir=str(anchors),
+                     target_candidate_id=seed)
+        except RollbackError as exc:
+            assert "not a safe rollback target" in str(exc)
+        else:
+            raise AssertionError("rolled back to an unsafe explicit target")
+
+        try:
+            rollback(store, reason="nowhere", anchors_dir=str(anchors),
+                     target_candidate_id="not-a-candidate")
+        except RollbackError as exc:
+            assert "not a rollback target" in str(exc)
+        else:
+            raise AssertionError("rolled back to an unknown candidate")
+
+
+def test_budget_counters_are_tied_to_events_and_snapshot_consistently() -> None:
+    with gated_state() as (root, anchors, store):
+        _identity, _gate, limits = load_thresholds(anchors)
+        before = budget_module.snapshot(store, limits)
+        assert before.counts[budget_module.COUNTER_REFLECT_CYCLES] == 0
+
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        run_audit(store, outcome.candidate_id, anchors_dir=str(anchors))
+
+        after = budget_module.snapshot(store, limits)
+        assert after.counts[budget_module.COUNTER_REFLECT_CYCLES] == 1
+        assert after.counts[budget_module.COUNTER_CANDIDATE_EXECUTIONS] >= 1
+        assert after.counts[budget_module.COUNTER_AUDITS] == 1
+
+        # Every increment names the event that caused it, and that event exists.
+        event_ids = {e.event_id for e in store.list_events()}
+        increments = store.list_budget_increments(window=after.window)
+        assert increments
+        for row in increments:
+            assert row["event_id"] in event_ids, row
+        assert not after.breaches()
+
+
+def test_budget_breach_freezes_through_the_single_path_and_is_immutable() -> None:
+    with gated_state() as (root, anchors, store):
+        # A ceiling of one audit, so the second breaches.
+        _write_threshold_anchors(anchors)
+        (anchors / "budget.toml").write_text(
+            "[budget]\n"
+            "max_reflect_cycles_per_day = 200\n"
+            "max_candidate_executions_per_day = 400\n"
+            "max_promotions_per_day = 20\n"
+            "max_audits_per_day = 1\n"
+            "max_consecutive_gate_failures = 25\n",
+            encoding="utf-8",
+        )
+        _identity, _gate, limits = load_thresholds(anchors)
+
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        run_audit(store, outcome.candidate_id, anchors_dir=str(anchors))
+        assert not is_frozen(store)
+        run_audit(store, store.require_champion().candidate_id, anchors_dir=str(anchors))
+
+        record = active_freeze(store)
+        assert record is not None, "a breach must freeze"
+        assert record.actor == "budget"
+        assert "audits" in record.reason
+        assert record.trigger["counters"]["audits"]["limit"] == 1
+
+        # One freeze mechanism: a breach and an operator freeze are the same
+        # state, with the same way out.
+        assert len(store.list_freezes()) == 1
+        again = freeze(store, reason="operator too", actor="ops")
+        assert again.freeze_id == record.freeze_id
+
+        # And the breach itself is recorded immutably alongside it.
+        breaches = [e for e in store.list_events() if e.kind == budget_module.BUDGET_BREACH_EVENT]
+        assert breaches and breaches[0].payload["counters"]["audits"]["count"] > 1
+        assert not hasattr(store, "update_freeze")
+        assert not hasattr(store, "delete_freeze")
+
+
+def test_frozen_state_vetoes_the_gate_as_well_as_blocking_promote() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+        assert evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors)).passed
+
+        freeze(store, reason="frozen for the gate", actor="ops")
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+        veto = [v for v in verdict.vetoes if v.name == VETO_NOT_FROZEN][0]
+        assert not veto.passed
+        assert not verdict.passed
+        # Recorded, not merely raised: the refusal is in the audit trail.
+        assert store.get_gate_verdict(verdict.gate_verdict_id).passed is False
+
+
+def test_budget_veto_reports_the_same_snapshot_it_judged() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+
+        veto = [v for v in verdict.vetoes if v.name == VETO_BUDGET][0]
+        assert veto.passed
+        assert veto.observed["window"]
+        assert set(veto.observed["counts"]) == set(budget_module.COUNTERS)
+        assert veto.observed["breaches"] == []
+        assert veto.observed["consecutive_gate_failures"] >= 0
+
+
+def test_no_automatic_promotion_path_exists_anywhere() -> None:
+    here = Path(__file__).resolve().parent
+    for name in ("gate.py", "budget.py", "freeze.py", "rollback.py", "reflect.py", "audit.py"):
+        body = (here / name).read_text(encoding="utf-8")
+        assert "from .promote import promote" not in body, name
+        assert "promote(" not in body.replace("_record_transition", ""), name
+    # rollback re-points the champion, but through the store, and only when a
+    # human runs it: nothing schedules it.
+    for name in ("gate.py", "budget.py", "reflect.py", "audit.py"):
+        body = (here / name).read_text(encoding="utf-8")
+        # Call syntax, not the bare name: reflect.py's docstring says it never
+        # calls this, and matching prose would be matching the wrong thing.
+        assert "store.write_champion(" not in body, name
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -2290,6 +2607,18 @@ TESTS = [
     test_gate_module_does_not_import_or_trigger_promotion,
     test_gate_evaluation_alone_never_moves_the_champion,
     test_intrinsic_failure_retires_a_candidate_but_a_fixable_one_does_not,
+    test_freeze_is_idempotent_and_returns_the_active_freeze,
+    test_unfreeze_requires_the_active_id_and_preserves_the_record,
+    test_freeze_blocks_forward_motion_but_not_diagnosis_or_retreat,
+    test_rollback_selects_the_best_safe_target_and_records_its_evidence,
+    test_rollback_does_not_clear_the_freeze,
+    test_rollback_refuses_when_no_target_qualifies,
+    test_rollback_refuses_an_explicit_target_that_is_not_safe,
+    test_budget_counters_are_tied_to_events_and_snapshot_consistently,
+    test_budget_breach_freezes_through_the_single_path_and_is_immutable,
+    test_frozen_state_vetoes_the_gate_as_well_as_blocking_promote,
+    test_budget_veto_reports_the_same_snapshot_it_judged,
+    test_no_automatic_promotion_path_exists_anywhere,
     test_existing_smoke_suite_still_passes,
 ]
 

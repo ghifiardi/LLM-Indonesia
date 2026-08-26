@@ -17,8 +17,128 @@ python3 -m godel_agent_prototype.resident archive-list
 python3 -m godel_agent_prototype.resident show <candidate-id>
 python3 -m godel_agent_prototype.resident status
 python3 -m godel_agent_prototype.resident audit <candidate-id>
+python3 -m godel_agent_prototype.resident gate <candidate-id>
 python3 -m godel_agent_prototype.resident promote <candidate-id> --reason "reviewed diff"
+python3 -m godel_agent_prototype.resident freeze --reason "holdout drift"
+python3 -m godel_agent_prototype.resident unfreeze --reason "reviewed" --expected-event-id <id>
+python3 -m godel_agent_prototype.resident rollback --reason "reverting" [--dry-run]
 ```
+
+Exit code `3` means an action was blocked by a freeze.
+
+## The promotion gate
+
+A promotion must pass a gate whose verdict is archived immutably. Every veto is
+evaluated — never short-circuited — so a rejection explains everything that was
+wrong rather than the first thing found.
+
+| veto | condition |
+|---|---|
+| `tier_allowed` | tier is T0 or T1 |
+| `thresholds_valid` | threshold files load, validate, and match the identity recorded at init |
+| `artifact_integrity` | digest verifies and the AST gate still passes |
+| `isolated_execution` | the archived verdict shows the candidate actually ran, isolated |
+| `audit_currency` | candidate *and* champion each have a current passing audit |
+| `public_improvement` | public score beats the champion by `min_public_delta` |
+| `replay_determinism` | a fresh isolated re-run reproduces the archived score |
+| `safety_floor` | the candidate's audit reports zero holdout safety failures |
+| `holdout_no_regression` | holdout has not fallen more than `holdout_epsilon` |
+| `budget_available` | no counter over its limit |
+| `not_frozen` | the resident is not frozen |
+
+Each veto reports one of three outcomes, and the last two are **not** the same:
+
+- **passed / failed** — evaluated.
+- **not evaluable** — the inputs were missing. Always fails. A gate that passes
+  because it could not check something is not a gate.
+- **not applicable** — the condition does not exist for this task, as holdout
+  regression does not for an environment with no holdout. Passes, and is
+  recorded as inapplicable so a reader can see the gate was narrower.
+
+`replay_determinism` occupies the slot the roadmap gave to judge agreement.
+There are no judges at T0/T1 — the rubric is deterministic Python — so rather
+than fake one, the gate re-runs the candidate's public evaluation through the
+same isolated runner and requires the archived score to reproduce.
+Nondeterminism and archive drift both fail here. Judge agreement returns at T4.
+
+`audit_currency` requires a passing audit for **both** sides of the holdout
+comparison, and names exactly which are missing. The practical cost: after
+`init`, the seed champion must be audited once before anything can be promoted.
+`promote` never spawns audits — holdout work stays inside the explicit `audit`
+command.
+
+Verdicts are **single-use**. A pass is evidence about one candidate, one
+champion, one dataset, and one set of thresholds; if any of those move, the
+verdict is stale and the gate re-runs.
+
+## States
+
+```text
+proposed ──gate pass──> shadow ──promote──> champion ──promote──> superseded
+    │                                           │                     │
+    └──intrinsic failure──> rejected            └──rollback──> rolled_back
+                                       superseded ──rollback──> champion
+```
+
+Every transition names what authorized it: a gate-verdict id, `rollback`, or
+`seed_bootstrap`. The seed skips the gate because a gate compares against an
+incumbent and at `init` there is none — recorded rather than left implicit.
+
+Only *intrinsic* failures (tier, artifact integrity, isolation) retire a
+candidate to `rejected`. A missing audit or a swapped threshold file is fixable,
+and marking such a candidate terminal would discard work over a recoverable
+problem.
+
+**Canary is deliberately absent.** It has no meaning until a serving path
+exists, and a recorded state with a pointer nothing reads gets mistaken for a
+working traffic split. Phase 4 inserts it between `shadow` and `champion`
+without changing any existing transition.
+
+## Thresholds, budgets, freeze, rollback
+
+**Limits are anchors; counters are state.** `gate.toml` and `budget.toml` live
+in the human-owned anchor directory and the resident never writes them — a gate
+whose numbers the agent can edit is not a gate. Their identity is recorded at
+`init` and re-checked at every evaluation, so swapping a file afterwards fails
+closed rather than quietly weakening the gate. A missing, unparseable, or
+out-of-range file fails closed too: there is no built-in default, because
+substituting one would mean a gate could be disarmed by deleting a file.
+
+Counters are derived by counting append-only increment rows, each naming the
+event that caused it, so a limit that was reached can always be explained:
+
+| counter | incremented by |
+|---|---|
+| `reflect_cycles` | one per completed `reflect-once` |
+| `candidate_executions` | one per isolated execution — each reflection, and each gate replay |
+| `promotions` | one per completed promotion, rollback included |
+| `audits` | one per completed `audit` |
+
+`consecutive_gate_failures` is derived from the gate-verdict log rather than
+counted, so it cannot drift from the evidence. The gate takes one budget
+snapshot per evaluation, so every number in a verdict describes the same moment.
+
+**Freeze is a record, not a file.** `rm .resident/FROZEN` was rejected because
+deleting a file is not an approval. Freezing is idempotent — a second call
+returns the freeze already active — and there is exactly one way in, whether an
+operator or a budget breach triggers it. `unfreeze` requires `--expected-event-id`
+naming the active freeze and a reason; the record is resolved, never deleted.
+
+A freeze blocks **forward motion only**: `reflect-once` and `promote`. `audit`
+and `rollback` stay available, because a freeze is exactly when an operator
+needs to diagnose and retreat. A safety mechanism that disabled the recovery
+mechanism would be a trap.
+
+**Rollback** returns to the best safe target among previous champions and the
+current champion's lineage — champion history first, because a new champion need
+not descend from the one it replaced, and lineage alone would leave the system
+unable to return to what it served yesterday. Safe means selectable, artifact
+verifying, and (where a holdout exists) a current passing audit with zero safety
+failures. If nothing qualifies, rollback **refuses**: reverting to an unaudited
+or lower-safety candidate is the opposite of what a rollback is for. It runs
+through the same intent/pointer/finalize protocol as promotion, records the
+freeze and counters that motivated it, and does **not** clear the freeze —
+retreating and declaring the cause understood are different decisions.
 
 Add `--json` for machine-readable output. Exit codes: `0` ok, `1` error,
 `2` not initialised.
@@ -285,9 +405,8 @@ smoke test must not break this.
 
 ## Not in this phase
 
-The promotion gate
-with hard vetoes, shadow/canary states, budgets and freeze (Phase 3) — including
-using a holdout audit as a veto; split
+Canary and the serving path
+(Phase 4); split
 serve/reflect/audit clocks (Phase 4); automatic promotion (Phase 5); proactive
 triggers (Phase 6); tiers above T1 (Phase 7). Batch and scheduled auditing
 arrives with the audit clock in Phase 4; Phase 2 has `audit <candidate-id>`

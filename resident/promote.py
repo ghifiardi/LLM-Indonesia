@@ -35,6 +35,8 @@ from ..godel_agent import SafePolicyLoader
 from .anchors import ThresholdError, load_thresholds
 from .archive import CandidateArchive
 from . import states
+from . import budget
+from .freeze import require_not_frozen
 from .gate import INTRINSIC_VETOES, GateVerdict, evaluate_gate
 from .models import (
     Candidate,
@@ -102,6 +104,11 @@ def promote(
 
     if stop_after is not None and stop_after not in STOP_POINTS:
         raise ValueError(f"stop_after must be one of {STOP_POINTS} or None, got {stop_after!r}")
+
+    if not skip_gate:
+        # Blocked while frozen. The gate also carries a not_frozen veto, so the
+        # refusal is recorded even when this check is bypassed by a caller.
+        require_not_frozen(store, "promote")
 
     archive = CandidateArchive(store)
     candidate = archive.get(candidate_id)
@@ -233,16 +240,17 @@ def promote(
 
     # Step 3: finalize.
     store.finalize_promotion(promotion_id, note="promoted")
+    promotion_event = store.append_event(
+        "promotion_finalized",
+        candidate_id=candidate.candidate_id,
+        payload={"promotion_id": promotion_id, "previous_candidate_id": previous_candidate_id},
+    )
+    budget.record(store, budget.COUNTER_PROMOTIONS, promotion_event.event_id, candidate.candidate_id)
     _record_transition(store, candidate, states.CHAMPION, authority)
     if previous is not None:
         previous_candidate = archive.get(previous.candidate_id)
         if previous_candidate is not None:
             _record_transition(store, previous_candidate, states.SUPERSEDED, authority)
-    store.append_event(
-        "promotion_finalized",
-        candidate_id=candidate.candidate_id,
-        payload={"promotion_id": promotion_id, "previous_candidate_id": previous_candidate_id},
-    )
     return champion
 
 

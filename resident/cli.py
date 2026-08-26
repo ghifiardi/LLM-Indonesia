@@ -27,7 +27,11 @@ from typing import Any, Sequence
 from ..code_agent_env import CodeTaskEnvironment
 from .anchors import ANCHORS_DIR_ENV_VAR, is_development_anchor_location
 from . import states
+from . import budget as budget_module
+from .anchors import ThresholdError, load_thresholds, resolve_anchors_dir
+from .freeze import FrozenError, UnfreezeError, active_freeze, freeze, unfreeze
 from .gate import GateError, evaluate_gate
+from .rollback import RollbackError, assess_ancestors, rollback
 from .audit import AuditError, run_audit
 from ..code_llm_mutator import CodeLLMMutationProvider
 from ..llm_mutator import LLMMutationProvider, OpenAICompatibleTransport
@@ -65,6 +69,7 @@ from .store import (
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NOT_INITIALIZED = 2
+EXIT_FROZEN = 3
 
 #: The resident decides when to reflect, so the providers' own iteration cap
 #: would only cause spurious "no candidate" verdicts on long-lived archives.
@@ -204,6 +209,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reuse an existing verdict. Refused if stale; omit to evaluate fresh.",
     )
 
+    freeze_parser = subparsers.add_parser(
+        "freeze", help="Stop reflection and promotion. Idempotent; audit and rollback continue."
+    )
+    freeze_parser.add_argument("--reason", required=True)
+    freeze_parser.add_argument("--actor", default="")
+
+    unfreeze_parser = subparsers.add_parser(
+        "unfreeze", help="Clear the active freeze, acknowledging it by id."
+    )
+    unfreeze_parser.add_argument("--reason", required=True)
+    unfreeze_parser.add_argument(
+        "--expected-event-id",
+        required=True,
+        dest="expected_event_id",
+        help="Id of the freeze being cleared. Refused if it is not the active one.",
+    )
+    unfreeze_parser.add_argument("--actor", default="")
+
+    rollback_parser = subparsers.add_parser(
+        "rollback", help="Revert the champion to its best safe ancestor. Works while frozen."
+    )
+    rollback_parser.add_argument("--reason", required=True)
+    rollback_parser.add_argument("--actor", default="")
+    rollback_parser.add_argument("--anchors-dir", default=None)
+    rollback_parser.add_argument(
+        "--to", default=None, dest="target", help="Roll back to this ancestor specifically."
+    )
+    rollback_parser.add_argument(
+        "--dry-run", action="store_true", help="Show which ancestors qualify and stop."
+    )
+
     return parser
 
 
@@ -222,6 +258,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         with store:
             handler = HANDLERS[args.command]
             return handler(store, args, emit)
+    except FrozenError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FROZEN
     except ResidentNotInitializedError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_NOT_INITIALIZED
@@ -377,9 +416,21 @@ def _cmd_status(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
         "pending_promotions": len(pending),
         "audits": store.count_audits(),
         "champion_audit_current": None,
+        "frozen": None,
+        "budget": None,
         "holdout_evaluated": False,
         "auto_promotion": "not implemented",
     }
+
+    current_freeze = active_freeze(store)
+    payload["frozen"] = current_freeze.to_dict() if current_freeze is not None else None
+    budget_view = None
+    try:
+        _ti, _gt, budget_limits = load_thresholds(resolve_anchors_dir(None))
+        budget_view = budget_module.snapshot(store, budget_limits)
+        payload["budget"] = budget_view.to_dict()
+    except ThresholdError as exc:
+        payload["budget"] = {"error": str(exc)}
 
     champion_audit = None
     if champion is not None:
@@ -428,6 +479,22 @@ def _cmd_status(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
             "holdout       never loaded in this process; audits run isolated",
             f"state         {store.candidate_state(champion.candidate_id) or '(none)'}",
             "promotion     manual only, gated",
+            "frozen        "
+            + (
+                f"YES {current_freeze.freeze_id} - {current_freeze.reason}"
+                if current_freeze is not None
+                else "no"
+            ),
+            "budget        "
+            + (
+                ", ".join(
+                    f"{k}={v}/{budget_view.limits[budget_module.COUNTER_LIMITS[k]]}"
+                    for k, v in sorted(budget_view.counts.items())
+                )
+                + f" (window {budget_view.window})"
+                if budget_view is not None
+                else "unavailable"
+            ),
         ]
     if pending:
         lines.append(f"WARNING: {len(pending)} promotion(s) still pending after recovery.")
@@ -592,6 +659,97 @@ def _cmd_promote(store: ResidentStore, args: argparse.Namespace, emit: Any) -> i
     return EXIT_OK
 
 
+def _cmd_freeze(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    existing = active_freeze(store)
+    record = freeze(store, reason=args.reason, actor=args.actor)
+    already = existing is not None and existing.freeze_id == record.freeze_id
+    emit(
+        record.to_dict(),
+        [
+            ("already frozen" if already else "frozen") + f" {record.freeze_id}",
+            f"  since   {record.created_at}",
+            f"  reason  {record.reason}",
+            f"  actor   {record.actor or '(unrecorded)'}",
+            "",
+            "`reflect-once` and `promote` are blocked. `audit` and `rollback` still work.",
+            f"To clear: resident unfreeze --reason \"...\" --expected-event-id {record.freeze_id}",
+        ],
+    )
+    return EXIT_OK
+
+
+def _cmd_unfreeze(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    try:
+        record = unfreeze(
+            store,
+            reason=args.reason,
+            expected_freeze_id=args.expected_event_id,
+            actor=args.actor,
+        )
+    except UnfreezeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    emit(
+        record.to_dict(),
+        [
+            f"unfroze {record.freeze_id}",
+            f"  original reason  {record.reason}",
+            f"  cleared because  {args.reason}",
+            f"  actor            {args.actor or '(unrecorded)'}",
+            "",
+            "The freeze record is preserved, not deleted.",
+        ],
+    )
+    return EXIT_OK
+
+
+def _cmd_rollback(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    if args.dry_run:
+        assessments = assess_ancestors(store, anchors_dir=args.anchors_dir)
+        lines = [f"{len(assessments)} ancestor(s) of the current champion"]
+        for item in assessments:
+            mark = "safe" if item.safe else "no  "
+            lines.append(
+                f"  [{mark}] {item.candidate.candidate_id[:12]} "
+                f"{_fmt_score(item.candidate.public_score)}"
+                + (f" - {item.reason}" if item.reason else "")
+            )
+        emit({"ancestors": [
+            {"candidate_id": a.candidate.candidate_id, "safe": a.safe, "reason": a.reason,
+             "public_score": a.candidate.public_score}
+            for a in assessments
+        ]}, lines)
+        return EXIT_OK
+
+    try:
+        champion = rollback(
+            store,
+            reason=args.reason,
+            actor=args.actor,
+            anchors_dir=args.anchors_dir,
+            target_candidate_id=args.target,
+        )
+    except RollbackError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    current = active_freeze(store)
+    lines = [
+        f"rolled back to {champion.candidate_id}",
+        f"  from      {champion.previous_candidate_id}",
+        f"  artifact  {champion.artifact_hash}",
+        f"  reason    {args.reason}",
+    ]
+    if current is not None:
+        lines.append("")
+        lines.append(
+            f"Still frozen ({current.freeze_id}). Rolling back does not clear a freeze; "
+            "unfreeze explicitly when the cause is understood."
+        )
+    emit(champion.to_dict(), lines)
+    return EXIT_OK
+
+
 HANDLERS = {
     "init": _cmd_init,
     "record": _cmd_record,
@@ -602,6 +760,9 @@ HANDLERS = {
     "promote": _cmd_promote,
     "audit": _cmd_audit,
     "gate": _cmd_gate,
+    "freeze": _cmd_freeze,
+    "unfreeze": _cmd_unfreeze,
+    "rollback": _cmd_rollback,
 }
 
 

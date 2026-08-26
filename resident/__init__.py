@@ -31,7 +31,27 @@ from .anchors import (
     load_anchor_split,
     resolve_anchors_dir,
 )
-from . import states
+from . import budget, states
+from .anchors import (
+    ANCHORS_DIR_ENV_VAR as _ANCHORS_ENV,
+)
+from .freeze import (
+    FreezeRecord,
+    FrozenError,
+    UnfreezeError,
+    active_freeze,
+    freeze,
+    is_frozen,
+    require_not_frozen,
+    unfreeze,
+)
+from .rollback import (
+    RollbackError,
+    assess_ancestors,
+    best_safe_ancestor,
+    rollback,
+    rollback_target_ids,
+)
 from .archive import CandidateArchive, stable_unit_interval
 from .gate import (
     GATE_SCHEMA_VERSION,
@@ -130,6 +150,20 @@ from .store import (
 )
 
 __all__ = [
+    "rollback_target_ids",
+    "rollback",
+    "best_safe_ancestor",
+    "assess_ancestors",
+    "RollbackError",
+    "unfreeze",
+    "require_not_frozen",
+    "is_frozen",
+    "freeze",
+    "active_freeze",
+    "UnfreezeError",
+    "FrozenError",
+    "FreezeRecord",
+    "budget",
     "CONFIG_THRESHOLD_IDENTITY",
     "load_thresholds",
     "ThresholdIdentity",

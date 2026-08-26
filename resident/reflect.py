@@ -313,6 +313,9 @@ def reflect_once(
     an ``InProcessCandidateRunner`` deliberately.
     """
 
+    from .freeze import require_not_frozen
+
+    require_not_frozen(store, "reflect-once")
     spec = resolve_environment_spec(store, env_name)
     store.require_champion()
 
@@ -364,7 +367,7 @@ def reflect_once(
 
     def finish(verdict: Verdict, artifact_hash: str | None) -> ReflectionOutcome:
         candidate = archive.add(verdict=verdict, artifact_hash=artifact_hash, **common)
-        store.append_event(
+        event = store.append_event(
             REFLECT_CYCLE_EVENT,
             candidate_id=candidate.candidate_id,
             payload={
@@ -378,6 +381,7 @@ def reflect_once(
                 "delta": verdict.delta,
             },
         )
+        _record_budget(store, event, candidate.candidate_id, executed=artifact_hash is not None)
         return ReflectionOutcome(
             cycle=cycle,
             candidate=candidate,
@@ -495,6 +499,27 @@ def evaluate_policy_source(
         public_snapshot=spec.read_records(store),
         limits=limits,
     )
+
+
+def _record_budget(store: ResidentStore, event: Any, candidate_id: str, executed: bool) -> None:
+    """One reflect cycle, plus one candidate execution when a child actually ran."""
+
+    from .budget import COUNTER_CANDIDATE_EXECUTIONS, COUNTER_REFLECT_CYCLES, record
+
+    record(store, COUNTER_REFLECT_CYCLES, event.event_id, candidate_id)
+    if executed:
+        record(store, COUNTER_CANDIDATE_EXECUTIONS, event.event_id, candidate_id)
+
+    # A breach freezes immediately, through the single freeze path, so the next
+    # forward action is blocked rather than the limit merely being noted.
+    from .anchors import ThresholdError, load_thresholds, resolve_anchors_dir
+    from .budget import enforce
+
+    try:
+        _identity, _gate, limits = load_thresholds(resolve_anchors_dir(None))
+    except ThresholdError:
+        return
+    enforce(store, limits)
 
 
 def _history_tail(archive: CandidateArchive, limit: int = 8) -> tuple[str, ...]:

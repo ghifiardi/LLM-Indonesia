@@ -229,6 +229,35 @@ _MIGRATION_5 = (
     "CREATE INDEX IF NOT EXISTS idx_transitions_candidate ON state_transitions(candidate_id)",
 )
 
+_MIGRATION_6 = (
+    """
+    CREATE TABLE IF NOT EXISTS budget_increments (
+        seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+        counter      TEXT NOT NULL,
+        window       TEXT NOT NULL,
+        event_id     TEXT NOT NULL,
+        candidate_id TEXT,
+        created_at   TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_budget_window ON budget_increments(window, counter)",
+    """
+    CREATE TABLE IF NOT EXISTS freezes (
+        seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+        freeze_id       TEXT NOT NULL UNIQUE,
+        created_at      TEXT NOT NULL,
+        reason          TEXT NOT NULL DEFAULT '',
+        actor           TEXT NOT NULL DEFAULT '',
+        trigger_json    TEXT NOT NULL DEFAULT '{}',
+        state           TEXT NOT NULL,
+        resolved_at     TEXT,
+        resolved_reason TEXT NOT NULL DEFAULT '',
+        resolved_by     TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_freezes_state ON freezes(state)",
+)
+
 #: Sequential schema migrations, applied in order for any version gap.
 #:
 #: Append a new ``(version, statements)`` entry; never edit a shipped one. Each
@@ -241,6 +270,7 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (3, _MIGRATION_3),
     (4, _MIGRATION_4),
     (5, _MIGRATION_5),
+    (6, _MIGRATION_6),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -903,6 +933,113 @@ class ResidentStore:
             }
             for row in self.conn.execute(sql, tuple(params))
         ]
+
+    # --- budget counters and freezes ----------------------------------------
+    #
+    # Counters are derived by counting append-only increment rows rather than
+    # kept as a mutable total, and every increment names the event that caused
+    # it. A limit that was reached can therefore always be explained.
+
+    def record_budget_increment(
+        self, counter: str, window: str, event_id: str, candidate_id: str | None = None
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO budget_increments (counter, window, event_id, candidate_id, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (counter, window, event_id, candidate_id, utcnow()),
+            )
+
+    def budget_snapshot(self, window: str) -> dict[str, int]:
+        """All counters for one window, read in a single pass.
+
+        Taken once per gate evaluation so every veto sees the same numbers.
+        """
+
+        rows = self.conn.execute(
+            "SELECT counter, COUNT(*) AS n FROM budget_increments WHERE window = ? GROUP BY counter",
+            (window,),
+        )
+        return {row["counter"]: int(row["n"]) for row in rows}
+
+    def list_budget_increments(
+        self, window: str | None = None, counter: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM budget_increments"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if window is not None:
+            clauses.append("window = ?")
+            params.append(window)
+        if counter is not None:
+            clauses.append("counter = ?")
+            params.append(counter)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY seq DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return [dict(row) for row in self.conn.execute(sql, tuple(params))]
+
+    def insert_freeze(
+        self, freeze_id: str, reason: str, actor: str, trigger: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO freezes (freeze_id, created_at, reason, actor, trigger_json, state)
+                VALUES (?, ?, ?, ?, ?, 'active')
+                """,
+                (
+                    freeze_id,
+                    utcnow(),
+                    reason,
+                    actor,
+                    json.dumps(dict(trigger or {}), ensure_ascii=False),
+                ),
+            )
+        return self.get_freeze(freeze_id) or {}
+
+    def resolve_freeze(self, freeze_id: str, reason: str, actor: str) -> int:
+        """Mark an active freeze resolved. Returns rows changed (0 if not active).
+
+        The row is never deleted: an unfreeze resolves the record, it does not
+        erase that a freeze happened.
+        """
+
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE freezes SET state = 'resolved', resolved_at = ?,
+                                   resolved_reason = ?, resolved_by = ?
+                WHERE freeze_id = ? AND state = 'active'
+                """,
+                (utcnow(), reason, actor, freeze_id),
+            )
+            return cursor.rowcount
+
+    def get_freeze(self, freeze_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM freezes WHERE freeze_id = ?", (freeze_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def active_freeze(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM freezes WHERE state = 'active' ORDER BY seq ASC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_freezes(self, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM freezes ORDER BY seq DESC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        return [dict(row) for row in self.conn.execute(sql, params)]
 
     # --- events ------------------------------------------------------------
 
