@@ -1,9 +1,10 @@
 """Durable state for the resident loop.
 
 This module is the *only* place in ``resident/`` that touches sqlite or the
-filesystem. Everything else asks the store. That keeps two invariants easy to
+filesystem. Everything else asks the store. That keeps three invariants easy to
 audit in one file: artifacts are never overwritten and always verified on read,
-and the champion pointer is only ever replaced atomically.
+the champion pointer is only ever replaced atomically, and a missing public
+evaluation snapshot fails closed instead of degrading into some other source.
 
 Layout under the state directory::
 
@@ -11,6 +12,7 @@ Layout under the state directory::
     ├── state.db                       sqlite (WAL) operational metadata
     ├── artifacts/<sha256>/policy.py   immutable, content-addressed
     ├── artifacts/<sha256>/manifest.json
+    ├── eval/public/public_cases.jsonl public-only evaluation snapshot
     └── state/champion.json            atomically replaced pointer
 
 Metadata is mutable and queryable; policy bodies are immutable files named by
@@ -183,6 +185,8 @@ SCHEMA_VERSION = MIGRATIONS[-1][0]
 #: Config key binding a state directory to one environment. See ``reflect.py``:
 #: candidates from different task domains must not share an archive.
 CONFIG_ENVIRONMENT = "environment"
+
+PUBLIC_SNAPSHOT_FILENAME = "public_cases.jsonl"
 
 
 def utcnow() -> str:
@@ -442,6 +446,82 @@ class ResidentStore:
                 f"Artifact {artifact_hash} failed integrity check: bytes hash to {actual}. "
                 "The immutable artifact store was modified out of band; refusing to load it."
             )
+
+    # --- public evaluation snapshot ----------------------------------------
+
+    @property
+    def public_snapshot_path(self) -> Path:
+        return self.public_eval_dir / PUBLIC_SNAPSHOT_FILENAME
+
+    def has_public_snapshot(self) -> bool:
+        return self.public_snapshot_path.is_file()
+
+    def write_public_snapshot(self, records: list[dict[str, Any]]) -> Path:
+        """Persist the public evaluation snapshot as JSONL, atomically.
+
+        Records are opaque here: which cases are public is an environment
+        decision that stays in ``reflect.py``. What lives in this module is the
+        durability — one line per record, fsynced, renamed into place, and the
+        containing directory fsynced so the new entry survives a crash.
+        """
+
+        if not records:
+            raise ResidentError("Refusing to write an empty public snapshot.")
+        payload = (
+            "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records)
+            + "\n"
+        ).encode("utf-8")
+
+        path = self.public_snapshot_path
+        tmp_path = self.public_eval_dir / f".{PUBLIC_SNAPSHOT_FILENAME}.{new_id()}.tmp"
+        try:
+            _write_bytes_durably(tmp_path, payload)
+            os.replace(tmp_path, path)
+            _fsync_dir(self.public_eval_dir)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        return path
+
+    def read_public_snapshot(self) -> list[dict[str, Any]]:
+        """Read the snapshot. Fails closed when it is absent or malformed.
+
+        A missing snapshot must never degrade into reading a source dataset
+        somewhere else, so this raises rather than returning an empty list.
+        """
+
+        path = self.public_snapshot_path
+        if not path.is_file():
+            raise ResidentNotInitializedError(
+                f"No public evaluation snapshot at {path}. Run "
+                "`python3 -m godel_agent_prototype.resident init` first."
+            )
+        records: list[dict[str, Any]] = []
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ResidentError(f"Public evaluation snapshot {path} is unreadable: {exc}") from exc
+        for line_number, raw in enumerate(text.splitlines(), start=1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ResidentError(
+                    f"Public evaluation snapshot {path}:{line_number} is not valid JSON: {exc}"
+                ) from exc
+            if not isinstance(record, dict):
+                raise ResidentError(
+                    f"Public evaluation snapshot {path}:{line_number} is not an object."
+                )
+            records.append(record)
+        if not records:
+            raise ResidentNotInitializedError(
+                f"Public evaluation snapshot {path} is empty. Run "
+                "`python3 -m godel_agent_prototype.resident init` first."
+            )
+        return records
 
     # --- experiences -------------------------------------------------------
 

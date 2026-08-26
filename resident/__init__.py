@@ -75,6 +75,7 @@ from .store import (
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
     MIGRATIONS,
+    PUBLIC_SNAPSHOT_FILENAME,
     SCHEMA_VERSION,
     ResidentError,
     ResidentNotInitializedError,
@@ -87,6 +88,7 @@ from .store import (
 )
 
 __all__ = [
+    "PUBLIC_SNAPSHOT_FILENAME",
     "SCHEMA_VERSION",
     "MIGRATIONS",
     "EnvironmentMismatchError",

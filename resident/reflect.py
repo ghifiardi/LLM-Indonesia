@@ -28,9 +28,7 @@ evaluation exception, malformed evaluation result, and plain non-improvement.
 
 from __future__ import annotations
 
-import json
 import math
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -75,6 +73,7 @@ from .mutators import (
 )
 from .store import (
     CONFIG_ENVIRONMENT,
+    PUBLIC_SNAPSHOT_FILENAME,
     EnvironmentMismatchError,
     ResidentNotInitializedError,
     ResidentStore,
@@ -117,48 +116,45 @@ class EnvironmentSpec:
     build_mutator: Callable[[], Mutator]
 
 
-PUBLIC_CASES_FILENAME = "public_cases.jsonl"
+#: Re-exported for callers that locate the snapshot by name.
+PUBLIC_CASES_FILENAME = PUBLIC_SNAPSHOT_FILENAME
+
+
+def _case_to_record(case: EvalCase) -> dict[str, Any]:
+    return {
+        "query": case.query,
+        "required_terms": list(case.required_terms),
+        "forbidden_terms": list(case.forbidden_terms),
+        "weight": case.weight,
+        "category": case.category,
+        "reference_answer": case.reference_answer,
+        "baseline_outputs": dict(case.baseline_outputs),
+    }
+
+
+def _record_to_case(record: dict[str, Any]) -> EvalCase:
+    return EvalCase(
+        query=record["query"],
+        required_terms=tuple(record.get("required_terms", ())),
+        forbidden_terms=tuple(record.get("forbidden_terms", ())),
+        weight=float(record.get("weight", 1.0)),
+        category=record.get("category", "general"),
+        reference_answer=record.get("reference_answer", ""),
+        baseline_outputs=dict(record.get("baseline_outputs") or {}),
+    )
 
 
 def write_public_cases(store: ResidentStore, cases: list[EvalCase]) -> Path:
-    """Persist public eval cases into the state directory, atomically."""
+    """Persist public eval cases. Which cases are public is decided here; the
+    bytes, the atomic replacement, and the fsync belong to the store."""
 
-    path = store.public_eval_dir / PUBLIC_CASES_FILENAME
-    lines = [
-        json.dumps(
-            {
-                "query": case.query,
-                "required_terms": list(case.required_terms),
-                "forbidden_terms": list(case.forbidden_terms),
-                "weight": case.weight,
-                "category": case.category,
-                "reference_answer": case.reference_answer,
-                "baseline_outputs": dict(case.baseline_outputs),
-            },
-            ensure_ascii=False,
-        )
-        for case in cases
-    ]
-    payload = ("\n".join(lines) + "\n").encode("utf-8")
-    tmp_path = store.public_eval_dir / f".{PUBLIC_CASES_FILENAME}.tmp"
-    with open(tmp_path, "wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
-    return path
+    return store.write_public_snapshot([_case_to_record(case) for case in cases])
 
 
 def load_public_cases(store: ResidentStore) -> list[EvalCase]:
     """Load the public-only snapshot. Never touches the source eval set."""
 
-    try:
-        return load_cases_from_dir(store.public_eval_dir)
-    except (ValueError, OSError) as exc:
-        raise ResidentNotInitializedError(
-            f"No public evaluation snapshot in {store.public_eval_dir}: {exc}. Run "
-            "`python3 -m godel_agent_prototype.resident init` first."
-        ) from exc
+    return [_record_to_case(record) for record in store.read_public_snapshot()]
 
 
 def _prepare_id_support(store: ResidentStore) -> None:

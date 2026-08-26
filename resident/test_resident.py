@@ -57,6 +57,8 @@ from .store import (
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
     MIGRATIONS,
+    PUBLIC_SNAPSHOT_FILENAME,
+    ResidentError,
     SCHEMA_VERSION,
     PROMOTION_ABANDONED,
     PROMOTION_FINALIZED,
@@ -649,6 +651,42 @@ def test_migrations_apply_in_order_and_are_not_reapplied() -> None:
             raise AssertionError("opened a state directory from a newer build")
 
 
+def test_public_snapshot_storage_round_trips_and_fails_closed() -> None:
+    with temp_state_dir() as state_dir:
+        with opened(state_dir) as store:
+            records = [{"query": "a", "required_terms": ["x"]}, {"query": "b"}]
+            path = store.write_public_snapshot(records)
+            assert path == store.public_snapshot_path
+            assert store.has_public_snapshot()
+            assert store.read_public_snapshot() == records
+
+            try:
+                store.write_public_snapshot([])
+            except ResidentError as exc:
+                assert "empty" in str(exc)
+            else:
+                raise AssertionError("wrote an empty snapshot")
+
+            # Malformed content must fail closed, never degrade to "no cases".
+            path.write_text("{not json}\n", encoding="utf-8")
+            try:
+                store.read_public_snapshot()
+            except ResidentError as exc:
+                assert "not valid JSON" in str(exc)
+            else:
+                raise AssertionError("parsed a malformed snapshot")
+
+            path.unlink()
+            assert not store.has_public_snapshot()
+            try:
+                store.read_public_snapshot()
+            except ResidentNotInitializedError as exc:
+                assert PUBLIC_SNAPSHOT_FILENAME in str(exc)
+            else:
+                raise AssertionError("missing snapshot did not fail closed")
+
+
+
 # --- environment binding ----------------------------------------------------
 
 
@@ -770,6 +808,7 @@ def test_promotion_refuses_rejected_candidate_with_valid_artifact() -> None:
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
+    test_public_snapshot_storage_round_trips_and_fails_closed,
     test_state_dir_resolution_prefers_explicit_then_env_then_default,
     test_experiences_survive_reopen,
     test_identical_code_shares_one_artifact_across_distinct_attempts,

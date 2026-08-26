@@ -41,6 +41,10 @@ Resolved in this order:
 └── state/champion.json               atomically replaced pointer
 ```
 
+All of these are owned by `store.py`, which is the only module in `resident/`
+that touches sqlite or the filesystem. `reflect.py` decides *which* cases are
+public; the store owns the bytes, the atomic replacement, and the fsyncs.
+
 ### Schema migrations
 
 `store.MIGRATIONS` is an ordered list of `(version, statements)`. Every
