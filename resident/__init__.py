@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from .anchors import (
     ANCHORS_DIR_ENV_VAR,
+    ServingConfig,
+    load_all_anchors,
     BudgetLimits,
     DatasetIdentity,
     GateThresholds,
@@ -31,7 +33,7 @@ from .anchors import (
     load_anchor_split,
     resolve_anchors_dir,
 )
-from . import budget, states
+from . import budget, serve, spool, states
 from .anchors import (
     ANCHORS_DIR_ENV_VAR as _ANCHORS_ENV,
 )
@@ -150,6 +152,10 @@ from .store import (
 )
 
 __all__ = [
+    "load_all_anchors",
+    "ServingConfig",
+    "spool",
+    "serve",
     "rollback_target_ids",
     "rollback",
     "best_safe_ancestor",

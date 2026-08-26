@@ -32,6 +32,8 @@ from .anchors import ThresholdError, load_thresholds, resolve_anchors_dir
 from .freeze import FrozenError, UnfreezeError, active_freeze, freeze, unfreeze
 from .gate import GateError, evaluate_gate
 from .rollback import RollbackError, assess_ancestors, rollback
+from . import serve as serve_module
+from . import spool as spool_module
 from .audit import AuditError, run_audit
 from ..code_llm_mutator import CodeLLMMutationProvider
 from ..llm_mutator import LLMMutationProvider, OpenAICompatibleTransport
@@ -238,6 +240,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollback_parser.add_argument(
         "--dry-run", action="store_true", help="Show which ancestors qualify and stop."
+    )
+
+    serve_parser = subparsers.add_parser(
+        "serve", help="Answer queries from the champion. Read-only; modifies nothing."
+    )
+    serve_parser.add_argument("--anchors-dir", default=None)
+
+    ask_parser = subparsers.add_parser("ask", help="Send one query to a running `serve`.")
+    ask_parser.add_argument("query")
+    ask_parser.add_argument("--timeout", type=float, default=60.0)
+
+    subparsers.add_parser(
+        "ingest", help="Drain the serving spool into the database."
     )
 
     return parser
@@ -750,6 +765,61 @@ def _cmd_rollback(store: ResidentStore, args: argparse.Namespace, emit: Any) -> 
     return EXIT_OK
 
 
+def _cmd_serve(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    # The command-level store is closed first: the serving process opens its
+    # own read-only connection and must not inherit a writable one.
+    state_dir = store.state_dir
+    store.close()
+    try:
+        socket_path = serve_module.prepare_socket_path(state_dir)
+        context = serve_module.build_context(state_dir, anchors_dir=args.anchors_dir)
+    except (serve_module.ServeError, ResidentError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    print(f"serving {state_dir} on {socket_path}", file=sys.stderr)
+    print("read-only: this process cannot promote, freeze, or modify state.", file=sys.stderr)
+    try:
+        serve_module.serve_forever(context, socket_path)
+    except KeyboardInterrupt:
+        pass
+    except serve_module.ServeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def _cmd_ask(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    socket_path = serve_module.runtime_dir_for(store.state_dir) / "serve.sock"
+    if not socket_path.exists():
+        print(f"error: no serving process at {socket_path}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        response = serve_module.ask(socket_path, args.query, timeout=args.timeout)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    lines = [response.get("answer") or f"error: {response.get('error')}"]
+    if response.get("fallback_used"):
+        lines.append("")
+        lines.append("(safe fallback: the policy output was withheld)")
+    emit(response, lines)
+    return EXIT_OK if response.get("ok") else EXIT_ERROR
+
+
+def _cmd_ingest(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    report = spool_module.ingest(store)
+    emit(
+        report.to_dict(),
+        [
+            f"ingested {report.inserted} record(s) from {report.files} spool file(s)",
+            f"  duplicates   {report.duplicates}",
+            f"  quarantined  {report.quarantined}",
+        ],
+    )
+    return EXIT_OK
+
+
 HANDLERS = {
     "init": _cmd_init,
     "record": _cmd_record,
@@ -763,6 +833,9 @@ HANDLERS = {
     "freeze": _cmd_freeze,
     "unfreeze": _cmd_unfreeze,
     "rollback": _cmd_rollback,
+    "serve": _cmd_serve,
+    "ask": _cmd_ask,
+    "ingest": _cmd_ingest,
 }
 
 

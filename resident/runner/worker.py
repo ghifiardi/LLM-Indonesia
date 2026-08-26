@@ -35,9 +35,12 @@ from .limits import RunnerLimits, profile_for
 from .protocol import (
     EXIT_OK,
     KIND_EXECUTE_BATCH,
+    KIND_EXECUTE_ONE,
     MAX_BATCH_OUTPUT_CHARS,
     build_batch_response,
+    build_execute_one_response,
     parse_execute_batch_request,
+    parse_execute_one_request,
     peek_kind,
     EXIT_OVERSIZED_REQUEST,
     EXIT_UNREADABLE_REQUEST,
@@ -136,6 +139,52 @@ def _run_batch(request: dict[str, Any]) -> int:
     return _emit(build_batch_response(ok=True, outputs=outputs))
 
 
+def _run_one(request: dict[str, Any]) -> int:
+    """Answer one served query, reporting the outcome structurally."""
+
+    from ..store import policy_digest
+
+    policy_source = request["policy_source"]
+    expected_hash = request["artifact_hash"]
+    if policy_digest(policy_source) != expected_hash:
+        return _emit(
+            build_execute_one_response(
+                ok=False, status=STATUS_VALIDATION
+            )
+        )
+
+    limits = RunnerLimits.from_dict(request.get("limits") or {})
+    try:
+        policy = SafePolicyLoader().load(policy_source)
+    except PolicyValidationError as exc:
+        message = str(exc)
+        status = STATUS_SYNTAX if message.startswith("Syntax error") else STATUS_VALIDATION
+        return _emit(build_execute_one_response(ok=False, status=status))
+
+    guarded = cap_policy_output(policy, limits.max_output_chars)
+    try:
+        result = guarded(request["query"], request.get("kb") or {})
+    except MemoryError:
+        return _emit(
+            build_execute_one_response(
+                ok=False, status=STATUS_RESOURCE_LIMIT, raised=True,
+                exception_type="MemoryError",
+            )
+        )
+    except Exception as exc:
+        # Only the type crosses. The message can quote the query.
+        return _emit(
+            build_execute_one_response(
+                ok=False, status=STATUS_RUNTIME, raised=True,
+                exception_type=type(exc).__name__,
+            )
+        )
+
+    if not isinstance(result, str):
+        result = str(result)[: limits.max_output_chars]
+    return _emit(build_execute_one_response(ok=True, output=result))
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
@@ -148,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
         kind = peek_kind(raw)
         if kind == KIND_EXECUTE_BATCH:
             return _run_batch(parse_execute_batch_request(raw))
+        if kind == KIND_EXECUTE_ONE:
+            return _run_one(parse_execute_one_request(raw))
         request = parse_evaluate_request(raw)
     except ProtocolError as exc:
         # A malformed request cannot be answered in kind; the parent classifies

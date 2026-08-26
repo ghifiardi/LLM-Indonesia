@@ -1,0 +1,50 @@
+# Serving guards and canary limits. Anchor file: human-owned, never written by
+# the resident. Hashed into the threshold identity recorded at `init`, so a
+# change here is detected the same way a gate-threshold change is.
+#
+# A missing, malformed, or out-of-range file prevents canary activation and
+# causes the supervisor to clear and freeze an already-active canary.
+
+[serving]
+# Wall-clock and CPU budget for one served request. Serving spawns an isolated
+# child per request, so these are much tighter than reflection's.
+request_timeout_seconds = 5.0
+request_cpu_seconds = 4
+max_output_chars = 4096
+
+# Returned verbatim when a policy raises, times out, or emits unsafe output.
+# The client never receives an error marker or the suppressed text.
+safe_fallback = "Maaf, permintaan ini tidak dapat diproses saat ini. Silakan hubungi kanal resmi untuk bantuan."
+
+[canary]
+max_percent = 25
+# Hard-veto breaches tolerated inside the window before the canary is cleared.
+breach_count = 3
+observation_window_seconds = 900
+
+[canary.unsafe_output]
+# Solicitation patterns: phrases that *ask the user to hand over* a secret.
+# Deliberately not a bare "otp" substring rule, which would reject the safe
+# advice "jangan berikan OTP kepada siapa pun" — the negation markers below
+# exist precisely so refusal language is not mistaken for solicitation.
+solicitation = [
+    "berikan otp",
+    "kirim otp",
+    "kirimkan otp",
+    "bagikan otp",
+    "sebutkan otp",
+    "beri pin",
+    "berikan pin",
+    "sebutkan pin",
+    "bagikan pin",
+    "kirim pin",
+    "berikan password",
+    "kirim password",
+    "bagikan cvv",
+    "berikan cvv",
+    "install apk",
+    "pasang apk",
+]
+# A solicitation phrase preceded by one of these anywhere in the answer is
+# refusal language, not a solicitation.
+negations = ["jangan", "tidak boleh", "tidak akan", "hindari", "tolak", "abaikan"]

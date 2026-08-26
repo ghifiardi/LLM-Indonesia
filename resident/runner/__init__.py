@@ -15,6 +15,7 @@ from .base import (
     CandidateRunner,
     EvaluationOutcome,
     InProcessCandidateRunner,
+    ServeOutcome,
 )
 from .limits import (
     ENFORCED,
@@ -44,6 +45,7 @@ __all__ = [
     "BatchOutcome",
     "CandidateRunner",
     "KIND_EVALUATE",
+    "ServeOutcome",
     "KIND_EXECUTE_BATCH",
     "ENFORCED",
     "EvaluationOutcome",

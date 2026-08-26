@@ -26,7 +26,12 @@ KIND_EVALUATE = "evaluate"
 #: required term, or any rubric, and its outputs never travel past the
 #: controller that spawned it.
 KIND_EXECUTE_BATCH = "execute_batch"
-KNOWN_KINDS = frozenset({KIND_EVALUATE, KIND_EXECUTE_BATCH})
+#: One served request. Distinct from ``evaluate`` because serving needs a
+#: *structured* outcome — whether the policy raised, timed out, or returned —
+#: rather than a score. Inferring "it raised" from a marker inside the output
+#: string would make the guard depend on text a candidate controls.
+KIND_EXECUTE_ONE = "execute_one"
+KNOWN_KINDS = frozenset({KIND_EVALUATE, KIND_EXECUTE_BATCH, KIND_EXECUTE_ONE})
 
 #: Caps for batch execution.
 MAX_BATCH_INPUTS = 2000
@@ -126,6 +131,66 @@ def build_batch_response(
     }
 
 
+def build_execute_one_request(
+    policy_source: str,
+    artifact_hash: str,
+    query: Any,
+    kb: dict[str, Any],
+    limits: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "kind": KIND_EXECUTE_ONE,
+        "policy_source": policy_source,
+        "artifact_hash": artifact_hash,
+        "query": query,
+        "kb": kb,
+        "limits": limits,
+    }
+
+
+def parse_execute_one_request(raw: bytes) -> dict[str, Any]:
+    message = _decode_message(raw, MAX_REQUEST_BYTES, "request")
+    if message.get("kind") != KIND_EXECUTE_ONE:
+        raise ProtocolError(f"expected {KIND_EXECUTE_ONE!r}, got {message.get('kind')!r}")
+    if not isinstance(message.get("policy_source"), str):
+        raise ProtocolError("policy_source must be a string")
+    if not isinstance(message.get("artifact_hash"), str):
+        raise ProtocolError("artifact_hash must be a string")
+    if "query" not in message:
+        raise ProtocolError("query is required")
+    if not isinstance(message.get("kb", {}), dict):
+        raise ProtocolError("kb must be an object")
+    return message
+
+
+def build_execute_one_response(
+    ok: bool,
+    output: str = "",
+    status: str = "",
+    raised: bool = False,
+    exception_type: str = "",
+) -> dict[str, Any]:
+    """Structured serving outcome.
+
+    ``output`` is necessarily free text — it is the answer. Everything the
+    guard decides on is structured: whether the policy raised, and if so only
+    its exception *type*, never its message. An exception message can quote the
+    query or internal state, and it must not reach a client or an ordinary
+    request record.
+    """
+
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "kind": KIND_EXECUTE_ONE,
+        "ok": ok,
+        "status": status,
+        "raised": raised,
+        "exception_type": exception_type[:80],
+        "output": output,
+    }
+
+
 def encode(message: dict[str, Any]) -> bytes:
     return json.dumps(message, ensure_ascii=False).encode("utf-8")
 
@@ -203,6 +268,14 @@ def parse_response(raw: bytes, expected_kind: str = KIND_EVALUATE) -> dict[str, 
         raise ProtocolError(
             f"expected a {expected_kind!r} response, got {message.get('kind')!r}"
         )
+    if expected_kind == KIND_EXECUTE_ONE:
+        if not isinstance(message.get("ok"), bool):
+            raise ProtocolError("response.ok must be a boolean")
+        if not isinstance(message.get("output", ""), str):
+            raise ProtocolError("response.output must be a string")
+        if not isinstance(message.get("raised", False), bool):
+            raise ProtocolError("response.raised must be a boolean")
+        return message
     if expected_kind == KIND_EXECUTE_BATCH:
         if not isinstance(message.get("ok"), bool):
             raise ProtocolError("response.ok must be a boolean")

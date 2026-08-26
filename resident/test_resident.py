@@ -26,8 +26,10 @@ from ..godel_agent import Action, EvaluationResult, SelfState
 from ..dataset_env import load_cases_from_dir, split_cases_for_holdout
 from . import audit as audit_module
 from . import budget as budget_module
+from . import serve as serve_module
+from . import spool as spool_module
 from . import states
-from .anchors import load_thresholds
+from .anchors import ServingConfig, load_thresholds
 from .freeze import (
     FrozenError,
     UnfreezeError,
@@ -117,6 +119,7 @@ from .reflect import (
 )
 from .store import (
     ArtifactIntegrityError,
+    utcnow,
     CONFIG_DATASET_IDENTITY,
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
@@ -1199,6 +1202,38 @@ def _write_threshold_anchors(directory: Path, **gate_overrides: Any) -> None:
         "max_promotions_per_day = 20\n"
         "max_audits_per_day = 100\n"
         "max_consecutive_gate_failures = 25\n",
+        encoding="utf-8",
+    )
+    _write_serving_anchor(directory)
+
+
+SAFE_FALLBACK = "Maaf, permintaan ini tidak dapat diproses saat ini."
+
+
+def _write_serving_anchor(directory: Path, **overrides: Any) -> None:
+    values = {
+        "request_timeout_seconds": 10.0,
+        "request_cpu_seconds": 8,
+        "max_output_chars": 4096,
+        "max_percent": 25,
+        "breach_count": 3,
+        "observation_window_seconds": 900,
+        "safe_fallback": SAFE_FALLBACK,
+    }
+    values.update(overrides)
+    (directory / "serving.toml").write_text(
+        "[serving]\n"
+        f"request_timeout_seconds = {values['request_timeout_seconds']!r}\n"
+        f"request_cpu_seconds = {values['request_cpu_seconds']!r}\n"
+        f"max_output_chars = {values['max_output_chars']!r}\n"
+        f"safe_fallback = {values['safe_fallback']!r}\n"
+        "\n[canary]\n"
+        f"max_percent = {values['max_percent']!r}\n"
+        f"breach_count = {values['breach_count']!r}\n"
+        f"observation_window_seconds = {values['observation_window_seconds']!r}\n"
+        "\n[canary.unsafe_output]\n"
+        'solicitation = ["berikan otp", "kirim pin", "install apk"]\n'
+        'negations = ["jangan", "tidak boleh", "hindari"]\n',
         encoding="utf-8",
     )
 
@@ -2517,6 +2552,326 @@ def test_no_automatic_promotion_path_exists_anywhere() -> None:
         assert "store.write_champion(" not in body, name
 
 
+# --- Phase 4A: the serving path ----------------------------------------------
+#
+# Positive controls throughout: a policy whose answer carries a sentinel, so a
+# routing or suppression test proves the right thing *happened* rather than only
+# that something was absent.
+
+SERVE_SENTINEL = "SERVE-OK-SENTINEL"
+SUPPRESSED_SENTINEL = "SUPPRESSED-MUST-NOT-APPEAR"
+
+SERVING_SAFE_POLICY = (
+    "\ndef solve(query, kb):\n"
+    f'    return "Jangan berikan OTP atau PIN. Hubungi kanal resmi. {SERVE_SENTINEL}"\n'
+)
+SERVING_UNSAFE_POLICY = (
+    "\ndef solve(query, kb):\n"
+    f'    return "Silakan berikan OTP Anda sekarang. {SUPPRESSED_SENTINEL}"\n'
+)
+# The sandbox exposes no exception classes, so a candidate cannot `raise
+# ValueError(...)` — that is a NameError. A missing key is the natural way to
+# get an exception whose *message* contains attacker-chosen text, which is
+# exactly what must not escape.
+SERVING_RAISING_POLICY = (
+    "\ndef solve(query, kb):\n"
+    f'    return {{}}["{SUPPRESSED_SENTINEL}"]\n'
+)
+
+
+@contextmanager
+def serving_state(policy: str = SERVING_SAFE_POLICY) -> Iterator[tuple[Path, Path, Any]]:
+    """A state directory with `policy` as champion, plus a serving context."""
+
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        state_dir = root / "state"
+        with opened(state_dir) as store:
+            initialize(store, env_name="id_support", seed_policy=policy,
+                       anchors_dir=str(anchors))
+        context = serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        try:
+            yield root, anchors, context
+        finally:
+            context.spool.close()
+            context.store.close()
+
+
+def test_serve_returns_the_champion_answer() -> None:
+    with serving_state() as (root, anchors, context):
+        response = serve_module.answer(context, "kartu saya hilang")
+        assert response["ok"] and response["route"] == serve_module.ROUTE_CHAMPION
+        assert response["fallback_used"] is False
+        # Positive control: the champion's own text really came back.
+        assert SERVE_SENTINEL in response["answer"]
+
+
+def test_unsafe_champion_output_is_suppressed_and_never_reaches_the_client() -> None:
+    with serving_state(SERVING_UNSAFE_POLICY) as (root, anchors, context):
+        response = serve_module.answer(context, "kartu saya hilang")
+
+        assert response["route"] == serve_module.ROUTE_FALLBACK
+        assert response["fallback_used"] is True
+        assert response["answer"] == context.config.safe_fallback
+        assert SUPPRESSED_SENTINEL not in json.dumps(response)
+        assert "<ERROR" not in response["answer"]
+
+        context.spool.close()
+        with opened(root / "state") as store:
+            spool_module.ingest(store)
+            veto = store.list_serving_vetoes()[0]
+            assert veto["kind"] == spool_module.KIND_CHAMPION_VETO
+            assert veto["veto"] == serve_module.VETO_UNSAFE_OUTPUT
+            # The observation records that it happened, not what was said.
+            assert SUPPRESSED_SENTINEL not in json.dumps(veto)
+            served = store.list_served_requests()[0]
+            assert SUPPRESSED_SENTINEL not in json.dumps(served)
+            assert served["fallback_used"] == 1
+
+
+def test_raising_champion_is_suppressed_with_only_its_exception_type_kept() -> None:
+    with serving_state(SERVING_RAISING_POLICY) as (root, anchors, context):
+        response = serve_module.answer(context, "kartu hilang")
+        assert response["fallback_used"] is True
+        assert response["answer"] == context.config.safe_fallback
+
+        context.spool.close()
+        with opened(root / "state") as store:
+            spool_module.ingest(store)
+            veto = store.list_serving_vetoes()[0]
+            assert veto["veto"] == serve_module.VETO_RAISED
+            detail = json.loads(veto["detail_json"])
+            # The type crosses; the message, which quoted the sentinel, does not.
+            assert detail["exception_type"] == "KeyError"
+            assert SUPPRESSED_SENTINEL not in json.dumps(veto)
+
+
+def test_output_guard_is_negation_aware() -> None:
+    config = ServingConfig(
+        request_timeout_seconds=5.0,
+        request_cpu_seconds=4,
+        max_output_chars=4096,
+        safe_fallback="fallback",
+        canary_max_percent=25,
+        canary_breach_count=3,
+        canary_observation_window_seconds=900,
+        solicitation_patterns=("berikan otp", "kirim pin"),
+        negation_markers=("jangan", "hindari"),
+    )
+    # Solicitation: caught.
+    assert serve_module.unsafe_output("Silakan berikan OTP Anda", config) == "berikan otp"
+    assert serve_module.unsafe_output("Mohon KIRIM PIN sekarang", config) == "kirim pin"
+    # Refusal language mentioning the same words: allowed. A bare substring rule
+    # would reject the most useful thing the assistant can say.
+    assert serve_module.unsafe_output("Jangan berikan OTP kepada siapa pun", config) == ""
+    assert serve_module.unsafe_output("Hindari kirim pin ke nomor asing", config) == ""
+    assert serve_module.unsafe_output("Hubungi kanal resmi bank", config) == ""
+
+
+def test_serve_cannot_write_to_the_database_or_reach_a_mutation_api() -> None:
+    import sqlite3
+
+    with serving_state() as (root, anchors, context):
+        # Enforced by the driver, not by convention.
+        try:
+            context.store.append_event("should_not_happen")
+        except sqlite3.OperationalError as exc:
+            assert "readonly" in str(exc)
+        else:
+            raise AssertionError("the serving store accepted a write")
+
+    source = (Path(__file__).resolve().parent / "serve.py").read_text(encoding="utf-8")
+    for forbidden in (
+        "from .reflect", "from .gate", "from .promote", "from .rollback",
+        "from .budget", "from .audit", "from .freeze",
+    ):
+        assert forbidden not in source, forbidden
+    assert "write_champion" not in source
+    assert "ResidentStore.open_readonly" in source
+
+
+def test_spool_ingestion_is_idempotent_across_a_replayed_file() -> None:
+    with serving_state() as (root, anchors, context):
+        for index in range(3):
+            serve_module.answer(context, f"pertanyaan {index}")
+        context.spool.close()
+
+        spool_dir = (root / "state") / "spool"
+        with opened(root / "state") as store:
+            first = spool_module.ingest(store)
+            assert first.inserted == 3 and first.duplicates == 0
+            assert store.count_served_requests() == 3
+            assert ExperienceLog(store).count() == 3
+
+            # Simulate a crash between committing rows and retiring the file.
+            consumed = spool_dir / "consumed"
+            for path in consumed.glob("*.jsonl"):
+                os.replace(path, spool_dir / path.name)
+
+            second = spool_module.ingest(store)
+            assert second.inserted == 0, "a replay must not insert anything new"
+            assert second.duplicates == 3
+            assert store.count_served_requests() == 3
+            assert ExperienceLog(store).count() == 3
+
+
+def test_malformed_spool_line_is_quarantined_without_blocking_the_rest() -> None:
+    with serving_state() as (root, anchors, context):
+        serve_module.answer(context, "pertama")
+        path = context.spool.path
+        context.spool.close()
+
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("this is not json\n")
+            handle.write(json.dumps({"kind": "nope", "record_id": "x",
+                                     "created_at": "t", "payload": {}}) + "\n")
+            handle.write(json.dumps({"kind": spool_module.KIND_SERVED_REQUEST,
+                                     "record_id": "later-record", "created_at": utcnow(),
+                                     "payload": {"query": "kedua", "answer": "jawaban",
+                                                 "actual_route": "champion"}}) + "\n")
+
+        with opened(root / "state") as store:
+            report = spool_module.ingest(store)
+            assert report.quarantined == 2
+            # The good record *after* the bad ones still landed.
+            assert report.inserted == 2
+            ids = {row["request_id"] for row in store.list_served_requests()}
+            assert "later-record" in ids
+
+        quarantine = ((root / "state") / "spool" / "quarantine")
+        assert list(quarantine.glob("*.bad")), "bad lines were not quarantined"
+
+
+def test_served_request_records_full_attribution() -> None:
+    with serving_state() as (root, anchors, context):
+        response = serve_module.answer(context, "kartu hilang")
+        context.spool.close()
+        with opened(root / "state") as store:
+            spool_module.ingest(store)
+            row = store.list_served_requests()[0]
+            champion = store.require_champion()
+
+        assert row["request_id"] == response["request_id"]
+        assert row["requested_route"] == serve_module.ROUTE_CHAMPION
+        assert row["actual_route"] == serve_module.ROUTE_CHAMPION
+        assert row["served_candidate_id"] == champion.candidate_id
+        assert row["served_artifact_hash"] == champion.artifact_hash
+        assert row["champion_candidate_id"] == champion.candidate_id
+        assert row["canary_candidate_id"] is None
+        assert row["fallback_used"] == 0
+        assert row["latency_ms"] >= 0
+        assert row["created_at"] and row["ingested_at"]
+
+
+def test_socket_path_is_short_private_and_owner_only() -> None:
+    with temp_state_dir() as root:
+        state_dir = root / "state"
+        state_dir.mkdir()
+        path = serve_module.prepare_socket_path(state_dir)
+        # AF_UNIX caps the path near 104 bytes on darwin, and this repository's
+        # own checkout path is longer than that, so the socket cannot live
+        # beside the state directory.
+        assert len(str(path).encode("utf-8")) <= 100
+        runtime = path.parent
+        assert runtime.stat().st_mode & 0o077 == 0, "runtime directory must be private"
+        assert str(state_dir) not in str(path)
+
+
+def test_stale_socket_is_removed_only_when_nothing_is_listening() -> None:
+    import socket as socket_module
+
+    with temp_state_dir() as root:
+        path = root / "stale.sock"
+        # A leftover socket with no listener: safe to remove.
+        dead = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+        dead.bind(str(path))
+        dead.close()
+        assert path.exists()
+        serve_module.clear_stale_socket(path)
+        assert not path.exists()
+
+        # A live listener: removing it would silently steal its traffic.
+        live = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+        live.bind(str(path))
+        live.listen(1)
+        try:
+            try:
+                serve_module.clear_stale_socket(path)
+            except serve_module.ServeError as exc:
+                assert "already listening" in str(exc)
+            else:
+                raise AssertionError("removed a socket that was in use")
+            assert path.exists()
+        finally:
+            live.close()
+            path.unlink(missing_ok=True)
+
+        # A symlink is refused outright rather than followed.
+        target = root / "target.sock"
+        target.write_text("", encoding="utf-8")
+        link = root / "link.sock"
+        link.symlink_to(target)
+        try:
+            serve_module.clear_stale_socket(link)
+        except serve_module.ServeError as exc:
+            assert "symlink" in str(exc)
+        else:
+            raise AssertionError("followed a symlinked socket path")
+
+
+def test_socket_rejects_oversized_and_malformed_frames() -> None:
+    import socket as socket_module
+    import threading as threading_module
+
+    with serving_state() as (root, anchors, context):
+        path = root / "s.sock"
+        stop = threading_module.Event()
+        ready = threading_module.Event()
+        thread = threading_module.Thread(
+            target=serve_module.serve_forever, args=(context, path, stop, ready), daemon=True
+        )
+        thread.start()
+        assert ready.wait(10), "server did not start"
+        try:
+            good = serve_module.ask(path, "kartu hilang")
+            assert SERVE_SENTINEL in good["answer"]
+
+            def raw(payload: bytes) -> dict[str, Any]:
+                """Send a raw frame. A refused oversized frame may break the
+                pipe before the response arrives — the server stops reading
+                rather than draining it, which is the point of the cap."""
+
+                client = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+                client.settimeout(20)
+                try:
+                    client.connect(str(path))
+                    try:
+                        client.sendall(payload)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return {"ok": False, "error": "refused mid-send"}
+                    chunks = []
+                    while True:
+                        chunk = client.recv(4096)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        if b"\n" in chunk:
+                            break
+                    return json.loads(b"".join(chunks).decode("utf-8").split("\n", 1)[0])
+                finally:
+                    client.close()
+
+            assert raw(b"not json at all\n")["ok"] is False
+            assert raw(json.dumps({"query": ""}).encode() + b"\n")["ok"] is False
+            oversized = json.dumps({"query": "x" * 60000}).encode() + b"\n"
+            assert raw(oversized)["ok"] is False
+            # A rejection must not echo the offending input back.
+            assert "x" * 100 not in json.dumps(raw(oversized))
+        finally:
+            stop.set()
+            thread.join(timeout=15)
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -2619,6 +2974,17 @@ TESTS = [
     test_frozen_state_vetoes_the_gate_as_well_as_blocking_promote,
     test_budget_veto_reports_the_same_snapshot_it_judged,
     test_no_automatic_promotion_path_exists_anywhere,
+    test_serve_returns_the_champion_answer,
+    test_unsafe_champion_output_is_suppressed_and_never_reaches_the_client,
+    test_raising_champion_is_suppressed_with_only_its_exception_type_kept,
+    test_output_guard_is_negation_aware,
+    test_serve_cannot_write_to_the_database_or_reach_a_mutation_api,
+    test_spool_ingestion_is_idempotent_across_a_replayed_file,
+    test_malformed_spool_line_is_quarantined_without_blocking_the_rest,
+    test_served_request_records_full_attribution,
+    test_socket_path_is_short_private_and_owner_only,
+    test_stale_socket_is_removed_only_when_nothing_is_listening,
+    test_socket_rejects_oversized_and_malformed_frames,
     test_existing_smoke_suite_still_passes,
 ]
 

@@ -34,6 +34,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,7 @@ from ..models import (
     STATUS_TIMEOUT,
     ScoreVector,
 )
-from .base import BatchOutcome, CandidateRunner, EvaluationOutcome
+from .base import BatchOutcome, CandidateRunner, EvaluationOutcome, ServeOutcome
 from .limits import (
     CORE_LIMIT_SUPPORTED,
     CPU_LIMIT_SUPPORTED,
@@ -60,7 +61,9 @@ from .protocol import (
     EXIT_OVERSIZED_REQUEST,
     KIND_EVALUATE,
     KIND_EXECUTE_BATCH,
+    KIND_EXECUTE_ONE,
     build_execute_batch_request,
+    build_execute_one_request,
     EXIT_UNREADABLE_REQUEST,
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
@@ -346,6 +349,70 @@ class SubprocessCandidateRunner(CandidateRunner):
                 isolation=profile, exit_code=raw.exit_code,
             )
         return BatchOutcome(outputs=outputs, isolation=profile, exit_code=raw.exit_code)
+
+    def execute_one(
+        self,
+        policy_source: str,
+        artifact_hash: str,
+        query: Any,
+        kb: dict[str, Any],
+        limits: RunnerLimits | None = None,
+    ) -> ServeOutcome:
+        """Answer one served query in an isolated child.
+
+        One child process per request. That costs a spawn — measured in the
+        latency this returns — and it is the price of a served answer being
+        produced under the same isolation as an evaluated one.
+        """
+
+        limits = limits or self.limits
+        profile = profile_for(limits)
+        request = build_execute_one_request(
+            policy_source=policy_source,
+            artifact_hash=artifact_hash,
+            query=query,
+            kb=kb,
+            limits=limits.to_dict(),
+        )
+        started = time.monotonic()
+        raw, failure = self._run(request, limits, profile)
+        elapsed = int((time.monotonic() - started) * 1000)
+
+        if failure is not None:
+            return ServeOutcome(
+                status=failure.status, isolation=failure.isolation, latency_ms=elapsed
+            )
+        assert raw is not None
+
+        problem = self._classify_process(raw, limits, profile)
+        if problem is not None:
+            return ServeOutcome(
+                status=problem.status,
+                timed_out=problem.status == STATUS_TIMEOUT,
+                isolation=problem.isolation,
+                latency_ms=elapsed,
+            )
+
+        try:
+            response = parse_response(raw.stdout, expected_kind=KIND_EXECUTE_ONE)
+        except ProtocolError:
+            return ServeOutcome(
+                status=STATUS_RUNNER_PROTOCOL, isolation=profile, latency_ms=elapsed
+            )
+        if not response["ok"]:
+            return ServeOutcome(
+                status=response.get("status") or STATUS_RUNNER_PROTOCOL,
+                raised=bool(response.get("raised")),
+                exception_type=str(response.get("exception_type", ""))[:80],
+                isolation=profile,
+                latency_ms=elapsed,
+            )
+        return ServeOutcome(
+            ok=True,
+            output=str(response.get("output", "")),
+            isolation=profile,
+            latency_ms=elapsed,
+        )
 
     # --- shared machinery --------------------------------------------------
 

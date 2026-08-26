@@ -67,6 +67,38 @@ class BatchOutcome:
         return self.outputs is not None and not self.status
 
 
+@dataclass(frozen=True)
+class ServeOutcome:
+    """Structured result of one served request.
+
+    ``output`` is free text because it is the answer. Every field the serving
+    guard decides on is structured, so the guard never has to infer "it raised"
+    from a marker inside a string the candidate controls.
+    """
+
+    ok: bool = False
+    output: str = ""
+    status: str = ""
+    timed_out: bool = False
+    raised: bool = False
+    exception_type: str = ""
+    latency_ms: int = 0
+    isolation: IsolationProfile = field(default_factory=IsolationProfile)
+
+    def to_record(self) -> dict[str, Any]:
+        """Everything but the output, for persisting alongside a request."""
+
+        return {
+            "ok": self.ok,
+            "status": self.status,
+            "timed_out": self.timed_out,
+            "raised": self.raised,
+            "exception_type": self.exception_type,
+            "latency_ms": self.latency_ms,
+            "isolation": self.isolation.to_dict(),
+        }
+
+
 class CandidateRunner(Protocol):
     """Executes one candidate against one public environment.
 

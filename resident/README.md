@@ -22,9 +22,62 @@ python3 -m godel_agent_prototype.resident promote <candidate-id> --reason "revie
 python3 -m godel_agent_prototype.resident freeze --reason "holdout drift"
 python3 -m godel_agent_prototype.resident unfreeze --reason "reviewed" --expected-event-id <id>
 python3 -m godel_agent_prototype.resident rollback --reason "reverting" [--dry-run]
+python3 -m godel_agent_prototype.resident serve
+python3 -m godel_agent_prototype.resident ask "kartu saya hilang"
+python3 -m godel_agent_prototype.resident ingest
 ```
 
 Exit code `3` means an action was blocked by a freeze.
+
+## Serving
+
+`serve` answers queries from the champion over a Unix domain socket — local by
+construction rather than by configuration — and **modifies nothing**:
+
+- it opens the state database with `mode=ro`, so a write fails at the driver
+  rather than by convention;
+- it reads the champion pointer and artifact as files, verified on read;
+- it appends anything that must be recorded to an append-only spool, which the
+  supervisor ingests later;
+- it imports `store`'s read surface, `eval_records`, `runner`, `spool` and
+  `anchors` — and none of `reflect`, `gate`, `promote`, `rollback`, `budget`,
+  `audit`, or `freeze`. A test asserts the import set rather than trusting the
+  comment.
+
+Each request runs in its own isolated child, the same as an evaluation. That
+costs a process spawn — around 130ms, reported as `latency_ms` — and it is the
+price of a served answer being produced under the same isolation as a scored
+one.
+
+### Nothing a policy produces reaches a client unguarded
+
+Every answer passes the output guard. If the policy raises, times out, or emits
+a solicitation pattern, the output is **discarded** — never returned, never
+recorded as text — and the fixed safe fallback from `serving.toml` is returned
+instead. Only the exception *type* is kept; an exception message can quote the
+query.
+
+Freezing self-modification while continuing to return an unsafe answer would
+not contain an incident. Withholding the answer is what contains it; the freeze
+stops it recurring.
+
+The unsafe-output rule is **negation-aware** on purpose. A bare "contains OTP"
+substring rule would reject *"jangan berikan OTP kepada siapa pun"* — the single
+most useful thing the assistant can say about an OTP — so a solicitation pattern
+only counts when no refusal marker appears in the answer.
+
+### The spool
+
+Serve appends; the supervisor ingests. Every record carries an id its writer
+generated and every insert is `INSERT OR IGNORE` on that id, so a crash between
+committing rows and retiring a spool file produces a duplicate *attempt* and no
+duplicate row. Files are retired last, deliberately: the failure that leaves a
+file un-retired is harmless, the one that retires it early loses data. A line
+that will not parse is quarantined rather than blocking the lines after it.
+
+Veto observations are fsynced; ordinary request records are only flushed. Losing
+the last few request records to a hard crash costs telemetry, but losing a veto
+observation would delay a canary being cleared.
 
 ## The promotion gate
 

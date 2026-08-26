@@ -258,6 +258,46 @@ _MIGRATION_6 = (
     "CREATE INDEX IF NOT EXISTS idx_freezes_state ON freezes(state)",
 )
 
+_MIGRATION_7 = (
+    """
+    CREATE TABLE IF NOT EXISTS served_requests (
+        seq                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id             TEXT NOT NULL UNIQUE,
+        created_at             TEXT NOT NULL,
+        ingested_at            TEXT NOT NULL,
+        requested_route        TEXT NOT NULL,
+        actual_route           TEXT NOT NULL,
+        served_candidate_id    TEXT,
+        served_artifact_hash   TEXT,
+        champion_candidate_id  TEXT,
+        canary_candidate_id    TEXT,
+        fallback_used          INTEGER NOT NULL DEFAULT 0,
+        routing_bucket         INTEGER,
+        latency_ms             INTEGER NOT NULL DEFAULT 0,
+        status                 TEXT NOT NULL DEFAULT '',
+        timed_out              INTEGER NOT NULL DEFAULT 0,
+        raised                 INTEGER NOT NULL DEFAULT 0,
+        exception_type         TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_served_route ON served_requests(actual_route)",
+    """
+    CREATE TABLE IF NOT EXISTS serving_vetoes (
+        seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_id TEXT NOT NULL UNIQUE,
+        created_at     TEXT NOT NULL,
+        ingested_at    TEXT NOT NULL,
+        kind           TEXT NOT NULL,
+        candidate_id   TEXT,
+        artifact_hash  TEXT,
+        request_id     TEXT,
+        veto           TEXT NOT NULL,
+        detail_json    TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_vetoes_kind ON serving_vetoes(kind, created_at)",
+)
+
 #: Sequential schema migrations, applied in order for any version gap.
 #:
 #: Append a new ``(version, statements)`` entry; never edit a shipped one. Each
@@ -271,6 +311,7 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (4, _MIGRATION_4),
     (5, _MIGRATION_5),
     (6, _MIGRATION_6),
+    (7, _MIGRATION_7),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -341,9 +382,26 @@ class ResidentStore:
         self.public_eval_dir = self.state_dir / "eval" / "public"
         self.db_path = self.state_dir / "state.db"
         self.champion_path = self.pointer_dir / "champion.json"
+        self.spool_dir = self.state_dir / "spool"
         self._conn: sqlite3.Connection | None = None
+        self._readonly = False
 
     # --- lifecycle ---------------------------------------------------------
+
+    @classmethod
+    def open_readonly(cls, state_dir: str | os.PathLike[str] | None = None) -> "ResidentStore":
+        """Open with a read-only SQLite connection and no migrations.
+
+        For the serving process, which must not be able to modify state even by
+        mistake. Writes raise ``sqlite3.OperationalError`` at the driver level,
+        not by convention — and the store creates no directories and runs no
+        recovery, so opening it cannot have a side effect either.
+        """
+
+        store = cls(state_dir)
+        store._readonly = True
+        store.connect()
+        return store
 
     @classmethod
     def open(cls, state_dir: str | os.PathLike[str] | None = None) -> "ResidentStore":
@@ -361,10 +419,21 @@ class ResidentStore:
     def connect(self) -> sqlite3.Connection:
         if self._conn is not None:
             return self._conn
+        if self._readonly:
+            if not self.db_path.is_file():
+                raise ResidentNotInitializedError(
+                    f"No state database at {self.db_path}. Run `init` first."
+                )
+            uri = f"file:{self.db_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            self._conn = conn
+            return conn
         try:
             self.artifacts_dir.mkdir(parents=True, exist_ok=True)
             self.pointer_dir.mkdir(parents=True, exist_ok=True)
             self.public_eval_dir.mkdir(parents=True, exist_ok=True)
+            self.spool_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise StateDirectoryError(
                 f"Cannot create state directory {self.state_dir}: {exc}. "
@@ -1040,6 +1109,99 @@ class ResidentStore:
             sql += " LIMIT ?"
             params = (int(limit),)
         return [dict(row) for row in self.conn.execute(sql, params)]
+
+    # --- served requests and serving vetoes ---------------------------------
+    #
+    # Written only by the supervisor, ingesting what the serving process
+    # spooled. Both keyed by an id the writer generated, so replaying a spool
+    # file after a crash is a harmless duplicate attempt rather than a
+    # duplicated record.
+
+    def insert_served_request(self, record: dict[str, Any]) -> bool:
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO served_requests
+                    (request_id, created_at, ingested_at, requested_route, actual_route,
+                     served_candidate_id, served_artifact_hash, champion_candidate_id,
+                     canary_candidate_id, fallback_used, routing_bucket, latency_ms,
+                     status, timed_out, raised, exception_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["request_id"],
+                    record["created_at"],
+                    utcnow(),
+                    record.get("requested_route", ""),
+                    record.get("actual_route", ""),
+                    record.get("served_candidate_id"),
+                    record.get("served_artifact_hash"),
+                    record.get("champion_candidate_id"),
+                    record.get("canary_candidate_id"),
+                    1 if record.get("fallback_used") else 0,
+                    record.get("routing_bucket"),
+                    int(record.get("latency_ms") or 0),
+                    record.get("status", ""),
+                    1 if record.get("timed_out") else 0,
+                    1 if record.get("raised") else 0,
+                    record.get("exception_type", ""),
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def insert_serving_veto(self, record: dict[str, Any]) -> bool:
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO serving_vetoes
+                    (observation_id, created_at, ingested_at, kind, candidate_id,
+                     artifact_hash, request_id, veto, detail_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["observation_id"],
+                    record["created_at"],
+                    utcnow(),
+                    record["kind"],
+                    record.get("candidate_id"),
+                    record.get("artifact_hash"),
+                    record.get("request_id"),
+                    record.get("veto", ""),
+                    json.dumps(dict(record.get("detail") or {}), ensure_ascii=False),
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def list_served_requests(self, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM served_requests ORDER BY seq DESC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        return [dict(row) for row in self.conn.execute(sql, params)]
+
+    def count_served_requests(self) -> int:
+        return int(self.conn.execute("SELECT COUNT(*) AS n FROM served_requests").fetchone()["n"])
+
+    def list_serving_vetoes(
+        self, kind: str | None = None, since: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM serving_vetoes"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY seq DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return [dict(row) for row in self.conn.execute(sql, tuple(params))]
 
     # --- events ------------------------------------------------------------
 

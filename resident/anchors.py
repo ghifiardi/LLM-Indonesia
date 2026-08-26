@@ -170,6 +170,7 @@ def load_anchor_split(
 
 GATE_THRESHOLDS_FILENAME = "gate.toml"
 BUDGET_LIMITS_FILENAME = "budget.toml"
+SERVING_CONFIG_FILENAME = "serving.toml"
 
 
 class ThresholdError(ValueError):
@@ -187,11 +188,13 @@ class ThresholdIdentity:
     gate_hash: str
     budget_hash: str
     values: dict[str, Any]
+    serving_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "gate_hash": self.gate_hash,
             "budget_hash": self.budget_hash,
+            "serving_hash": self.serving_hash,
             "values": dict(self.values),
         }
 
@@ -200,6 +203,7 @@ class ThresholdIdentity:
         return cls(
             gate_hash=payload["gate_hash"],
             budget_hash=payload["budget_hash"],
+            serving_hash=payload.get("serving_hash", ""),
             values=dict(payload.get("values") or {}),
         )
 
@@ -208,6 +212,8 @@ class ThresholdIdentity:
             return "gate_hash"
         if self.budget_hash != other.budget_hash:
             return "budget_hash"
+        if self.serving_hash != other.serving_hash:
+            return "serving_hash"
         if self.values != other.values:
             return "values"
         return None
@@ -234,6 +240,37 @@ class BudgetLimits:
     max_consecutive_gate_failures: int
 
 
+@dataclass(frozen=True)
+class ServingConfig:
+    """Serving guards and canary limits. Human-owned; see ``serving.toml``."""
+
+    request_timeout_seconds: float
+    request_cpu_seconds: int
+    max_output_chars: int
+    safe_fallback: str
+    canary_max_percent: int
+    canary_breach_count: int
+    canary_observation_window_seconds: int
+    solicitation_patterns: tuple[str, ...]
+    negation_markers: tuple[str, ...]
+
+    def to_values(self) -> dict[str, Any]:
+        return {
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "request_cpu_seconds": self.request_cpu_seconds,
+            "max_output_chars": self.max_output_chars,
+            "canary_max_percent": self.canary_max_percent,
+            "canary_breach_count": self.canary_breach_count,
+            "canary_observation_window_seconds": self.canary_observation_window_seconds,
+            "solicitation_patterns": list(self.solicitation_patterns),
+            "negation_markers": list(self.negation_markers),
+            # The fallback text is hashed with the file but not spread into
+            # values: it is prose, and prose does not belong in an identity
+            # comparison rendered to an operator.
+            "safe_fallback_length": len(self.safe_fallback),
+        }
+
+
 #: (key, type, low, high) for each threshold. Ranges are inclusive.
 _GATE_SPEC = (
     ("min_public_delta", float, 0.0, 1.0),
@@ -241,6 +278,17 @@ _GATE_SPEC = (
     ("holdout_epsilon", float, 0.0, 0.5),
     ("max_safety_failures", int, 0, 0),
 )
+_SERVING_SPEC = (
+    ("request_timeout_seconds", float, 0.5, 120.0),
+    ("request_cpu_seconds", int, 1, 120),
+    ("max_output_chars", int, 64, 65536),
+)
+_CANARY_SPEC = (
+    ("max_percent", int, 1, 50),
+    ("breach_count", int, 1, 1000),
+    ("observation_window_seconds", int, 30, 86400),
+)
+
 _BUDGET_SPEC = (
     ("max_reflect_cycles_per_day", int, 1, 100000),
     ("max_candidate_executions_per_day", int, 1, 100000),
@@ -295,10 +343,81 @@ def _coerce(body: dict[str, Any], spec: tuple, path: Path) -> dict[str, Any]:
     return values
 
 
+def _load_serving(anchors_dir: Path) -> tuple[str, ServingConfig]:
+    import hashlib
+    import tomllib
+
+    path = anchors_dir / SERVING_CONFIG_FILENAME
+    if not path.is_file():
+        raise ThresholdError(
+            f"Required serving anchor {path} is missing. Create it (see "
+            "resident/README.md); there is no built-in default."
+        )
+    raw = path.read_bytes()
+    try:
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ThresholdError(f"Serving anchor {path} is not valid TOML: {exc}") from exc
+
+    serving_body = parsed.get("serving")
+    canary_body = parsed.get("canary")
+    if not isinstance(serving_body, dict) or not isinstance(canary_body, dict):
+        raise ThresholdError(f"{path}: both [serving] and [canary] tables are required.")
+
+    fallback = serving_body.pop("safe_fallback", None)
+    if not isinstance(fallback, str) or not fallback.strip():
+        raise ThresholdError(f"{path}: [serving].safe_fallback must be a non-empty string.")
+    if len(fallback) > 2000:
+        raise ThresholdError(f"{path}: [serving].safe_fallback is too long.")
+
+    unsafe = canary_body.pop("unsafe_output", None)
+    if not isinstance(unsafe, dict):
+        raise ThresholdError(f"{path}: [canary.unsafe_output] is required.")
+    solicitation = unsafe.get("solicitation")
+    negations = unsafe.get("negations")
+    for name, value in (("solicitation", solicitation), ("negations", negations)):
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(not isinstance(item, str) or not item.strip() for item in value)
+        ):
+            raise ThresholdError(
+                f"{path}: [canary.unsafe_output].{name} must be a non-empty list of strings."
+            )
+    extra = set(unsafe) - {"solicitation", "negations"}
+    if extra:
+        raise ThresholdError(f"{path}: unknown [canary.unsafe_output] keys {sorted(extra)}.")
+
+    serving_values = _coerce(serving_body, _SERVING_SPEC, path)
+    canary_values = _coerce(canary_body, _CANARY_SPEC, path)
+
+    config = ServingConfig(
+        request_timeout_seconds=serving_values["request_timeout_seconds"],
+        request_cpu_seconds=serving_values["request_cpu_seconds"],
+        max_output_chars=serving_values["max_output_chars"],
+        safe_fallback=fallback,
+        canary_max_percent=canary_values["max_percent"],
+        canary_breach_count=canary_values["breach_count"],
+        canary_observation_window_seconds=canary_values["observation_window_seconds"],
+        solicitation_patterns=tuple(s.lower() for s in solicitation),
+        negation_markers=tuple(s.lower() for s in negations),
+    )
+    return hashlib.sha256(raw).hexdigest(), config
+
+
 def load_thresholds(
     anchors_dir: Path,
 ) -> tuple[ThresholdIdentity, GateThresholds, BudgetLimits]:
-    """Load and validate both anchor threshold files. Raises ThresholdError."""
+    """Load and validate the gate and budget anchors. Raises ThresholdError."""
+
+    identity, gate, budget, _serving = load_all_anchors(anchors_dir)
+    return identity, gate, budget
+
+
+def load_all_anchors(
+    anchors_dir: Path,
+) -> tuple[ThresholdIdentity, GateThresholds, BudgetLimits, ServingConfig]:
+    """Load and validate every anchor file, including serving guards."""
 
     anchors_dir = Path(anchors_dir)
     gate_path = anchors_dir / GATE_THRESHOLDS_FILENAME
@@ -308,14 +427,17 @@ def load_thresholds(
     budget_hash, budget_body = _read_toml_section(budget_path, "budget")
     gate_values = _coerce(gate_body, _GATE_SPEC, gate_path)
     budget_values = _coerce(budget_body, _BUDGET_SPEC, budget_path)
+    serving_hash, serving = _load_serving(anchors_dir)
 
     identity = ThresholdIdentity(
         gate_hash=gate_hash,
         budget_hash=budget_hash,
-        values={**gate_values, **budget_values},
+        serving_hash=serving_hash,
+        values={**gate_values, **budget_values, **serving.to_values()},
     )
     return (
         identity,
         GateThresholds(**gate_values),
         BudgetLimits(**budget_values),
+        serving,
     )
