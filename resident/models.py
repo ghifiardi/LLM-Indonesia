@@ -37,6 +37,10 @@ STATUS_SYNTAX = "rejected_syntax"
 STATUS_VALIDATION = "rejected_validation"
 STATUS_RUNTIME = "rejected_runtime"
 STATUS_RETURN_TYPE = "rejected_return_type"
+STATUS_TIMEOUT = "rejected_timeout"
+STATUS_RESOURCE_LIMIT = "rejected_resource_limit"
+STATUS_RUNNER_CRASH = "rejected_runner_crash"
+STATUS_RUNNER_PROTOCOL = "rejected_runner_protocol"
 
 ALL_STATUSES = frozenset(
     {
@@ -49,6 +53,10 @@ ALL_STATUSES = frozenset(
         STATUS_VALIDATION,
         STATUS_RUNTIME,
         STATUS_RETURN_TYPE,
+        STATUS_TIMEOUT,
+        STATUS_RESOURCE_LIMIT,
+        STATUS_RUNNER_CRASH,
+        STATUS_RUNNER_PROTOCOL,
     }
 )
 
@@ -112,10 +120,14 @@ class Verdict:
     scores: ScoreVector | None = None
     parent_score: float | None = None
     delta: float | None = None
-    #: Always False in Phase 1. The isolated holdout auditor is Phase 2; until
-    #: it exists, no candidate has been checked against private data and the
-    #: record must say so rather than leave it ambiguous.
+    #: Whether an isolated holdout audit has run for this candidate. Reflection
+    #: never sets this: it evaluates public cases only. Audits are recorded as
+    #: separate immutable rows and never rewrite this verdict.
     holdout_evaluated: bool = False
+    #: What actually contained this evaluation — see ``runner.limits``. Records
+    #: ``executed=False`` for candidates rejected before any subprocess ran, so
+    #: the field always describes what happened rather than what was intended.
+    isolation: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_improvement(self) -> bool:
@@ -138,6 +150,7 @@ class Verdict:
             "parent_score": self.parent_score,
             "delta": self.delta,
             "holdout_evaluated": self.holdout_evaluated,
+            "isolation": dict(self.isolation),
         }
 
     @classmethod
@@ -151,6 +164,7 @@ class Verdict:
             parent_score=payload.get("parent_score"),
             delta=payload.get("delta"),
             holdout_evaluated=bool(payload.get("holdout_evaluated", False)),
+            isolation=dict(payload.get("isolation") or {}),
         )
 
 

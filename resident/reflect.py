@@ -33,27 +33,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from ..code_agent_env import make_indonesian_phone_normalizer_env
 from ..code_mutator import RuleBasedCodeMutator
-from ..dataset_env import (
-    DEFAULT_KB,
-    DatasetSupportEnvironment,
-    EvalCase,
-    load_cases_from_dir,
-    split_cases_for_holdout,
-)
+from ..dataset_env import EvalCase, load_cases_from_dir, split_cases_for_holdout
 from ..demo_indonesia_support import INITIAL_POLICY as ID_SUPPORT_SEED_POLICY
-from ..godel_agent import (
-    Environment,
-    EvaluationResult,
-    PolicyValidationError,
-    SafePolicyLoader,
-)
+from ..godel_agent import Environment, PolicyValidationError, SafePolicyLoader
 from ..rule_based_mutator import RuleBasedIndonesianSupportMutator
 from .archive import CandidateArchive
+from .eval_records import build_environment_from_records, case_to_record, record_to_case
 from .experience import ExperienceLog
 from .models import (
     Candidate,
+    STATUS_RESOURCE_LIMIT,
+    STATUS_RUNNER_CRASH,
+    STATUS_RUNNER_PROTOCOL,
+    STATUS_TIMEOUT,
     ScoreVector,
     STATUS_IMPROVEMENT,
     STATUS_NO_CANDIDATE,
@@ -71,6 +64,15 @@ from .mutators import (
     MutationRequest,
     Mutator,
 )
+from .runner import (
+    CandidateRunner,
+    EvaluationOutcome,
+    InProcessCandidateRunner,
+    RunnerLimits,
+    SubprocessCandidateRunner,
+    early_rejection_profile,
+)
+from .runner.base import score_vector_from_result
 from .store import (
     CONFIG_ENVIRONMENT,
     PUBLIC_SNAPSHOT_FILENAME,
@@ -111,50 +113,33 @@ class EnvironmentSpec:
     name: str
     description: str
     prepare: Callable[[ResidentStore], None]
-    build_environment: Callable[[ResidentStore], Environment]
+    #: Snapshot records handed to the runner. Serialisable by construction —
+    #: the child is never given a path it could widen into a dataset read.
+    read_records: Callable[[ResidentStore], list[dict[str, Any]]]
     seed_policy: str
     build_mutator: Callable[[], Mutator]
+
+    def build_environment(self, store: ResidentStore) -> Environment:
+        """In-parent environment, for the test-only in-process runner."""
+
+        return build_environment_from_records(self.name, self.read_records(store))
 
 
 #: Re-exported for callers that locate the snapshot by name.
 PUBLIC_CASES_FILENAME = PUBLIC_SNAPSHOT_FILENAME
 
 
-def _case_to_record(case: EvalCase) -> dict[str, Any]:
-    return {
-        "query": case.query,
-        "required_terms": list(case.required_terms),
-        "forbidden_terms": list(case.forbidden_terms),
-        "weight": case.weight,
-        "category": case.category,
-        "reference_answer": case.reference_answer,
-        "baseline_outputs": dict(case.baseline_outputs),
-    }
-
-
-def _record_to_case(record: dict[str, Any]) -> EvalCase:
-    return EvalCase(
-        query=record["query"],
-        required_terms=tuple(record.get("required_terms", ())),
-        forbidden_terms=tuple(record.get("forbidden_terms", ())),
-        weight=float(record.get("weight", 1.0)),
-        category=record.get("category", "general"),
-        reference_answer=record.get("reference_answer", ""),
-        baseline_outputs=dict(record.get("baseline_outputs") or {}),
-    )
-
-
 def write_public_cases(store: ResidentStore, cases: list[EvalCase]) -> Path:
     """Persist public eval cases. Which cases are public is decided here; the
     bytes, the atomic replacement, and the fsync belong to the store."""
 
-    return store.write_public_snapshot([_case_to_record(case) for case in cases])
+    return store.write_public_snapshot([case_to_record(case) for case in cases])
 
 
 def load_public_cases(store: ResidentStore) -> list[EvalCase]:
     """Load the public-only snapshot. Never touches the source eval set."""
 
-    return [_record_to_case(record) for record in store.read_public_snapshot()]
+    return [record_to_case(record) for record in store.read_public_snapshot()]
 
 
 def _prepare_id_support(store: ResidentStore) -> None:
@@ -170,10 +155,6 @@ def _prepare_id_support(store: ResidentStore) -> None:
     write_public_cases(store, public_cases)
 
 
-def _build_id_support_environment(store: ResidentStore) -> DatasetSupportEnvironment:
-    return DatasetSupportEnvironment(cases=load_public_cases(store), kb=DEFAULT_KB)
-
-
 def _prepare_code_task(store: ResidentStore) -> None:
     """No snapshot needed: the cases are defined in code and have no holdout."""
 
@@ -183,7 +164,7 @@ ENVIRONMENTS: dict[str, EnvironmentSpec] = {
         name="id_support",
         description="Indonesian support rubric, public split only.",
         prepare=_prepare_id_support,
-        build_environment=_build_id_support_environment,
+        read_records=lambda store: store.read_public_snapshot(),
         seed_policy=ID_SUPPORT_SEED_POLICY,
         build_mutator=lambda: MutationProviderAdapter(
             RuleBasedIndonesianSupportMutator(), name="rule-based-id-support"
@@ -193,7 +174,7 @@ ENVIRONMENTS: dict[str, EnvironmentSpec] = {
         name="phone_normalizer",
         description="Indonesian phone-number normalisation unit tests.",
         prepare=_prepare_code_task,
-        build_environment=lambda store: make_indonesian_phone_normalizer_env(),
+        read_records=lambda store: [],
         seed_policy=CODE_TASK_SEED_POLICY,
         build_mutator=lambda: MutationProviderAdapter(
             RuleBasedCodeMutator(), name="rule-based-code"
@@ -241,69 +222,22 @@ def resolve_environment_spec(
     return get_environment_spec(bound)
 
 
-# --- the evaluation seam ----------------------------------------------------
+# --- execution -------------------------------------------------------------
+#
+# The Phase 1 in-process seam is gone. Candidate execution now goes through
+# ``runner.CandidateRunner``: the parent hands a child process canonical policy
+# source plus serialisable environment records, and gets back an aggregate score
+# or a classified failure. ``EvaluationOutcome`` and ``score_vector_from_result``
+# live in ``runner.base`` and are re-exported here for existing callers.
+#
+# ``SubprocessCandidateRunner`` is the default everywhere. ``InProcessCandidateRunner``
+# exists for focused unit tests and is never selected by fallback: a runner that
+# cannot start produces ``rejected_runner_crash``, never a quiet downgrade to
+# executing untrusted code in this process.
 
 
-@dataclass(frozen=True)
-class EvaluationOutcome:
-    """What the seam returns: a result, or a classified failure."""
-
-    result: EvaluationResult | None = None
-    error: str = ""
-    status: str = ""
-
-
-def evaluate_candidate(
-    policy: Callable[..., Any],
-    environment: Environment,
-) -> EvaluationOutcome:
-    """Evaluate one loaded candidate policy against a public environment.
-
-    **This is a replaceable seam, not a security boundary.** In Phase 1 the
-    candidate runs in this process, protected only by the ``SafePolicyLoader``
-    AST gate that ran before it got here. AST validation stops obvious escapes;
-    it does not stop resource exhaustion, and it is not a sandbox.
-
-    Phase 2 replaces the body of this function with a subprocess runner
-    enforcing timeout, memory and CPU limits, a clean environment, an isolated
-    working directory, no network, and output caps. The signature exists so that
-    swap changes nothing above it. Do not add callers that bypass it, and do not
-    treat its current implementation as containment.
-    """
-
-    try:
-        result = environment.evaluate(policy)
-    except Exception as exc:
-        return EvaluationOutcome(
-            error=f"{type(exc).__name__}: {exc}",
-            status=STATUS_RUNTIME,
-        )
-
-    if not isinstance(result, EvaluationResult):
-        return EvaluationOutcome(
-            error=f"environment returned {type(result).__name__}, expected EvaluationResult",
-            status=STATUS_RETURN_TYPE,
-        )
-    score = result.combined_score
-    if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(score):
-        return EvaluationOutcome(
-            error=f"combined_score is not a finite number: {score!r}",
-            status=STATUS_RETURN_TYPE,
-        )
-    return EvaluationOutcome(result=result)
-
-
-def score_vector_from_result(result: EvaluationResult) -> ScoreVector:
-    public = result.public if isinstance(result.public, dict) else {}
-    private = result.private if isinstance(result.private, dict) else {}
-    cases = public.get("cases")
-    num_cases = len(cases) if isinstance(cases, list) else int(private.get("num_cases", 0) or 0)
-    return ScoreVector(
-        combined=float(result.combined_score),
-        num_cases=num_cases,
-        category_means=dict(public.get("category_means") or {}),
-        dimension_means=dict(public.get("dimension_means") or {}),
-    )
+def default_runner(limits: RunnerLimits | None = None) -> CandidateRunner:
+    return SubprocessCandidateRunner(limits=limits or RunnerLimits())
 
 
 # --- reflection -------------------------------------------------------------
@@ -343,11 +277,12 @@ REFLECT_CYCLE_EVENT = "reflect_cycle"
 def reflect_once(
     store: ResidentStore,
     env_name: str | None = None,
-    environment: Environment | None = None,
+    runner: CandidateRunner | None = None,
     mutator: Mutator | None = None,
     tier: str = TIER_POLICY,
     min_delta: float = DEFAULT_MIN_DELTA,
     loader: SafePolicyLoader | None = None,
+    limits: RunnerLimits | None = None,
 ) -> ReflectionOutcome:
     """Run one reflection cycle and archive its verdict.
 
@@ -357,6 +292,10 @@ def reflect_once(
     ``env_name`` is optional and defaults to the environment this state
     directory is bound to. Passing a different one raises rather than mixing
     task domains in one archive.
+
+    ``runner`` defaults to ``SubprocessCandidateRunner``. Nothing here ever
+    falls back to in-process execution; a caller wanting that has to construct
+    an ``InProcessCandidateRunner`` deliberately.
     """
 
     spec = resolve_environment_spec(store, env_name)
@@ -365,8 +304,10 @@ def reflect_once(
     archive = CandidateArchive(store)
     experiences = ExperienceLog(store)
     loader = loader or SafePolicyLoader()
-    environment = environment if environment is not None else spec.build_environment(store)
+    limits = limits or RunnerLimits()
+    runner = runner if runner is not None else default_runner(limits)
     mutator = mutator if mutator is not None else spec.build_mutator()
+    snapshot = spec.read_records(store)
 
     cycle = store.count_events(kind=REFLECT_CYCLE_EVENT) + 1
 
@@ -441,6 +382,7 @@ def reflect_once(
                 detail=proposal.reason or "no candidate offered",
                 reasons=reasons,
                 parent_score=parent_score,
+                isolation=early_rejection_profile("no_candidate").to_dict(),
             ),
             artifact_hash=None,
         )
@@ -468,24 +410,31 @@ def reflect_once(
                 detail=message,
                 reasons=base_reasons + (message,),
                 parent_score=parent_score,
+                isolation=early_rejection_profile("parent_ast_gate").to_dict(),
             ),
             artifact_hash=artifact_hash,
         )
 
-    # 4. Evaluate through the seam.
-    outcome = evaluate_candidate(policy, environment)
-    if outcome.result is None:
+    # 4. Execute in isolation. The worker revalidates independently.
+    outcome = runner.evaluate(
+        policy_source=proposal.code or "",
+        environment_name=spec.name,
+        public_snapshot=snapshot,
+        limits=limits,
+    )
+    if outcome.scores is None:
         return finish(
             Verdict(
                 status=outcome.status or STATUS_RUNTIME,
                 detail=outcome.error,
                 reasons=base_reasons + (outcome.error,),
                 parent_score=parent_score,
+                isolation=outcome.isolation.to_dict(),
             ),
             artifact_hash=artifact_hash,
         )
 
-    scores = score_vector_from_result(outcome.result)
+    scores = outcome.scores
     delta = None if parent_score is None else scores.combined - parent_score
     improved = delta is not None and delta > min_delta
     status = STATUS_IMPROVEMENT if improved else STATUS_NO_IMPROVEMENT
@@ -498,37 +447,39 @@ def reflect_once(
     return finish(
         Verdict(
             status=status,
-            detail=(outcome.result.text_feedback or "")[:2000],
+            detail=outcome.feedback,
             reasons=reasons,
             scores=scores,
             parent_score=parent_score,
             delta=delta,
+            isolation=outcome.isolation.to_dict(),
         ),
         artifact_hash=artifact_hash,
     )
 
 
 def evaluate_policy_source(
+    store: ResidentStore,
+    spec: EnvironmentSpec,
     code: str,
-    environment: Environment,
-    loader: SafePolicyLoader | None = None,
-) -> tuple[ScoreVector | None, str]:
-    """Gate and evaluate policy source outside a reflection cycle.
+    runner: CandidateRunner | None = None,
+    limits: RunnerLimits | None = None,
+) -> EvaluationOutcome:
+    """Evaluate policy source outside a reflection cycle.
 
-    Used by ``init`` to give the seed candidate a real baseline score, and by
-    ``promote`` to re-verify an artifact before it becomes champion. Returns
-    ``(None, error)`` on any failure.
+    Used by ``init`` to give the seed candidate a real baseline score. Runs
+    through the same isolated runner as reflection, so a seed policy gets no
+    more trust than a generated one.
     """
 
-    loader = loader or SafePolicyLoader()
-    try:
-        policy = loader.load(code)
-    except PolicyValidationError as exc:
-        return None, str(exc)
-    outcome = evaluate_candidate(policy, environment)
-    if outcome.result is None:
-        return None, outcome.error
-    return score_vector_from_result(outcome.result), ""
+    limits = limits or RunnerLimits()
+    runner = runner if runner is not None else default_runner(limits)
+    return runner.evaluate(
+        policy_source=code,
+        environment_name=spec.name,
+        public_snapshot=spec.read_records(store),
+        limits=limits,
+    )
 
 
 def _history_tail(archive: CandidateArchive, limit: int = 8) -> tuple[str, ...]:

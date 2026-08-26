@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -28,8 +31,12 @@ from .models import (
     STATUS_NO_CANDIDATE,
     STATUS_NO_IMPROVEMENT,
     STATUS_PROVIDER_ERROR,
+    STATUS_RESOURCE_LIMIT,
     STATUS_RETURN_TYPE,
+    STATUS_RUNNER_CRASH,
+    STATUS_RUNNER_PROTOCOL,
     STATUS_RUNTIME,
+    STATUS_TIMEOUT,
     STATUS_SEED,
     STATUS_SYNTAX,
     STATUS_VALIDATION,
@@ -44,6 +51,14 @@ from .promote import (
     STOP_AFTER_POINTER,
     initialize,
     promote,
+)
+from .runner import (
+    CandidateRunner,
+    EvaluationOutcome,
+    InProcessCandidateRunner,
+    MEMORY_LIMIT_SUPPORTED,
+    RunnerLimits,
+    SubprocessCandidateRunner,
 )
 from .reflect import (
     EVAL_SETS_DIR,
@@ -332,7 +347,7 @@ def test_reflect_archives_every_failure_mode_as_a_structured_verdict() -> None:
             "runtime",
             {
                 "mutator": StaticMutator(candidates=[GOOD_POLICY]),
-                "environment": RaisingEnvironment(),
+                "runner": InProcessCandidateRunner(environment=RaisingEnvironment()),
             },
             STATUS_RUNTIME,
         ),
@@ -340,7 +355,7 @@ def test_reflect_archives_every_failure_mode_as_a_structured_verdict() -> None:
             "malformed result",
             {
                 "mutator": StaticMutator(candidates=[GOOD_POLICY]),
-                "environment": MalformedEnvironment(),
+                "runner": InProcessCandidateRunner(environment=MalformedEnvironment()),
             },
             STATUS_RETURN_TYPE,
         ),
@@ -348,7 +363,7 @@ def test_reflect_archives_every_failure_mode_as_a_structured_verdict() -> None:
             "non-finite score",
             {
                 "mutator": StaticMutator(candidates=[GOOD_POLICY]),
-                "environment": NonFiniteEnvironment(),
+                "runner": InProcessCandidateRunner(environment=NonFiniteEnvironment()),
             },
             STATUS_RETURN_TYPE,
         ),
@@ -783,7 +798,7 @@ def test_promotion_refuses_rejected_candidate_with_valid_artifact() -> None:
         outcome = reflect_once(
             store,
             mutator=StaticMutator(candidates=[GOOD_POLICY]),
-            environment=RaisingEnvironment(),
+            runner=InProcessCandidateRunner(environment=RaisingEnvironment()),
         )
         assert outcome.verdict.status == STATUS_RUNTIME
         assert outcome.candidate.artifact_hash is not None
@@ -803,6 +818,248 @@ def test_promotion_refuses_rejected_candidate_with_valid_artifact() -> None:
             raise AssertionError("promoted a rejected candidate")
         assert store.champion_path.read_bytes() == champion_before
         assert store.pending_promotions() == []
+
+
+# --- PR A: isolated candidate execution ------------------------------------
+
+
+SPIN_POLICY = '''
+def solve(query, kb):
+    while True:
+        pass
+'''
+
+HUGE_OUTPUT_POLICY = '''
+def solve(query, kb):
+    return "x" * 500000
+'''
+
+ALLOCATING_POLICY = '''
+def solve(query, kb):
+    blocks = []
+    for i in range(60000):
+        blocks.append("x" * 1000)
+    return str(len(blocks))
+'''
+
+
+def _fake_worker_executable(directory: Path, script_body: str) -> str:
+    """A stand-in for the interpreter, so the parent can be tested against a
+    worker that misbehaves in ways a correct worker never would."""
+
+    path = directory / "fake_worker.sh"
+    path.write_text("#!/bin/sh\n" + script_body + "\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_subprocess_and_in_process_runners_agree_on_score() -> None:
+    subprocess_runner = SubprocessCandidateRunner()
+    in_process = InProcessCandidateRunner()
+    limits = RunnerLimits()
+
+    a = subprocess_runner.evaluate(GOOD_POLICY, TEST_ENV, [], limits)
+    b = in_process.evaluate(GOOD_POLICY, TEST_ENV, [], limits)
+    assert a.ok and b.ok, (a.status, b.status)
+    assert a.scores.combined == b.scores.combined
+    assert a.scores.num_cases == b.scores.num_cases
+    # Only the subprocess run claims isolation.
+    assert a.isolation.process_isolated is True
+    assert b.isolation.process_isolated is False
+    # RLIMIT_NPROC is user-scoped, so it is off by default and says so.
+    assert a.isolation.process_count_limit_requested is False
+    assert any("user-scoped" in note for note in a.isolation.notes)
+
+
+def test_infinite_loop_candidate_times_out_and_is_reaped() -> None:
+    limits = RunnerLimits(wall_clock_seconds=2.0, grace_period_seconds=1.0, cpu_seconds=0)
+    started = time.monotonic()
+    outcome = SubprocessCandidateRunner().evaluate(SPIN_POLICY, TEST_ENV, [], limits)
+    elapsed = time.monotonic() - started
+
+    assert outcome.status == STATUS_TIMEOUT, outcome.status
+    assert outcome.scores is None
+    assert elapsed < 20.0, f"timeout path took {elapsed:.1f}s"
+    assert "terminated by timeout" in outcome.isolation.notes
+
+
+def test_cpu_limit_produces_a_resource_verdict_and_records_enforcement() -> None:
+    # Generous wall clock, tight CPU: the kernel's SIGXCPU must arrive first,
+    # which is what distinguishes a CPU-limit verdict from a timeout verdict.
+    limits = RunnerLimits(wall_clock_seconds=60.0, cpu_seconds=1)
+    outcome = SubprocessCandidateRunner().evaluate(SPIN_POLICY, TEST_ENV, [], limits)
+
+    assert outcome.status == STATUS_RESOURCE_LIMIT, (outcome.status, outcome.error)
+    assert outcome.signal_number is not None
+    # Enforcement is only claimed because it was observed on this run.
+    assert outcome.isolation.cpu_limit_enforced == "true"
+
+
+def test_memory_heavy_candidate_is_contained_and_reported_honestly() -> None:
+    limits = RunnerLimits(wall_clock_seconds=20.0, cpu_seconds=10)
+    outcome = SubprocessCandidateRunner().evaluate(ALLOCATING_POLICY, TEST_ENV, [], limits)
+
+    if MEMORY_LIMIT_SUPPORTED:
+        # Where the limit works, it either fires or the candidate stays under it.
+        assert outcome.status in ("", STATUS_RESOURCE_LIMIT), outcome.status
+        assert outcome.isolation.memory_limit_requested is True
+    else:
+        # On this platform RLIMIT_AS is unusable, so the profile must not claim
+        # a memory limit. Containment comes from the wall clock and CPU limit.
+        assert outcome.isolation.memory_limit_requested is False
+        assert outcome.isolation.memory_limit_enforced == "false"
+        assert any("unavailable" in note for note in outcome.isolation.notes)
+    # Either way the parent survived and produced a structured result.
+    assert outcome.status in ("", STATUS_TIMEOUT, STATUS_RESOURCE_LIMIT, STATUS_RUNNER_CRASH)
+
+
+def test_per_case_policy_output_is_capped_before_it_accumulates() -> None:
+    limits = RunnerLimits(max_output_chars=64)
+    outcome = SubprocessCandidateRunner().evaluate(HUGE_OUTPUT_POLICY, TEST_ENV, [], limits)
+    # The candidate returns half a megabyte per case; capping keeps the run
+    # bounded and the answer simply scores badly.
+    assert outcome.ok, (outcome.status, outcome.error)
+    assert outcome.scores.combined == 0.0
+
+
+def test_oversized_request_is_rejected_before_spawning() -> None:
+    big_snapshot = [
+        {"query": "q" * 10000, "required_terms": [], "category": "bulk"} for _ in range(500)
+    ]
+    outcome = SubprocessCandidateRunner().evaluate(
+        GOOD_POLICY, "id_support", big_snapshot, RunnerLimits()
+    )
+    assert outcome.status == STATUS_RUNNER_PROTOCOL
+    assert "exceeds" in outcome.error
+
+
+def test_worker_that_cannot_start_is_a_crash_not_an_in_process_fallback() -> None:
+    runner = SubprocessCandidateRunner(python_executable="/nonexistent/interpreter")
+    outcome = runner.evaluate(GOOD_POLICY, TEST_ENV, [], RunnerLimits())
+    assert outcome.status == STATUS_RUNNER_CRASH
+    assert outcome.scores is None, "a failed spawn must never yield a score"
+    assert "could not start worker" in outcome.error
+
+
+def test_reflection_archives_a_runner_crash_rather_than_falling_back() -> None:
+    with initialized() as (state_dir, store):
+        runner = SubprocessCandidateRunner(python_executable="/nonexistent/interpreter")
+        outcome = reflect_once(
+            store, runner=runner, mutator=StaticMutator(candidates=[GOOD_POLICY])
+        )
+        assert outcome.verdict.status == STATUS_RUNNER_CRASH
+        assert outcome.verdict.public_score is None
+        assert CandidateArchive(store).get(outcome.candidate_id) is not None
+
+
+def test_malformed_worker_response_fails_closed() -> None:
+    with temp_state_dir() as tmp:
+        exe = _fake_worker_executable(tmp, "cat > /dev/null; echo 'this is not json'")
+        outcome = SubprocessCandidateRunner(python_executable=exe).evaluate(
+            GOOD_POLICY, TEST_ENV, [], RunnerLimits()
+        )
+        assert outcome.status == STATUS_RUNNER_PROTOCOL, (outcome.status, outcome.error)
+        assert outcome.scores is None
+
+
+def test_oversized_worker_stdout_is_bounded_before_reaching_parent_memory() -> None:
+    with temp_state_dir() as tmp:
+        # Emits far more than the cap; the parent must read at most cap+1.
+        exe = _fake_worker_executable(
+            tmp,
+            "cat > /dev/null; "
+            "awk 'BEGIN{for(i=0;i<200000;i++) printf \"xxxxxxxxxx\"}'",
+        )
+        outcome = SubprocessCandidateRunner(python_executable=exe).evaluate(
+            GOOD_POLICY, TEST_ENV, [], RunnerLimits()
+        )
+        assert outcome.status == STATUS_RUNNER_PROTOCOL
+        assert "stdout exceeded" in outcome.error
+
+
+def test_worker_revalidates_independently_of_the_parent_gate() -> None:
+    # The runner performs no AST gate of its own, so reaching a validation
+    # verdict here proves the worker validated on its own account.
+    outcome = SubprocessCandidateRunner().evaluate(
+        BANNED_IMPORT_POLICY, TEST_ENV, [], RunnerLimits()
+    )
+    assert outcome.status == STATUS_VALIDATION, (outcome.status, outcome.error)
+
+    syntax = SubprocessCandidateRunner().evaluate(
+        SYNTAX_ERROR_POLICY, TEST_ENV, [], RunnerLimits()
+    )
+    assert syntax.status == STATUS_SYNTAX
+
+
+def test_early_ast_rejection_records_that_nothing_executed() -> None:
+    with initialized() as (state_dir, store):
+        outcome = reflect_once(
+            store, mutator=StaticMutator(candidates=[BANNED_IMPORT_POLICY])
+        )
+        assert outcome.verdict.status == STATUS_VALIDATION
+        profile = outcome.verdict.isolation
+        assert profile["executed"] is False
+        assert profile["process_isolated"] is False
+        assert profile["mechanism"] == "parent_ast_gate"
+
+        # And an executed candidate records the opposite.
+        executed = reflect_once(store, mutator=StaticMutator(candidates=[GOOD_POLICY, GOOD_POLICY]))
+        assert executed.verdict.isolation["executed"] is True
+        assert executed.verdict.isolation["process_isolated"] is True
+
+
+def test_worker_environment_carries_no_credentials_or_user_paths() -> None:
+    from .runner.subprocess_runner import _minimal_environment
+
+    env = _minimal_environment()
+    for forbidden in ("PATH", "HOME", "LD_PRELOAD", "OPENAI_API_KEY", "GODEL_LLM_BASE_URL"):
+        assert forbidden not in env, forbidden
+    assert env["PYTHONHASHSEED"] == "0"
+    assert set(env) <= {
+        "PYTHONHASHSEED",
+        "PYTHONPATH",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "PYTHONDONTWRITEBYTECODE",
+    }
+
+
+def test_request_carries_records_not_a_dataset_path() -> None:
+    from .runner.protocol import build_evaluate_request
+
+    request = build_evaluate_request(GOOD_POLICY, "id_support", [{"query": "q"}], {})
+    serialized = json.dumps(request)
+    # The child is handed data, never a path it could widen into a dataset read.
+    assert "eval_sets" not in serialized
+    assert str(EVAL_SETS_DIR) not in serialized
+
+
+def test_terminate_group_reaps_the_whole_process_group() -> None:
+    from .runner.subprocess_runner import _terminate_group
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert process.poll() is None
+        pgid = os.getpgid(process.pid)
+        assert pgid == process.pid, "child should lead its own group"
+        _terminate_group(process, grace_seconds=2.0)
+        assert process.poll() is not None, "process was not reaped"
+        # The group itself is gone, not merely the leader.
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            pass
+        else:
+            raise AssertionError("process group outlived termination")
+    finally:
+        if process.poll() is None:  # pragma: no cover - cleanup path
+            process.kill()
+            process.wait()
 
 
 TESTS = [
@@ -838,6 +1095,21 @@ TESTS = [
     test_promotion_recovers_deterministically_from_every_interruption_point,
     test_promotion_refuses_to_repromote_the_current_champion,
     test_full_cycle_persists_across_process_boundaries,
+    test_subprocess_and_in_process_runners_agree_on_score,
+    test_infinite_loop_candidate_times_out_and_is_reaped,
+    test_cpu_limit_produces_a_resource_verdict_and_records_enforcement,
+    test_memory_heavy_candidate_is_contained_and_reported_honestly,
+    test_per_case_policy_output_is_capped_before_it_accumulates,
+    test_oversized_request_is_rejected_before_spawning,
+    test_worker_that_cannot_start_is_a_crash_not_an_in_process_fallback,
+    test_reflection_archives_a_runner_crash_rather_than_falling_back,
+    test_malformed_worker_response_fails_closed,
+    test_oversized_worker_stdout_is_bounded_before_reaching_parent_memory,
+    test_worker_revalidates_independently_of_the_parent_gate,
+    test_early_ast_rejection_records_that_nothing_executed,
+    test_worker_environment_carries_no_credentials_or_user_paths,
+    test_request_carries_records_not_a_dataset_path,
+    test_terminate_group_reaps_the_whole_process_group,
     test_existing_smoke_suite_still_passes,
 ]
 

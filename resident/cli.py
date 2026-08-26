@@ -37,6 +37,7 @@ from .promote import (
     initialize,
     promote,
 )
+from .runner import RunnerLimits
 from .reflect import (
     DEFAULT_ENVIRONMENT,
     DEFAULT_MIN_DELTA,
@@ -124,6 +125,18 @@ def build_parser() -> argparse.ArgumentParser:
     reflect_parser.add_argument("--base-url", default=None, help="LLM base URL (llm mutator).")
     reflect_parser.add_argument("--model", default=None, help="LLM model name (llm mutator).")
     reflect_parser.add_argument("--temperature", type=float, default=0.2)
+    reflect_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=RunnerLimits().wall_clock_seconds,
+        help="Wall-clock seconds allowed for candidate execution.",
+    )
+    reflect_parser.add_argument(
+        "--cpu-seconds",
+        type=int,
+        default=RunnerLimits().cpu_seconds,
+        help="CPU seconds allowed for candidate execution.",
+    )
     reflect_parser.add_argument(
         "--min-delta",
         type=float,
@@ -238,15 +251,18 @@ def _cmd_record(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
 
 def _cmd_reflect_once(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
     spec = resolve_environment_spec(store, args.env)
-    environment = spec.build_environment(store)
-    mutator = _build_mutator(args, spec, environment)
+    limits = RunnerLimits(
+        wall_clock_seconds=args.timeout,
+        cpu_seconds=args.cpu_seconds,
+    )
+    mutator = _build_mutator(args, spec, spec.build_environment(store))
 
     outcome = reflect_once(
         store,
         env_name=spec.name,
-        environment=environment,
         mutator=mutator,
         min_delta=args.min_delta,
+        limits=limits,
     )
     verdict = outcome.verdict
     lines = [
@@ -257,7 +273,8 @@ def _cmd_reflect_once(store: ResidentStore, args: argparse.Namespace, emit: Any)
         f"  status     {verdict.status}",
         f"  score      {_fmt_score(verdict.public_score)}"
         f"  (parent {_fmt_score(verdict.parent_score)}, delta {_fmt_delta(verdict.delta)})",
-        "  holdout    not evaluated (isolated auditor arrives in phase 2)",
+        f"  isolation  {_fmt_isolation(verdict.isolation)}",
+        "  holdout    not evaluated (isolated auditor arrives in PR B)",
     ]
     for reason in verdict.reasons:
         lines.append(f"  - {reason}")
@@ -461,6 +478,20 @@ def _build_mutator(args: argparse.Namespace, spec: Any, environment: Any) -> Mut
 def _read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def _fmt_isolation(profile: dict[str, Any]) -> str:
+    if not profile:
+        return "(unrecorded)"
+    if not profile.get("executed", True):
+        return f"not executed ({profile.get('mechanism', 'unknown')})"
+    return (
+        f"{profile.get('mechanism', 'unknown')}"
+        f" cpu={profile.get('cpu_limit_enforced', 'unknown')}"
+        f" mem={profile.get('memory_limit_enforced', 'unknown')}"
+        f" fs={profile.get('filesystem_isolated')}"
+        f" net={profile.get('network_isolated')}"
+    )
 
 
 def _fmt_score(value: float | None) -> str:

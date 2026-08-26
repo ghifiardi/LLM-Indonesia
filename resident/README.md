@@ -78,13 +78,56 @@ both refuse a different one. Without this, a support-chat policy could become
 the parent of a phone-normalizer candidate and one champion pointer would stand
 for two incompatible tasks. Use a separate `--state-dir` per environment.
 
-**AST validation is the first gate, not a sandbox.**
-`reflect.evaluate_candidate` is a *replaceable seam*. Today it runs the
-candidate in this process behind the `SafePolicyLoader` AST gate. That stops
-obvious escapes; it does not stop resource exhaustion and it is not containment.
-Phase 2 replaces the function body with a resource-limited subprocess runner —
-the signature exists so nothing above it changes. Do not add callers that bypass
-it (AR-03).
+**Candidates execute in an isolated child process.** `runner.CandidateRunner`
+takes canonical policy source and serialisable environment records — never a
+callable, never a dataset path. `SubprocessCandidateRunner` is the default
+everywhere. `InProcessCandidateRunner` exists for focused unit tests and is
+never selected by fallback: a runner that cannot start yields
+`rejected_runner_crash`, not a quiet downgrade to running untrusted code in the
+parent.
+
+The parent AST gate remains as an early rejection, and the worker revalidates
+independently — the point of the second gate is that it catches a wrong first
+gate.
+
+### What actually contains a run
+
+Every verdict records an isolation profile. Booleans mean *verified*; anything
+unverified is the string `"unknown"`, upgraded to `"true"` only when
+enforcement was observed on that run (a SIGXCPU kill, a worker-reported
+`MemoryError`).
+
+| control | mechanism | status |
+|---|---|---|
+| separate process, own group | `start_new_session` | yes |
+| scratch cwd, capture files elsewhere | `TemporaryDirectory` ×2 | yes |
+| minimal environment | no PATH/HOME/credentials, `-s` | yes |
+| no inherited descriptors | `close_fds` | yes |
+| wall-clock timeout | SIGTERM → grace → SIGKILL on the owned group | yes |
+| CPU limit | `RLIMIT_CPU` | yes (SIGXCPU observed) |
+| file size, core dumps | `RLIMIT_FSIZE`, `RLIMIT_CORE` | yes |
+| request/response/stdout/stderr caps | pre-check + files + bounded read-back | yes |
+| per-case output cap | applied at the policy, before accumulation | yes |
+| **address space** | `RLIMIT_AS` | **unavailable on darwin** |
+| **process count** | `RLIMIT_NPROC` | **off by default** |
+| **filesystem isolation** | — | **no** |
+| **network isolation** | — | **no** |
+
+Two measured caveats, both reported in the profile rather than assumed away:
+
+- On darwin, `setrlimit(RLIMIT_AS, ...)` kills the child before `exec` at every
+  value tried (512 MiB, 1 GiB, 2 GiB). There is no working address-space limit
+  through the standard library, so the wall clock is the only backstop against
+  memory growth, and the profile says `memory_limit_enforced: "false"`.
+- `RLIMIT_NPROC` is user-scoped, not process-scoped. Any value small enough to
+  bound one child is small enough to break the worker on a busy machine — it was
+  observed failing every `fork` with "Resource temporarily unavailable". It is
+  off by default; a candidate cannot spawn processes anyway, since the AST gate
+  permits no imports.
+
+A standard-library subprocess is real process and resource isolation. It is not
+a filesystem or network sandbox, and nothing here claims to be one. That needs a
+container or an OS sandbox profile, which is a deployment decision (AR-03).
 
 ## Identity: candidates vs artifacts
 
@@ -118,6 +161,16 @@ history string:
 | `rejected_validation` | candidate failed the sandbox AST gate |
 | `rejected_runtime` | environment raised while evaluating |
 | `rejected_return_type` | environment returned a malformed `EvaluationResult` |
+| `rejected_timeout` | exceeded the wall clock; process group terminated |
+| `rejected_resource_limit` | hit a CPU or file-size limit, or reported `MemoryError` |
+| `rejected_runner_crash` | worker died or could not start; cause unattributed |
+| `rejected_runner_protocol` | oversized or malformed request/response |
+
+A raw `SIGKILL` is classified as `rejected_runner_crash`, not as memory
+pressure: the OS, an operator, or a supervisor could all have sent it, and
+guessing would put a false cause in the audit trail. Only `SIGXCPU`/`SIGXFSZ`,
+which the kernel sends precisely because a limit was exceeded, and a
+worker-reported `MemoryError` count as observed enforcement.
 
 Rejected candidates are archived but never selectable as a parent, and
 `promote` refuses them. Note that a rejected candidate's code may still be
@@ -164,7 +217,7 @@ smoke test must not break this.
 
 ## Not in this phase
 
-Isolated candidate execution and holdout auditing (Phase 2); the promotion gate
+The holdout auditor and immutable audit records (Phase 2 PR B); the promotion gate
 with hard vetoes, shadow/canary states, budgets and freeze (Phase 3); split
 serve/reflect/audit clocks (Phase 4); automatic promotion (Phase 5); proactive
 triggers (Phase 6); tiers above T1 (Phase 7).

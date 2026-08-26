@@ -42,6 +42,7 @@ from .reflect import (
     evaluate_policy_source,
     get_environment_spec,
 )
+from .runner import CandidateRunner, RunnerLimits
 from .store import (
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
@@ -173,6 +174,8 @@ def initialize(
     seed_policy: str | None = None,
     actor: str = "",
     force: bool = False,
+    runner: CandidateRunner | None = None,
+    limits: RunnerLimits | None = None,
 ) -> tuple[Candidate, Champion]:
     """Establish the seed candidate and the first champion.
 
@@ -210,12 +213,13 @@ def initialize(
     # Runs before anything is archived: this is the one path allowed to read the
     # source eval set, and it writes public cases only.
     spec.prepare(store)
-    environment = spec.build_environment(store)
-    scores, error = evaluate_policy_source(code, environment)
-    if scores is None:
+    outcome = evaluate_policy_source(store, spec, code, runner=runner, limits=limits)
+    if outcome.scores is None:
         raise PromotionError(
-            f"Seed policy for environment {spec.name!r} could not be evaluated: {error}"
+            f"Seed policy for environment {spec.name!r} could not be evaluated "
+            f"({outcome.status or 'no status'}): {outcome.error}"
         )
+    scores = outcome.scores
 
     store.set_config(CONFIG_ENVIRONMENT, spec.name)
     artifact_hash = store.write_artifact(
@@ -229,6 +233,7 @@ def initialize(
             scores=scores,
             parent_score=None,
             delta=None,
+            isolation=outcome.isolation.to_dict(),
         ),
         origin="seed",
         artifact_hash=artifact_hash,

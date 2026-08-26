@@ -55,19 +55,32 @@ from .promote import (
     initialize,
     promote,
 )
+from .eval_records import build_environment_from_records, case_to_record, record_to_case
 from .reflect import (
     DEFAULT_ENVIRONMENT,
     ENVIRONMENTS,
     EnvironmentSpec,
     ReflectionOutcome,
     bound_environment,
-    evaluate_candidate,
+    default_runner,
     evaluate_policy_source,
     get_environment_spec,
     load_public_cases,
     reflect_once,
+    score_vector_from_result,
     resolve_environment_spec,
     write_public_cases,
+)
+from .runner import (
+    CandidateRunner,
+    EvaluationOutcome,
+    InProcessCandidateRunner,
+    IsolationProfile,
+    MEMORY_LIMIT_SUPPORTED,
+    PROTOCOL_VERSION,
+    RunnerLimits,
+    SubprocessCandidateRunner,
+    early_rejection_profile,
 )
 from .store import (
     ArtifactIntegrityError,
@@ -88,6 +101,17 @@ from .store import (
 )
 
 __all__ = [
+    "score_vector_from_result",
+    "default_runner",
+    "early_rejection_profile",
+    "SubprocessCandidateRunner",
+    "RunnerLimits",
+    "PROTOCOL_VERSION",
+    "MEMORY_LIMIT_SUPPORTED",
+    "IsolationProfile",
+    "InProcessCandidateRunner",
+    "EvaluationOutcome",
+    "CandidateRunner",
     "PUBLIC_SNAPSHOT_FILENAME",
     "SCHEMA_VERSION",
     "MIGRATIONS",
@@ -95,7 +119,11 @@ __all__ = [
     "CONFIG_ENVIRONMENT",
     "write_public_cases",
     "resolve_environment_spec",
+    "build_environment_from_records",
+    "case_to_record",
     "load_public_cases",
+    "record_to_case",
+    "score_vector_from_result",
     "bound_environment",
     "AlreadyInitializedError",
     "ArtifactIntegrityError",
@@ -138,7 +166,6 @@ __all__ = [
     "TIER_PROMPT",
     "Verdict",
     "canonicalize_policy",
-    "evaluate_candidate",
     "evaluate_policy_source",
     "get_environment_spec",
     "initialize",
