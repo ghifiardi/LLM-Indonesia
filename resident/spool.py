@@ -48,10 +48,15 @@ class SpoolWriter:
 
     def __init__(self, spool_dir: Path, name: str | None = None) -> None:
         self.spool_dir = Path(spool_dir)
-        self.spool_dir.mkdir(parents=True, exist_ok=True)
+        # Spool files hold raw queries and answers, so the directory is private
+        # and each file is owner-only. Default permissions would leave user
+        # conversations world-readable on a shared machine.
+        self.spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _harden_dir(self.spool_dir)
         stamp = name or f"serve-{os.getpid()}-{new_id()[:8]}"
         self.path = self.spool_dir / f"{stamp}.jsonl"
-        self._handle = open(self.path, "a", encoding="utf-8")
+        descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        self._handle = os.fdopen(descriptor, "a", encoding="utf-8")
 
     def write(self, kind: str, record_id: str, payload: dict[str, Any], durable: bool = False) -> None:
         if kind not in KNOWN_KINDS:
@@ -104,18 +109,48 @@ class IngestReport:
         }
 
 
-def _iter_lines(path: Path) -> Iterator[tuple[int, str]]:
-    with open(path, "r", encoding="utf-8", errors="replace") as handle:
-        for number, line in enumerate(handle, start=1):
-            yield number, line.rstrip("\n")
+def _harden_dir(path: Path) -> None:
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
 
 
-def _parse(line: str) -> dict[str, Any]:
-    """Strict schema and size validation. Raises ValueError on anything odd."""
+def _iter_lines(path: Path) -> Iterator[tuple[int, bytes, bool]]:
+    """Yield (line number, bytes, oversized) reading at most the cap per line.
 
-    if len(line.encode("utf-8")) > MAX_SPOOL_LINE_BYTES:
+    Binary and bounded on purpose. Text-mode iteration allocates a whole line
+    before any size check can run, so a tampered spool file with one enormous
+    line would exhaust the supervisor's memory before the cap fired. Here an
+    oversized line is truncated for reporting and its remainder is skipped
+    without ever being buffered.
+    """
+
+    limit = MAX_SPOOL_LINE_BYTES
+    with open(path, "rb") as handle:
+        number = 0
+        while True:
+            chunk = handle.readline(limit + 1)
+            if not chunk:
+                return
+            number += 1
+            if len(chunk) > limit and not chunk.endswith(b"\n"):
+                # Discard the rest of this line a bounded piece at a time.
+                while True:
+                    tail = handle.readline(limit)
+                    if not tail or tail.endswith(b"\n"):
+                        break
+                yield number, chunk[:limit], True
+                continue
+            yield number, chunk.rstrip(b"\n"), False
+
+
+def _parse(line: bytes) -> dict[str, Any]:
+    """Strict schema validation. Raises ValueError on anything odd."""
+
+    if len(line) > MAX_SPOOL_LINE_BYTES:
         raise ValueError("line exceeds the size cap")
-    record = json.loads(line)
+    record = json.loads(line.decode("utf-8"))
     if not isinstance(record, dict):
         raise ValueError("not a JSON object")
     kind = record.get("kind")
@@ -143,13 +178,19 @@ def ingest(store: ResidentStore, spool_dir: Path | None = None) -> IngestReport:
     for path in sorted(spool_dir.glob("*.jsonl")):
         files += 1
         bad_lines: list[str] = []
-        for number, line in _iter_lines(path):
+        for number, line, oversized in _iter_lines(path):
             if not line.strip():
+                continue
+            if oversized:
+                bad_lines.append(_quarantine_note(path, number, "line_exceeds_cap", line))
+                quarantined += 1
                 continue
             try:
                 record = _parse(line)
-            except (ValueError, json.JSONDecodeError) as exc:
-                bad_lines.append(f"{path.name}:{number}: {exc}\t{line[:400]}")
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                bad_lines.append(
+                    _quarantine_note(path, number, type(exc).__name__, line)
+                )
                 quarantined += 1
                 continue
             if _apply(store, record):
@@ -159,17 +200,37 @@ def ingest(store: ResidentStore, spool_dir: Path | None = None) -> IngestReport:
 
         # Rows are committed before the file is retired. A crash here replays
         # the file and every insert is ignored as a duplicate.
-        consumed_dir.mkdir(parents=True, exist_ok=True)
+        consumed_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _harden_dir(consumed_dir)
         os.replace(path, consumed_dir / path.name)
         if bad_lines:
-            quarantine_dir.mkdir(parents=True, exist_ok=True)
-            with open(quarantine_dir / f"{path.stem}.bad", "a", encoding="utf-8") as handle:
+            quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _harden_dir(quarantine_dir)
+            note_path = quarantine_dir / f"{path.stem}.bad"
+            descriptor = os.open(note_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
                 handle.write("\n".join(bad_lines) + "\n")
 
     report = IngestReport(files, inserted, duplicates, quarantined)
     if files:
         store.append_event(SPOOL_EVENT, payload=report.to_dict())
     return report
+
+
+def _quarantine_note(path: Path, number: int, error: str, line: bytes) -> str:
+    """Metadata about a rejected line — never the line itself.
+
+    A rejected record still holds a raw user query, and a diagnostic file is not
+    a place for one. The digest is enough to correlate duplicates or confirm a
+    fix without reproducing the content.
+    """
+
+    import hashlib
+
+    return (
+        f"{path.name}:{number}\terror={error}\tbytes={len(line)}"
+        f"\tsha256={hashlib.sha256(line).hexdigest()}"
+    )
 
 
 def _apply(store: ResidentStore, record: dict[str, Any]) -> bool:
@@ -194,32 +255,31 @@ def _apply(store: ResidentStore, record: dict[str, Any]) -> bool:
 def _apply_served_request(
     store: ResidentStore, request_id: str, created_at: str, payload: dict[str, Any]
 ) -> bool:
+    """Insert the request and its experience atomically, healing partial state.
+
+    The experience shares the request id, so both inserts are idempotent and a
+    replay repairs a half-applied record instead of skipping it as a duplicate.
+    """
+
     from .models import Experience
 
-    inserted = store.insert_served_request({**payload, "request_id": request_id,
-                                            "created_at": created_at})
-    if inserted:
-        # The experience shares the request id, so replaying the spool cannot
-        # produce a second copy of the same interaction.
-        try:
-            store.insert_experience(
-                Experience(
-                    experience_id=request_id,
-                    recorded_at=created_at,
-                    query=str(payload.get("query", "")),
-                    answer=str(payload.get("answer", "")),
-                    outcome="served",
-                    source="serve",
-                    tags=(payload.get("actual_route", "champion"),),
-                    metadata={
-                        "served_candidate_id": payload.get("served_candidate_id"),
-                        "fallback_used": bool(payload.get("fallback_used")),
-                        "latency_ms": payload.get("latency_ms"),
-                    },
-                )
-            )
-        except Exception:
-            # The request row is the durable record; a duplicate experience id
-            # from a partial earlier ingest must not fail the batch.
-            pass
-    return inserted
+    experience = Experience(
+        experience_id=request_id,
+        recorded_at=created_at,
+        query=str(payload.get("query", "")),
+        answer=str(payload.get("answer", "")),
+        outcome="served",
+        source="serve",
+        tags=(str(payload.get("actual_route", "champion")),),
+        metadata={
+            "served_candidate_id": payload.get("served_candidate_id"),
+            "fallback_used": bool(payload.get("fallback_used")),
+            "latency_ms": payload.get("latency_ms"),
+        },
+    )
+    request_inserted, experience_inserted = store.insert_served_request_with_experience(
+        {**payload, "request_id": request_id, "created_at": created_at}, experience
+    )
+    # "Inserted" means something new landed — including a healed experience, so
+    # a repair is visible in the report rather than counted as a duplicate.
+    return request_inserted or experience_inserted

@@ -2872,6 +2872,177 @@ def test_socket_rejects_oversized_and_malformed_frames() -> None:
             thread.join(timeout=15)
 
 
+# --- Phase 4A hardening ------------------------------------------------------
+
+
+def test_serving_refuses_to_start_against_edited_anchors() -> None:
+    with serving_state() as (root, anchors, context):
+        # Baseline: the recorded identity matches, so serving starts.
+        assert context.config.safe_fallback == SAFE_FALLBACK
+
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        state_dir = root / "state"
+        with opened(state_dir) as store:
+            initialize(store, env_name="id_support", seed_policy=SERVING_SAFE_POLICY,
+                       anchors_dir=str(anchors))
+
+        # Weakening the guard after init is exactly the attack this catches:
+        # without the identity check it would silently rewrite the
+        # unsafe-output patterns and the fallback of a running deployment.
+        _write_serving_anchor(anchors, safe_fallback="anything goes now")
+        try:
+            serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        except serve_module.ServeError as exc:
+            assert "changed since init" in str(exc)
+        else:
+            raise AssertionError("served against edited anchors")
+
+        # A missing anchor is refused too, not defaulted.
+        (anchors / "serving.toml").unlink()
+        try:
+            serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        except serve_module.ServeError as exc:
+            assert "unusable" in str(exc) or "missing" in str(exc)
+        else:
+            raise AssertionError("served without a serving anchor")
+
+
+def test_negation_must_apply_to_the_solicitation_not_the_whole_answer() -> None:
+    config = ServingConfig(
+        request_timeout_seconds=5.0,
+        request_cpu_seconds=4,
+        max_output_chars=4096,
+        safe_fallback="fallback",
+        canary_max_percent=25,
+        canary_breach_count=3,
+        canary_observation_window_seconds=900,
+        solicitation_patterns=("berikan otp", "kirim pin"),
+        negation_markers=("jangan", "tidak boleh", "hindari"),
+    )
+    # A refusal marker anywhere in the answer used to make the whole answer
+    # safe, which is precisely the bypass a phishing policy would use.
+    unsafe = (
+        "Berikan OTP Anda sekarang.",
+        "Jangan tutup aplikasi. Sekarang berikan OTP Anda.",
+        "Jangan tutup aplikasi. Berikan OTP Anda.",
+        "Tidak boleh panik; kirim PIN agar saya bantu.",
+        "Tidak boleh panik, kirim PIN agar dibantu.",
+    )
+    safe = (
+        "Jangan berikan OTP kepada siapa pun.",
+        "Hindari kirim pin ke nomor asing.",
+        "Hubungi kanal resmi bank untuk bantuan.",
+        "Jangan berikan OTP. Jangan kirim PIN.",
+    )
+    for text in unsafe:
+        assert serve_module.unsafe_output(text, config), f"missed: {text!r}"
+    for text in safe:
+        assert not serve_module.unsafe_output(text, config), f"false positive: {text!r}"
+
+
+def test_ingestion_converges_from_every_interruption_point() -> None:
+    """Request and experience land together, and a half-applied record heals."""
+
+    with serving_state() as (root, anchors, context):
+        serve_module.answer(context, "kartu hilang")
+        context.spool.close()
+        state_dir = root / "state"
+        spool_dir = state_dir / "spool"
+
+        def replay_spool() -> None:
+            for path in (spool_dir / "consumed").glob("*.jsonl"):
+                os.replace(path, spool_dir / path.name)
+
+        with opened(state_dir) as store:
+            # 1. Before either insert.
+            first = spool_module.ingest(store)
+            assert first.inserted == 1
+            assert store.count_served_requests() == 1
+            assert ExperienceLog(store).count() == 1
+
+            # 2. After the request insert, before the experience insert. Under
+            #    the old split-insert code the replay saw a duplicate request
+            #    and never repaired the missing experience.
+            store.conn.execute("DELETE FROM experiences")
+            replay_spool()
+            healed = spool_module.ingest(store)
+            assert healed.inserted == 1, "a half-applied record must heal, not be skipped"
+            assert store.count_served_requests() == 1
+            assert ExperienceLog(store).count() == 1
+
+            # 3. After both inserts, before the spool file is retired.
+            replay_spool()
+            noop = spool_module.ingest(store)
+            assert noop.inserted == 0 and noop.duplicates == 1
+            assert store.count_served_requests() == 1
+            assert ExperienceLog(store).count() == 1
+
+
+def test_oversized_spool_line_is_bounded_and_does_not_block_the_next_record() -> None:
+    with serving_state() as (root, anchors, context):
+        context.spool.close()
+        state_dir = root / "state"
+        spool_dir = state_dir / "spool"
+
+        oversized = b"Q" * (spool_module.MAX_SPOOL_LINE_BYTES * 3)
+        path = spool_dir / "oversized.jsonl"
+        with open(path, "wb") as handle:
+            handle.write(
+                b'{"kind":"served_request","record_id":"huge","created_at":"t",'
+                b'"payload":{"query":"' + oversized + b'"}}\n'
+            )
+            handle.write(
+                json.dumps(
+                    {
+                        "kind": spool_module.KIND_SERVED_REQUEST,
+                        "record_id": "after-oversized",
+                        "created_at": utcnow(),
+                        "payload": {"query": "ok", "answer": "a", "actual_route": "champion"},
+                    }
+                ).encode("utf-8")
+                + b"\n"
+            )
+
+        with opened(state_dir) as store:
+            report = spool_module.ingest(store)
+            assert report.quarantined >= 1
+            ids = {row["request_id"] for row in store.list_served_requests()}
+            # The record after the oversized line still landed.
+            assert "after-oversized" in ids
+            assert "huge" not in ids
+
+
+def test_spool_is_private_and_quarantine_records_no_content() -> None:
+    with serving_state() as (root, anchors, context):
+        serve_module.answer(context, "pertanyaan rahasia")
+        spool_path = context.spool.path
+        context.spool.close()
+        state_dir = root / "state"
+        spool_dir = state_dir / "spool"
+
+        # Spool files hold raw queries and answers.
+        assert spool_dir.stat().st_mode & 0o777 == 0o700
+        assert spool_path.stat().st_mode & 0o777 == 0o600
+
+        secret = "RAHASIA-TIDAK-BOLEH-BOCOR"
+        with open(spool_path, "a", encoding="utf-8") as handle:
+            handle.write(f'{{"kind":"served_request","broken":"{secret}"\n')
+
+        with opened(state_dir) as store:
+            report = spool_module.ingest(store)
+            assert report.quarantined == 1
+
+        note_path = list((spool_dir / "quarantine").glob("*.bad"))[0]
+        note = note_path.read_text(encoding="utf-8")
+        # Metadata only: enough to correlate or confirm a fix, without copying
+        # a user's query into a diagnostic file.
+        assert secret not in note
+        assert "error=" in note and "bytes=" in note and "sha256=" in note
+        assert note_path.stat().st_mode & 0o777 == 0o600
+        assert (spool_dir / "quarantine").stat().st_mode & 0o777 == 0o700
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -2985,6 +3156,11 @@ TESTS = [
     test_socket_path_is_short_private_and_owner_only,
     test_stale_socket_is_removed_only_when_nothing_is_listening,
     test_socket_rejects_oversized_and_malformed_frames,
+    test_serving_refuses_to_start_against_edited_anchors,
+    test_negation_must_apply_to_the_solicitation_not_the_whole_answer,
+    test_ingestion_converges_from_every_interruption_point,
+    test_oversized_spool_line_is_bounded_and_does_not_block_the_next_record,
+    test_spool_is_private_and_quarantine_records_no_content,
     test_existing_smoke_suite_still_passes,
 ]
 

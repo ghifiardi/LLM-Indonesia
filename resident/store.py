@@ -433,7 +433,8 @@ class ResidentStore:
             self.artifacts_dir.mkdir(parents=True, exist_ok=True)
             self.pointer_dir.mkdir(parents=True, exist_ok=True)
             self.public_eval_dir.mkdir(parents=True, exist_ok=True)
-            self.spool_dir.mkdir(parents=True, exist_ok=True)
+            self.spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.spool_dir, 0o700)
         except OSError as exc:
             raise StateDirectoryError(
                 f"Cannot create state directory {self.state_dir}: {exc}. "
@@ -1148,6 +1149,66 @@ class ResidentStore:
                 ),
             )
             return cursor.rowcount > 0
+
+    def insert_served_request_with_experience(
+        self, record: dict[str, Any], experience: Any
+    ) -> tuple[bool, bool]:
+        """Insert the request row and its experience in one transaction.
+
+        Both are ``INSERT OR IGNORE``, so this is safe to replay *and* it heals:
+        a partial state where the request landed and the experience did not is
+        repaired by the next ingest, rather than being mistaken for a complete
+        duplicate and skipped forever.
+        """
+
+        with self.transaction() as conn:
+            request_cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO served_requests
+                    (request_id, created_at, ingested_at, requested_route, actual_route,
+                     served_candidate_id, served_artifact_hash, champion_candidate_id,
+                     canary_candidate_id, fallback_used, routing_bucket, latency_ms,
+                     status, timed_out, raised, exception_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["request_id"],
+                    record["created_at"],
+                    utcnow(),
+                    record.get("requested_route", ""),
+                    record.get("actual_route", ""),
+                    record.get("served_candidate_id"),
+                    record.get("served_artifact_hash"),
+                    record.get("champion_candidate_id"),
+                    record.get("canary_candidate_id"),
+                    1 if record.get("fallback_used") else 0,
+                    record.get("routing_bucket"),
+                    int(record.get("latency_ms") or 0),
+                    record.get("status", ""),
+                    1 if record.get("timed_out") else 0,
+                    1 if record.get("raised") else 0,
+                    record.get("exception_type", ""),
+                ),
+            )
+            experience_cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO experiences
+                    (experience_id, recorded_at, query, answer, outcome, source,
+                     tags_json, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experience.experience_id,
+                    experience.recorded_at,
+                    experience.query,
+                    experience.answer,
+                    experience.outcome,
+                    experience.source,
+                    json.dumps(list(experience.tags), ensure_ascii=False),
+                    json.dumps(dict(experience.metadata), ensure_ascii=False),
+                ),
+            )
+            return request_cursor.rowcount > 0, experience_cursor.rowcount > 0
 
     def insert_serving_veto(self, record: dict[str, Any]) -> bool:
         with self.transaction() as conn:

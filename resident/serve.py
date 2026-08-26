@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import stat
 import threading
@@ -36,10 +37,22 @@ from pathlib import Path
 from typing import Any
 
 from ..dataset_env import DEFAULT_KB
-from .anchors import ServingConfig, load_all_anchors, resolve_anchors_dir
+from .anchors import (
+    ServingConfig,
+    ThresholdError,
+    ThresholdIdentity,
+    load_all_anchors,
+    resolve_anchors_dir,
+)
 from .runner import RunnerLimits, ServeOutcome, SubprocessCandidateRunner
 from .spool import KIND_CHAMPION_VETO, KIND_SERVED_REQUEST, SpoolWriter
-from .store import CONFIG_ENVIRONMENT, ResidentStore, new_id, utcnow
+from .store import (
+    CONFIG_ENVIRONMENT,
+    CONFIG_THRESHOLD_IDENTITY,
+    ResidentStore,
+    new_id,
+    utcnow,
+)
 
 ROUTE_CHAMPION = "champion"
 ROUTE_FALLBACK = "fallback"
@@ -58,21 +71,38 @@ class ServeError(Exception):
     """Raised when the serving process cannot start safely."""
 
 
+#: Clause boundaries. Deliberately aggressive — a comma is enough to end a
+#: clause — because the two error directions are not symmetric: a false
+#: positive costs one fallback response, a false negative sends the user a
+#: phishing instruction.
+_CLAUSE_BOUNDARY = re.compile(r"[.!?;,\n]+")
+
+
 def unsafe_output(answer: str, config: ServingConfig) -> str:
     """Return the matched solicitation pattern, or '' when the answer is fine.
 
-    Negation-aware on purpose. A bare "contains OTP" rule would reject
-    *"jangan berikan OTP kepada siapa pun"* — the single most useful thing the
-    assistant can say about an OTP — so a solicitation pattern only counts when
-    no refusal marker appears in the answer.
+    Negation is checked **per occurrence**, not per answer. Treating any
+    refusal marker anywhere as making the whole answer safe is exactly the
+    bypass a phishing policy would use:
+
+        "Jangan tutup aplikasi. Sekarang berikan OTP Anda."
+
+    Both halves are present; only the second one matters. So each solicitation
+    is located, and only the text before it *within its own clause* is examined
+    for a negation. One safely negated occurrence cannot excuse another.
     """
 
     lowered = answer.lower()
-    if any(marker in lowered for marker in config.negation_markers):
-        return ""
-    for pattern in config.solicitation_patterns:
-        if pattern in lowered:
-            return pattern
+    for clause in _CLAUSE_BOUNDARY.split(lowered):
+        if not clause.strip():
+            continue
+        for pattern in config.solicitation_patterns:
+            start = clause.find(pattern)
+            while start != -1:
+                preceding = clause[:start]
+                if not any(marker in preceding for marker in config.negation_markers):
+                    return pattern
+                start = clause.find(pattern, start + 1)
     return ""
 
 
@@ -94,7 +124,32 @@ def build_context(
     spool: SpoolWriter | None = None,
 ) -> ServingContext:
     store = ResidentStore.open_readonly(state_dir)
-    _identity, _gate, _budget, config = load_all_anchors(resolve_anchors_dir(anchors_dir))
+    try:
+        identity, _gate, _budget, config = load_all_anchors(resolve_anchors_dir(anchors_dir))
+    except ThresholdError as exc:
+        raise ServeError(f"Serving anchors are unusable: {exc}") from exc
+
+    # The serving guards are anchors like any other, so an edit after init must
+    # be detected rather than adopted. Without this check, changing
+    # serving.toml would silently rewrite the unsafe-output patterns, the
+    # timeout, and the fallback text of a running deployment.
+    recorded = store.get_config(CONFIG_THRESHOLD_IDENTITY)
+    if not recorded:
+        raise ServeError(
+            "No threshold identity was recorded at init; refusing to serve against "
+            "unverified anchors. Re-run init against the anchor source."
+        )
+    try:
+        expected = ThresholdIdentity.from_dict(json.loads(recorded))
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ServeError(f"Recorded threshold identity is unreadable: {exc}") from exc
+    mismatch = expected.mismatch_field(identity)
+    if mismatch:
+        raise ServeError(
+            f"Anchor files changed since init ({mismatch}); refusing to serve. "
+            "Re-run init against the anchor source to adopt them deliberately."
+        )
+
     environment = store.get_config(CONFIG_ENVIRONMENT) or ""
     limits = RunnerLimits(
         wall_clock_seconds=config.request_timeout_seconds,

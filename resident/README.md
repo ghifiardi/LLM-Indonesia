@@ -61,10 +61,29 @@ Freezing self-modification while continuing to return an unsafe answer would
 not contain an incident. Withholding the answer is what contains it; the freeze
 stops it recurring.
 
-The unsafe-output rule is **negation-aware** on purpose. A bare "contains OTP"
-substring rule would reject *"jangan berikan OTP kepada siapa pun"* — the single
-most useful thing the assistant can say about an OTP — so a solicitation pattern
-only counts when no refusal marker appears in the answer.
+The unsafe-output rule is **negation-aware**, and the negation is checked *per
+occurrence* rather than per answer. A bare "contains OTP" substring rule would
+reject *"jangan berikan OTP kepada siapa pun"* — the single most useful thing
+the assistant can say about an OTP. But treating a refusal marker anywhere as
+making the whole answer safe is worse, because it is exactly the bypass a
+phishing policy would use:
+
+```text
+"Jangan berikan OTP kepada siapa pun."               safe
+"Jangan tutup aplikasi. Sekarang berikan OTP Anda."  unsafe
+"Tidak boleh panik; kirim PIN agar saya bantu."      unsafe
+```
+
+So each solicitation is located and only the text before it *within its own
+clause* is examined for a negation. One safely negated occurrence cannot excuse
+another. Clause boundaries are deliberately aggressive — a comma ends one —
+because the error directions are not symmetric: a false positive costs one
+fallback response, a false negative sends the user a phishing instruction.
+
+Serving also verifies the anchor identity recorded at `init` before it starts.
+Editing `serving.toml` afterwards would otherwise silently rewrite the
+unsafe-output patterns, the timeout, and the fallback text of a running
+deployment, so a mismatch refuses to serve rather than adopting the change.
 
 ### The spool
 
@@ -72,8 +91,23 @@ Serve appends; the supervisor ingests. Every record carries an id its writer
 generated and every insert is `INSERT OR IGNORE` on that id, so a crash between
 committing rows and retiring a spool file produces a duplicate *attempt* and no
 duplicate row. Files are retired last, deliberately: the failure that leaves a
-file un-retired is harmless, the one that retires it early loses data. A line
-that will not parse is quarantined rather than blocking the lines after it.
+file un-retired is harmless, the one that retires it early loses data.
+
+A served request and its experience are inserted in **one transaction**, and
+both inserts are idempotent, so a replay *heals* a half-applied record rather
+than seeing a duplicate request and skipping the missing experience forever.
+
+Reads are bounded in binary rather than by text iteration: text mode allocates
+a whole line before any size check can run, so one enormous line in a tampered
+spool file would exhaust the supervisor's memory before the cap fired. An
+oversized line is skipped a bounded piece at a time and the records after it
+still land.
+
+Spool files hold raw queries and answers, so the directory is `0700` and files
+are `0600`. A line that will not parse is quarantined as **metadata only** —
+source, line number, error, byte length, and a SHA-256 — never its content. A
+rejected record still holds a user's query, and a diagnostic file is not a place
+for one.
 
 Veto observations are fsynced; ordinary request records are only flushed. Losing
 the last few request records to a hard crash costs telemetry, but losing a veto
