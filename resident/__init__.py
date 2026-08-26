@@ -33,7 +33,7 @@ from .anchors import (
     load_anchor_split,
     resolve_anchors_dir,
 )
-from . import budget, serve, spool, states, supervisor
+from . import budget, canary, serve, spool, states, supervisor
 from .anchors import (
     ANCHORS_DIR_ENV_VAR as _ANCHORS_ENV,
 )
@@ -160,6 +160,7 @@ from .store import (
 )
 
 __all__ = [
+    "canary",
     "unaudited_candidates",
     "audit_all_unaudited",
     "DEFAULT_BATCH_LIMIT",

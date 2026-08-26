@@ -26,6 +26,7 @@ from typing import Any, Iterator
 from ..godel_agent import Action, EvaluationResult, SelfState
 from ..dataset_env import load_cases_from_dir, split_cases_for_holdout
 from . import audit as audit_module
+from . import canary as canary_module
 from . import budget as budget_module
 from . import audit as audit_module
 from . import serve as serve_module
@@ -2054,8 +2055,20 @@ def test_illegal_state_transitions_raise_and_persist_nothing() -> None:
         # Nothing was written by a refused transition.
         assert len(store.list_state_transitions()) == before
 
-        # Canary is deliberately absent until a serving path exists.
-        assert "canary" not in states.STATES
+        # Canary sits between shadow and champion, and was added only once a
+        # serving path existed to give it a reader.
+        assert states.CANARY in states.STATES
+        assert states.CANARY in states.LEGAL_TRANSITIONS[states.SHADOW]
+        assert states.LEGAL_TRANSITIONS[states.CANARY] == frozenset(
+            {states.CHAMPION, states.REJECTED}
+        )
+        # Adding it did not widen anything else.
+        assert states.LEGAL_TRANSITIONS[states.PROPOSED] == frozenset(
+            {states.SHADOW, states.REJECTED}
+        )
+        assert states.LEGAL_TRANSITIONS[states.CHAMPION] == frozenset(
+            {states.SUPERSEDED, states.ROLLED_BACK}
+        )
 
 
 def test_promotion_records_the_full_transition_chain() -> None:
@@ -3283,6 +3296,345 @@ def test_supervisor_does_not_hold_self_modification_between_cycles() -> None:
     assert "reflect_once(" not in source
 
 
+# --- Phase 4C: the canary ----------------------------------------------------
+
+CHAMPION_MARK = "CHAMPION-MARK"
+CANARY_MARK = "CANARY-MARK"
+CANARY_LEAK = "CANARY-LEAK-MUST-NOT-APPEAR"
+
+CANARY_CHAMPION_POLICY = (
+    "\ndef solve(query, kb):\n"
+    f'    return "Silakan hubungi kanal resmi bank. {CHAMPION_MARK}"\n'
+)
+CANARY_GOOD_POLICY = (
+    "\ndef solve(query, kb):\n"
+    '    return "Jangan berikan OTP kepada siapa pun. Hubungi kanal resmi bank. '
+    f'{CANARY_MARK}"\n'
+)
+# Behaves on the eval set, misbehaves in production. Exactly what a canary
+# exists to catch — and it has to pass the gate to get there.
+CANARY_TWO_FACED_POLICY = (
+    "\ndef solve(query, kb):\n"
+    "    if 'qsent' in str(query).lower():\n"
+    '        return "Jangan berikan OTP kepada siapa pun. Hubungi kanal resmi bank."\n'
+    f'    return "Silakan berikan OTP Anda sekarang. {CANARY_LEAK}"\n'
+)
+
+
+@contextmanager
+def canary_state(
+    canary_policy: str = CANARY_GOOD_POLICY, percent: int = 25, activate: bool = True
+) -> Iterator[tuple[Path, Path, Path, str, Any]]:
+    """A state directory with a champion, an audited candidate, and a canary."""
+
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        state_dir = root / "state"
+        with opened(state_dir) as store:
+            initialize(store, env_name="id_support", seed_policy=CANARY_CHAMPION_POLICY,
+                       anchors_dir=str(anchors))
+            run_audit(store, store.require_champion().candidate_id, anchors_dir=str(anchors))
+            outcome = reflect_once(store, mutator=AlwaysMutator(canary_policy))
+            run_audit(store, outcome.candidate_id, anchors_dir=str(anchors))
+            pointer = None
+            if activate:
+                pointer = canary_module.activate(
+                    store, outcome.candidate_id, percent=percent,
+                    reason="trial", actor="ops", anchors_dir=str(anchors),
+                )
+        yield root, anchors, state_dir, outcome.candidate_id, pointer
+
+
+def test_canary_serves_its_own_slice_and_only_its_slice() -> None:
+    with canary_state() as (root, anchors, state_dir, candidate_id, pointer):
+        context = serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        try:
+            routes: dict[str, int] = {}
+            for index in range(200):
+                response = serve_module.answer(
+                    context, f"pertanyaan {index}", conversation_id=f"user-{index}"
+                )
+                routes[response["route"]] = routes.get(response["route"], 0) + 1
+                # Positive control both ways: the sentinel appears for the
+                # canary bucket and never for the champion bucket.
+                if response["route"] == canary_module.ROUTE_CANARY:
+                    assert CANARY_MARK in response["answer"]
+                    assert CHAMPION_MARK not in response["answer"]
+                else:
+                    assert CHAMPION_MARK in response["answer"]
+                    assert CANARY_MARK not in response["answer"]
+
+            assert routes.get(canary_module.ROUTE_CANARY, 0) > 0, "nothing reached the canary"
+            assert routes.get(serve_module.ROUTE_CHAMPION, 0) > 0, "everything reached the canary"
+            # Roughly the configured share, with room for hash variance.
+            share = routes[canary_module.ROUTE_CANARY] / 200
+            assert 0.10 <= share <= 0.40, share
+        finally:
+            context.spool.close()
+            context.store.close()
+
+
+def test_routing_is_stable_per_conversation_and_salted() -> None:
+    with canary_state() as (root, anchors, state_dir, candidate_id, pointer):
+        context = serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        try:
+            first = serve_module.answer(context, "halo", conversation_id="stable-user")["route"]
+            for index in range(6):
+                again = serve_module.answer(
+                    context, f"pertanyaan lain {index}", conversation_id="stable-user"
+                )["route"]
+                assert again == first, "a conversation switched policies mid-way"
+        finally:
+            context.spool.close()
+            context.store.close()
+
+        # Raising the percentage only adds buckets; it does not reshuffle the
+        # users already inside the slice.
+        inside = {
+            key for key in (f"user-{i}" for i in range(200))
+            if canary_module.routes_to_canary(pointer, "q", key)[0]
+        }
+        wider = canary_module.CanaryPointer(
+            activation_id=pointer.activation_id,
+            candidate_id=pointer.candidate_id,
+            artifact_hash=pointer.artifact_hash,
+            percent=pointer.percent + 20,
+            routing_salt=pointer.routing_salt,
+            activated_at=pointer.activated_at,
+        )
+        wider_inside = {
+            key for key in (f"user-{i}" for i in range(200))
+            if canary_module.routes_to_canary(wider, "q", key)[0]
+        }
+        assert inside <= wider_inside
+
+        # A different salt gives a different assignment: the bucket cannot be
+        # predicted from the query alone, so it cannot be steered.
+        other = canary_module.routing_bucket("a" * 64, "q", "user-1")
+        assert other != canary_module.routing_bucket("b" * 64, "q", "user-1")
+
+
+def test_failing_canary_output_is_replaced_by_the_champion_not_the_fallback() -> None:
+    with canary_state(CANARY_TWO_FACED_POLICY) as (root, anchors, state_dir, cid, pointer):
+        context = serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        suppressed = 0
+        try:
+            for index in range(60):
+                response = serve_module.answer(
+                    context, f"q{index}", conversation_id=f"u-{index}"
+                )
+                assert CANARY_LEAK not in json.dumps(response)
+                if response.get("requested_route") == canary_module.ROUTE_CANARY:
+                    suppressed += 1
+                    # The champion answers, rather than everyone getting the
+                    # fixed fallback because one candidate misbehaved.
+                    assert response["route"] == serve_module.ROUTE_CHAMPION
+                    assert CHAMPION_MARK in response["answer"]
+            assert suppressed > 0, "no request reached the canary"
+        finally:
+            context.spool.close()
+            context.store.close()
+
+        with opened(state_dir) as store:
+            spool_module.ingest(store)
+            vetoes = store.list_serving_vetoes(kind=spool_module.KIND_CANARY_VETO)
+            assert len(vetoes) == suppressed
+            assert CANARY_LEAK not in json.dumps(vetoes)
+            rows = [r for r in store.list_served_requests()
+                    if r["requested_route"] == canary_module.ROUTE_CANARY]
+            # Attribution distinguishes "routed to canary but fell back".
+            assert rows and all(r["actual_route"] == serve_module.ROUTE_CHAMPION for r in rows)
+            assert all(r["canary_candidate_id"] == cid for r in rows)
+            assert all(r["routing_bucket"] is not None for r in rows)
+
+
+def test_the_supervisor_not_serve_clears_a_breaching_canary() -> None:
+    with canary_state(CANARY_TWO_FACED_POLICY) as (root, anchors, state_dir, cid, pointer):
+        context = serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        try:
+            for index in range(60):
+                serve_module.answer(context, f"q{index}", conversation_id=f"u-{index}")
+        finally:
+            context.spool.close()
+            context.store.close()
+
+        # Serving alone changes nothing: it holds a read-only connection.
+        with opened(state_dir) as store:
+            assert canary_module.active_pointer(store) is not None
+            assert not is_frozen(store)
+
+        supervisor = supervisor_module.Supervisor(state_dir, anchors_dir=str(anchors))
+        try:
+            result = supervisor.tick()
+            assert result.get("canary_auto_reverted"), result
+            assert canary_module.active_pointer(supervisor.store) is None
+            assert is_frozen(supervisor.store)
+            assert supervisor.store.candidate_state(cid) == states.REJECTED
+            # A canary is demoted automatically because it was never champion.
+            champion = supervisor.store.require_champion()
+            assert champion.candidate_id != cid
+        finally:
+            supervisor.close()
+
+
+def test_no_automatic_champion_rollback_exists() -> None:
+    here = Path(__file__).resolve().parent
+    supervisor_source = (here / "supervisor.py").read_text(encoding="utf-8")
+    canary_source = (here / "canary.py").read_text(encoding="utf-8")
+    # The supervisor exposes rollback only through the human control channel.
+    assert "rollback(" in supervisor_source
+    assert "from .rollback import rollback" in supervisor_source
+    # Call and import syntax, not the bare word: both modules *discuss* rollback
+    # in their docstrings, and matching prose would be matching the wrong thing.
+    serve_source = (here / "serve.py").read_text(encoding="utf-8")
+    for name, source in (("canary.py", canary_source), ("serve.py", serve_source)):
+        assert "from .rollback import" not in source, name
+        assert "rollback(" not in source, name
+        assert "write_champion(" not in source, name
+
+
+def test_canary_activation_and_clearing_recover_from_every_interruption() -> None:
+    for stop_after, expect_active in (("intent", False), ("pointer", True)):
+        with canary_state(activate=False) as (root, anchors, state_dir, cid, _):
+            with opened(state_dir) as store:
+                assert canary_module.activate(
+                    store, cid, percent=10, reason="interrupted",
+                    anchors_dir=str(anchors), stop_after=stop_after,
+                ) is None
+
+            for attempt in range(2):  # recovery must be idempotent
+                with opened(state_dir) as store:
+                    canary_module.recover(store)
+                    pointer = canary_module.active_pointer(store)
+                    assert (pointer is not None) == expect_active, (stop_after, attempt)
+                    live = store.canary_activations((canary_module.STATE_ACTIVE,))
+                    assert len(live) == (1 if expect_active else 0)
+                    # Never a canary state without a pointer, or the reverse.
+                    if expect_active:
+                        assert store.candidate_state(cid) == states.CANARY
+                    else:
+                        assert store.candidate_state(cid) != states.CANARY
+                    assert not store.canary_activations(
+                        (canary_module.STATE_INTENDED, canary_module.STATE_CLEARING)
+                    )
+
+    # And the same for clearing.
+    for stop_after in ("intent", "pointer"):
+        with canary_state() as (root, anchors, state_dir, cid, pointer):
+            with opened(state_dir) as store:
+                canary_module.clear(store, reason="interrupted", stop_after=stop_after)
+            for _ in range(2):
+                with opened(state_dir) as store:
+                    canary_module.recover(store)
+                    assert canary_module.active_pointer(store) is None
+                    assert not store.canary_activations(
+                        (canary_module.STATE_ACTIVE, canary_module.STATE_INTENDED,
+                         canary_module.STATE_CLEARING)
+                    )
+                    assert store.candidate_state(cid) == states.REJECTED
+
+
+def test_orphan_canary_pointer_is_removed_on_recovery() -> None:
+    with canary_state() as (root, anchors, state_dir, cid, pointer):
+        with opened(state_dir) as store:
+            # A pointer naming no live activation would route traffic that
+            # nothing accounts for.
+            store.set_canary_activation_state(
+                pointer.activation_id, canary_module.STATE_CLEARED
+            )
+            canary_module.recover(store)
+            assert canary_module.active_pointer(store) is None
+
+
+def test_edited_anchors_prevent_activation_and_clear_a_live_canary() -> None:
+    # Activation is refused outright once the anchors differ from init.
+    with canary_state(activate=False) as (root, anchors, state_dir, cid, _):
+        _write_serving_anchor(anchors, max_percent=50)
+        with opened(state_dir) as store:
+            try:
+                canary_module.activate(store, cid, percent=10, reason="x",
+                                       anchors_dir=str(anchors))
+            except canary_module.CanaryError as exc:
+                assert "thresholds_valid" in str(exc)
+            else:
+                raise AssertionError("activated a canary under edited anchors")
+
+    # A live canary is cleared and the resident freezes.
+    with canary_state() as (root, anchors, state_dir, cid, pointer):
+        _write_serving_anchor(anchors, max_percent=50)
+        supervisor = supervisor_module.Supervisor(state_dir, anchors_dir=str(anchors))
+        try:
+            result = supervisor.tick()
+            assert result.get("anchor_drift") == "serving_hash"
+            assert result.get("canary_cleared") is True
+            assert canary_module.active_pointer(supervisor.store) is None
+            assert is_frozen(supervisor.store)
+        finally:
+            supervisor.close()
+
+
+def test_freeze_blocks_canary_activation() -> None:
+    with canary_state(activate=False) as (root, anchors, state_dir, cid, _):
+        with opened(state_dir) as store:
+            freeze(store, reason="incident", actor="ops")
+            try:
+                canary_module.activate(store, cid, percent=10, reason="x",
+                                       anchors_dir=str(anchors))
+            except canary_module.CanaryError as exc:
+                assert "frozen" in str(exc)
+            else:
+                raise AssertionError("activated a canary while frozen")
+
+
+def test_canary_activation_requires_a_passing_gate_and_bounded_percent() -> None:
+    with canary_state(activate=False) as (root, anchors, state_dir, cid, _):
+        with opened(state_dir) as store:
+            for percent in (0, -5, 99):
+                try:
+                    canary_module.activate(store, cid, percent=percent, reason="x",
+                                           anchors_dir=str(anchors))
+                except canary_module.CanaryError as exc:
+                    assert "percent must be between" in str(exc)
+                else:
+                    raise AssertionError(f"accepted percent={percent}")
+
+            # A candidate the gate refuses never serves real users.
+            rejected = reflect_once(store, mutator=AlwaysMutator(BANNED_IMPORT_POLICY))
+            try:
+                canary_module.activate(store, rejected.candidate_id, percent=10,
+                                       reason="x", anchors_dir=str(anchors))
+            except canary_module.CanaryError as exc:
+                assert "not eligible" in str(exc) or "Gate refused" in str(exc)
+            else:
+                raise AssertionError("a gate-refused candidate served traffic")
+
+
+def test_routing_salt_never_leaves_the_pointer() -> None:
+    with canary_state() as (root, anchors, state_dir, cid, pointer):
+        assert "routing_salt" not in pointer.public_dict()
+
+        context = serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        try:
+            for index in range(30):
+                serve_module.answer(context, f"q{index}", conversation_id=f"u-{index}")
+        finally:
+            context.spool.close()
+            context.store.close()
+
+        with opened(state_dir) as store:
+            spool_module.ingest(store)
+            surfaces = json.dumps(
+                [e.to_dict() for e in store.list_events()]
+                + store.list_served_requests()
+                + store.canary_activations()
+            )
+            assert pointer.routing_salt not in surfaces, "the routing salt was recorded"
+            # The bucket is what gets recorded, and it is enough to analyse.
+            assert any(
+                row["routing_bucket"] is not None for row in store.list_served_requests()
+            )
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -3412,6 +3764,17 @@ TESTS = [
     test_batch_audit_continues_past_a_failure_and_runs_while_frozen,
     test_supervisor_children_are_one_shot_and_their_failure_is_recorded,
     test_supervisor_does_not_hold_self_modification_between_cycles,
+    test_canary_serves_its_own_slice_and_only_its_slice,
+    test_routing_is_stable_per_conversation_and_salted,
+    test_failing_canary_output_is_replaced_by_the_champion_not_the_fallback,
+    test_the_supervisor_not_serve_clears_a_breaching_canary,
+    test_no_automatic_champion_rollback_exists,
+    test_canary_activation_and_clearing_recover_from_every_interruption,
+    test_orphan_canary_pointer_is_removed_on_recovery,
+    test_edited_anchors_prevent_activation_and_clear_a_live_canary,
+    test_freeze_blocks_canary_activation,
+    test_canary_activation_requires_a_passing_gate_and_bounded_percent,
+    test_routing_salt_never_leaves_the_pointer,
     test_existing_smoke_suite_still_passes,
 ]
 

@@ -39,11 +39,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .anchors import ThresholdError, load_all_anchors, resolve_anchors_dir
+from . import canary as canary_module
+from . import freeze as freeze_module
+from .anchors import (
+    ThresholdError,
+    ThresholdIdentity,
+    load_all_anchors,
+    resolve_anchors_dir,
+)
 from .freeze import is_frozen
 from .serve import prepare_socket_path, runtime_dir_for
 from .spool import ingest
-from .store import ResidentError, ResidentStore, utcnow
+from .store import CONFIG_THRESHOLD_IDENTITY, ResidentError, ResidentStore, utcnow
 
 CONFIG_LAST_REFLECT = "last_reflect_at"
 CONFIG_LAST_AUDIT = "last_audit_at"
@@ -196,17 +203,32 @@ class Supervisor:
     def __post_init__(self) -> None:
         self.state_dir = Path(self.state_dir)
         self.store = ResidentStore.open(self.state_dir)
+        # Promotion recovery runs inside ResidentStore.open; canary recovery
+        # needs the pointer and the activation rows together, so it runs here.
+        canary_module.recover(self.store)
 
     def close(self) -> None:
         self.store.close()
 
     # --- clocks ------------------------------------------------------------
 
-    def _limits(self) -> Any:
-        _identity, _gate, budget, _serving = load_all_anchors(
+    def _anchors(self) -> tuple[Any, Any, Any]:
+        identity, _gate, budget, serving = load_all_anchors(
             resolve_anchors_dir(self.anchors_dir)
         )
-        return budget
+        return identity, budget, serving
+
+    def _anchor_drift(self, identity: Any) -> str | None:
+        """The anchor field that changed since init, or None."""
+
+        recorded = self.store.get_config(CONFIG_THRESHOLD_IDENTITY)
+        if not recorded:
+            return "unrecorded"
+        try:
+            expected = ThresholdIdentity.from_dict(json.loads(recorded))
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return "unreadable"
+        return expected.mismatch_field(identity)
 
     def _due(self, key: str, interval_seconds: int) -> bool:
         last = self.store.get_config(key)
@@ -228,12 +250,50 @@ class Supervisor:
         result["ingested"] = report.inserted
 
         try:
-            limits = self._limits()
+            identity, limits, serving = self._anchors()
         except ThresholdError as exc:
             # Without anchors there are no intervals to honour and no gate to
             # enforce; the clocks stop rather than guessing.
             result["error"] = f"anchors unusable: {exc}"
+            # Anchors define the canary's own limits, so a canary cannot be
+            # supervised without them. Clearing it is the conservative move.
+            if canary_module.active_pointer(self.store) is not None:
+                canary_module.clear(
+                    self.store, reason="serving anchors unusable", actor="supervisor", auto=True
+                )
+                result["canary_cleared"] = True
             return result
+
+        # An anchor edited after init changes the canary's own limits and the
+        # guard patterns a running canary is judged by, so a live canary can no
+        # longer be supervised under the terms it was activated on.
+        drift = self._anchor_drift(identity)
+        if drift is not None:
+            result["anchor_drift"] = drift
+            if canary_module.active_pointer(self.store) is not None:
+                canary_module.clear(
+                    self.store,
+                    reason=f"anchor files changed since init ({drift})",
+                    actor="supervisor",
+                    auto=True,
+                )
+                result["canary_cleared"] = True
+            if not is_frozen(self.store):
+                freeze_module.freeze(
+                    self.store,
+                    reason=f"anchor files changed since init ({drift})",
+                    actor="supervisor",
+                    trigger={"mismatch_field": drift},
+                )
+            result["frozen"] = True
+            return result
+
+        # Acting on what serve spooled is the supervisor's job: the serving
+        # process holds a read-only connection and cannot clear a canary or
+        # freeze by itself.
+        reverted = canary_module.enforce(self.store, serving, anchors_dir=self.anchors_dir)
+        if reverted is not None:
+            result["canary_auto_reverted"] = reverted
 
         frozen = is_frozen(self.store)
         result["frozen"] = frozen

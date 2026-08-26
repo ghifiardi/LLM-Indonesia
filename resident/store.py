@@ -298,6 +298,26 @@ _MIGRATION_7 = (
     "CREATE INDEX IF NOT EXISTS idx_vetoes_kind ON serving_vetoes(kind, created_at)",
 )
 
+_MIGRATION_8 = (
+    """
+    CREATE TABLE IF NOT EXISTS canary_activations (
+        seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+        activation_id   TEXT NOT NULL UNIQUE,
+        created_at      TEXT NOT NULL,
+        candidate_id    TEXT NOT NULL,
+        artifact_hash   TEXT NOT NULL,
+        percent         INTEGER NOT NULL,
+        gate_verdict_id TEXT,
+        reason          TEXT NOT NULL DEFAULT '',
+        actor           TEXT NOT NULL DEFAULT '',
+        state           TEXT NOT NULL,
+        resolved_at     TEXT,
+        resolved_reason TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_canary_state ON canary_activations(state)",
+)
+
 #: Sequential schema migrations, applied in order for any version gap.
 #:
 #: Append a new ``(version, statements)`` entry; never edit a shipped one. Each
@@ -312,6 +332,7 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (5, _MIGRATION_5),
     (6, _MIGRATION_6),
     (7, _MIGRATION_7),
+    (8, _MIGRATION_8),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -382,6 +403,7 @@ class ResidentStore:
         self.public_eval_dir = self.state_dir / "eval" / "public"
         self.db_path = self.state_dir / "state.db"
         self.champion_path = self.pointer_dir / "champion.json"
+        self.canary_path = self.pointer_dir / "canary.json"
         self.spool_dir = self.state_dir / "spool"
         self._conn: sqlite3.Connection | None = None
         self._readonly = False
@@ -1371,6 +1393,91 @@ class ResidentStore:
             tmp_path.unlink(missing_ok=True)
             raise
         return champion
+
+    # --- canary pointer and activations -------------------------------------
+
+    def read_canary(self) -> dict[str, Any] | None:
+        if not self.canary_path.is_file():
+            return None
+        try:
+            return json.loads(self.canary_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ResidentError(f"Canary pointer {self.canary_path} is unreadable: {exc}") from exc
+
+    def write_canary(self, payload: dict[str, Any]) -> None:
+        """Atomically replace the canary pointer, mode 0600."""
+
+        body = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        tmp_path = self.pointer_dir / f".canary-{new_id()}.json"
+        try:
+            _write_bytes_durably(tmp_path, body.encode("utf-8"))
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, self.canary_path)
+            _fsync_dir(self.pointer_dir)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    def clear_canary_pointer(self) -> None:
+        self.canary_path.unlink(missing_ok=True)
+        _fsync_dir(self.pointer_dir)
+
+    def insert_canary_activation(self, record: dict[str, Any]) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO canary_activations
+                    (activation_id, created_at, candidate_id, artifact_hash, percent,
+                     gate_verdict_id, reason, actor, state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["activation_id"],
+                    utcnow(),
+                    record["candidate_id"],
+                    record["artifact_hash"],
+                    int(record["percent"]),
+                    record.get("gate_verdict_id"),
+                    record.get("reason", ""),
+                    record.get("actor", ""),
+                    record["state"],
+                ),
+            )
+
+    def set_canary_activation_state(
+        self, activation_id: str, state: str, resolved_reason: str = ""
+    ) -> int:
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE canary_activations
+                SET state = ?, resolved_at = ?, resolved_reason = ?
+                WHERE activation_id = ?
+                """,
+                (
+                    state,
+                    utcnow() if state in ("cleared", "abandoned") else None,
+                    resolved_reason,
+                    activation_id,
+                ),
+            )
+            return cursor.rowcount
+
+    def get_canary_activation(self, activation_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM canary_activations WHERE activation_id = ?", (activation_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def canary_activations(self, states: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM canary_activations"
+        params: tuple[Any, ...] = ()
+        if states:
+            placeholders = ",".join("?" for _ in states)
+            sql += f" WHERE state IN ({placeholders})"
+            params = tuple(states)
+        sql += " ORDER BY seq DESC"
+        return [dict(row) for row in self.conn.execute(sql, params)]
 
     # --- promotion protocol ------------------------------------------------
 

@@ -27,6 +27,9 @@ python3 -m godel_agent_prototype.resident ask "kartu saya hilang"
 python3 -m godel_agent_prototype.resident ingest
 python3 -m godel_agent_prototype.resident supervise
 python3 -m godel_agent_prototype.resident audit --all-unaudited [--limit N]
+python3 -m godel_agent_prototype.resident canary set <id> --percent 10 --reason "..."
+python3 -m godel_agent_prototype.resident canary status
+python3 -m godel_agent_prototype.resident canary clear --reason "..."
 ```
 
 Exit code `3` means an action was blocked by a freeze.
@@ -92,6 +95,52 @@ Serial, bounded by `--limit`, one immutable record per candidate, and one
 candidate's failure never aborts the run. Whatever the limit leaves is reported
 explicitly: silence about what was dropped would read as "everything was
 covered". It does not stop for a freeze.
+
+## The canary
+
+A canary serves a deterministic slice of traffic. It is **not** champion, and
+that is what makes automatic clearing consistent with promotion staying
+human-only: clearing a canary demotes something that was never promoted.
+
+Activation requires a fresh passing gate verdict — a canary serves real users,
+so it clears the same bar a promotion would, minus only the human's final say —
+and it is blocked while frozen.
+
+### Routing
+
+`HMAC-SHA256(routing_salt, conversation_id || query)`, with a fresh secret per
+activation:
+
+- the bucket cannot be predicted from the query, so it cannot be steered;
+- candidate code never receives the salt — it gets a query and the KB;
+- raising the percentage only adds buckets, so users already inside the slice
+  are not reshuffled;
+- a new activation gets a new salt, reshuffling deliberately.
+
+Only the bucket is recorded. The salt never reaches an event, a request row, or
+an activation row. With no conversation id the query is the routing key, which
+biases sampling toward repeated questions.
+
+### What happens when a canary misbehaves
+
+Its output is discarded and **the champion answers instead** — not the fixed
+fallback, because one misbehaving candidate should not degrade everyone's
+answer. The champion's own answer is guarded too; only if that also fails does
+the fallback go out.
+
+The serving process cannot clear the canary: it holds a read-only connection
+and cannot write a transition or a freeze. It spools the observation, and the
+supervisor acts on it — clearing the canary through the same
+intent → atomic pointer → finalize protocol as promotion, and freezing.
+
+**The champion is never moved automatically.** When the champion itself trips a
+hard veto, the answer is withheld, the observation is recorded, and the resident
+freezes with the pointer unchanged. Choosing a rollback target stays a human
+decision, and `audit` and `rollback` remain available throughout.
+
+An anchor edited after init changes the canary's own limits and the guard
+patterns it is judged by, so the supervisor clears a live canary and freezes
+when it notices the drift.
 
 ## Serving
 
@@ -556,9 +605,8 @@ smoke test must not break this.
 
 ## Not in this phase
 
-Canary and the serving path
-(Phase 4); split
-serve/reflect/audit clocks (Phase 4); automatic promotion (Phase 5); proactive
+Automatic promotion (Phase 5) — the gate
+proactive
 triggers (Phase 6); tiers above T1 (Phase 7). Batch and scheduled auditing
 arrives with the audit clock in Phase 4; Phase 2 has `audit <candidate-id>`
 only, because batching brings queue limits, partial-failure semantics, and

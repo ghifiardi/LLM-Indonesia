@@ -9,12 +9,10 @@
 Every transition is recorded immutably and names what authorized it: a gate
 verdict id, a rollback's motivating evidence, or the seed bootstrap.
 
-**Canary is deliberately absent.** It has no meaning until a serving path
-exists — a recorded state with a pointer nothing reads is the kind of
-aspirational surface that later gets mistaken for a working traffic split.
-Phase 4 inserts it between ``shadow`` and ``champion`` by adding ``CANARY`` to
-``LEGAL_TRANSITIONS[SHADOW]`` and a ``CANARY -> CHAMPION`` entry; no existing
-transition changes.
+``canary`` sits between ``shadow`` and ``champion`` and now has a reader: the
+serving process routes a deterministic slice of traffic to it. It was
+deliberately absent until that reader existed, because a recorded state with a
+pointer nothing reads gets mistaken for a working traffic split.
 """
 
 from __future__ import annotations
@@ -23,19 +21,25 @@ from typing import Any
 
 PROPOSED = "proposed"
 SHADOW = "shadow"
+CANARY = "canary"
 CHAMPION = "champion"
 SUPERSEDED = "superseded"
 ROLLED_BACK = "rolled_back"
 REJECTED = "rejected"
 
-STATES = frozenset({PROPOSED, SHADOW, CHAMPION, SUPERSEDED, ROLLED_BACK, REJECTED})
+STATES = frozenset(
+    {PROPOSED, SHADOW, CANARY, CHAMPION, SUPERSEDED, ROLLED_BACK, REJECTED}
+)
 
 #: ``None`` is the pre-state of a candidate that has just been archived.
 LEGAL_TRANSITIONS: dict[str | None, frozenset[str]] = {
     None: frozenset({PROPOSED}),
     PROPOSED: frozenset({SHADOW, REJECTED}),
-    # Phase 4 adds CANARY here.
-    SHADOW: frozenset({CHAMPION, REJECTED}),
+    SHADOW: frozenset({CANARY, CHAMPION, REJECTED}),
+    # A canary serves a slice; it is not champion. Clearing it is a demotion of
+    # something that was never promoted, which is why that one step may happen
+    # automatically while promotion stays human-invoked.
+    CANARY: frozenset({CHAMPION, REJECTED}),
     CHAMPION: frozenset({SUPERSEDED, ROLLED_BACK}),
     # A superseded candidate can be restored: that is what rollback does.
     SUPERSEDED: frozenset({CHAMPION}),
@@ -48,6 +52,8 @@ LEGAL_TRANSITIONS: dict[str | None, frozenset[str]] = {
 #: Reasons a transition may be authorized by, beyond a gate verdict id.
 AUTHORITY_SEED_BOOTSTRAP = "seed_bootstrap"
 AUTHORITY_ROLLBACK = "rollback"
+AUTHORITY_CANARY_ACTIVATION = "canary_activation"
+AUTHORITY_CANARY_AUTO_REVERT = "canary_auto_revert"
 
 
 class IllegalTransitionError(ValueError):

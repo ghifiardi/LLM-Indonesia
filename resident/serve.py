@@ -44,8 +44,9 @@ from .anchors import (
     load_all_anchors,
     resolve_anchors_dir,
 )
+from . import canary as canary_module
 from .runner import RunnerLimits, ServeOutcome, SubprocessCandidateRunner
-from .spool import KIND_CHAMPION_VETO, KIND_SERVED_REQUEST, SpoolWriter
+from .spool import KIND_CANARY_VETO, KIND_CHAMPION_VETO, KIND_SERVED_REQUEST, SpoolWriter
 from .store import (
     CONFIG_ENVIRONMENT,
     CONFIG_THRESHOLD_IDENTITY,
@@ -55,6 +56,7 @@ from .store import (
 )
 
 ROUTE_CHAMPION = "champion"
+ROUTE_CANARY = "canary"
 ROUTE_FALLBACK = "fallback"
 
 VETO_RAISED = "raised"
@@ -180,32 +182,75 @@ def _classify(outcome: ServeOutcome, config: ServingConfig) -> str:
     return ""
 
 
-def answer(context: ServingContext, query: str, request_id: str | None = None) -> dict[str, Any]:
-    """Answer one query from the champion, guarded.
+def _run(context: ServingContext, policy_source: str, artifact_hash: str,
+         query: str) -> tuple[Any, str]:
+    outcome = context.runner.execute_one(
+        policy_source=policy_source,
+        artifact_hash=artifact_hash,
+        query=query,
+        kb=DEFAULT_KB,
+        limits=context.limits,
+    )
+    return outcome, _classify(outcome, context.config)
 
-    Canary routing arrives in the next commit; this path serves the champion and
-    establishes the guard every route will pass through.
+
+def answer(
+    context: ServingContext,
+    query: str,
+    request_id: str | None = None,
+    conversation_id: str = "",
+) -> dict[str, Any]:
+    """Answer one query, guarded, from the canary slice or the champion.
+
+    A canary that trips a hard veto never reaches the client: its output is
+    discarded, the champion answers instead, and the champion's own answer is
+    guarded too. Only if that also fails does the fixed fallback go out.
     """
 
     request_id = request_id or new_id()
     champion = context.store.read_champion()
     if champion is None:
-        return _fallback_response(context, request_id, ROUTE_CHAMPION, None, "no_champion")
+        return _fallback_response(context, request_id, ROUTE_CHAMPION, None, "no_champion",
+                                  query=query)
+
+    pointer = _canary_pointer(context)
+    requested_route = ROUTE_CHAMPION
+    bucket: int | None = None
+    canary_veto = ""
+
+    if pointer is not None:
+        selected, bucket = canary_module.routes_to_canary(pointer, query, conversation_id)
+        if selected:
+            requested_route = ROUTE_CANARY
+            outcome, canary_veto = _run(
+                context, context.store.read_artifact(pointer.artifact_hash),
+                pointer.artifact_hash, query,
+            )
+            if not canary_veto:
+                return _success_response(
+                    context, request_id, query, outcome, ROUTE_CANARY, ROUTE_CANARY,
+                    champion, pointer, bucket,
+                )
+            # Discarded here. Serve cannot clear the canary itself — it holds a
+            # read-only connection — so it records the observation and the
+            # supervisor acts on it.
+            context.spool.write(
+                KIND_CANARY_VETO,
+                new_id(),
+                {
+                    "candidate_id": pointer.candidate_id,
+                    "artifact_hash": pointer.artifact_hash,
+                    "request_id": request_id,
+                    "veto": canary_veto,
+                    "detail": outcome.to_record(),
+                },
+                durable=True,
+            )
 
     policy_source = context.store.read_artifact(champion.artifact_hash)
-    outcome = context.runner.execute_one(
-        policy_source=policy_source,
-        artifact_hash=champion.artifact_hash,
-        query=query,
-        kb=DEFAULT_KB,
-        limits=context.limits,
-    )
-    veto = _classify(outcome, context.config)
+    outcome, veto = _run(context, policy_source, champion.artifact_hash, query)
 
     if veto:
-        # Suppressed: the output is discarded here and never travels further.
-        # The observation records *that* it happened and which veto fired, not
-        # what the policy said.
         context.spool.write(
             KIND_CHAMPION_VETO,
             new_id(),
@@ -219,35 +264,64 @@ def answer(context: ServingContext, query: str, request_id: str | None = None) -
             durable=True,
         )
         return _fallback_response(
-            context, request_id, ROUTE_CHAMPION, champion, veto, outcome=outcome, query=query
+            context, request_id, requested_route, champion, veto,
+            outcome=outcome, query=query, bucket=bucket, pointer=pointer,
         )
 
-    response = {
-        "request_id": request_id,
-        "ok": True,
-        "answer": outcome.output,
-        "route": ROUTE_CHAMPION,
-        "fallback_used": False,
-        "latency_ms": outcome.latency_ms,
-    }
+    return _success_response(
+        context, request_id, query, outcome, requested_route, ROUTE_CHAMPION,
+        champion, pointer, bucket,
+    )
+
+
+def _canary_pointer(context: ServingContext) -> Any:
+    try:
+        return canary_module.active_pointer(context.store)
+    except Exception:
+        # A malformed pointer must not stop the champion answering.
+        return None
+
+
+def _success_response(
+    context: ServingContext,
+    request_id: str,
+    query: str,
+    outcome: Any,
+    requested_route: str,
+    actual_route: str,
+    champion: Any,
+    pointer: Any,
+    bucket: int | None,
+) -> dict[str, Any]:
+    served_id = pointer.candidate_id if actual_route == ROUTE_CANARY else champion.candidate_id
+    served_hash = pointer.artifact_hash if actual_route == ROUTE_CANARY else champion.artifact_hash
     context.spool.write(
         KIND_SERVED_REQUEST,
         request_id,
         {
             "query": query,
             "answer": outcome.output,
-            "requested_route": ROUTE_CHAMPION,
-            "actual_route": ROUTE_CHAMPION,
-            "served_candidate_id": champion.candidate_id,
-            "served_artifact_hash": champion.artifact_hash,
+            "requested_route": requested_route,
+            "actual_route": actual_route,
+            "served_candidate_id": served_id,
+            "served_artifact_hash": served_hash,
             "champion_candidate_id": champion.candidate_id,
-            "canary_candidate_id": None,
+            "canary_candidate_id": pointer.candidate_id if pointer is not None else None,
             "fallback_used": False,
-            "routing_bucket": None,
+            # The bucket is recorded; the salt that produced it never is.
+            "routing_bucket": bucket,
             **outcome.to_record(),
         },
     )
-    return response
+    return {
+        "request_id": request_id,
+        "ok": True,
+        "answer": outcome.output,
+        "route": actual_route,
+        "requested_route": requested_route,
+        "fallback_used": False,
+        "latency_ms": outcome.latency_ms,
+    }
 
 
 def _fallback_response(
@@ -258,6 +332,8 @@ def _fallback_response(
     veto: str,
     outcome: ServeOutcome | None = None,
     query: str = "",
+    bucket: int | None = None,
+    pointer: Any = None,
 ) -> dict[str, Any]:
     """The fixed safe answer. Never an error marker, never suppressed text."""
 
@@ -272,9 +348,9 @@ def _fallback_response(
             "served_candidate_id": None,
             "served_artifact_hash": None,
             "champion_candidate_id": getattr(champion, "candidate_id", None),
-            "canary_candidate_id": None,
+            "canary_candidate_id": getattr(pointer, "candidate_id", None),
             "fallback_used": True,
-            "routing_bucket": None,
+            "routing_bucket": bucket,
             "status": veto,
             "latency_ms": outcome.latency_ms if outcome is not None else 0,
             "timed_out": bool(outcome.timed_out) if outcome is not None else False,
@@ -287,6 +363,7 @@ def _fallback_response(
         "ok": True,
         "answer": context.config.safe_fallback,
         "route": ROUTE_FALLBACK,
+        "requested_route": requested_route,
         "fallback_used": True,
         "latency_ms": outcome.latency_ms if outcome is not None else 0,
     }
@@ -384,7 +461,11 @@ def handle_connection(context: ServingContext, conn: socket.socket) -> None:
             raise ValueError("query exceeds the length cap")
         request_id = request.get("request_id")
         request_id = request_id if isinstance(request_id, str) and request_id else new_id()
-        response = answer(context, query, request_id=request_id)
+        conversation_id = request.get("conversation_id")
+        conversation_id = conversation_id if isinstance(conversation_id, str) else ""
+        response = answer(
+            context, query, request_id=request_id, conversation_id=conversation_id
+        )
     except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
         # Deliberately does not echo the offending input: a diagnostic must not
         # become a place raw queries are written.
@@ -436,11 +517,16 @@ def serve_forever(
 
 
 def ask(socket_path: Path, query: str, request_id: str | None = None,
-        timeout: float = 60.0) -> dict[str, Any]:
+        timeout: float = 60.0, conversation_id: str = "") -> dict[str, Any]:
     """Minimal client. Used by `resident ask` and by tests."""
 
     payload = json.dumps(
-        {"query": query, "request_id": request_id or new_id()}, ensure_ascii=False
+        {
+            "query": query,
+            "request_id": request_id or new_id(),
+            "conversation_id": conversation_id,
+        },
+        ensure_ascii=False,
     ) + "\n"
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(timeout)

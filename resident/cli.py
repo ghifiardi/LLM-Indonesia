@@ -30,6 +30,7 @@ from . import states
 from . import budget as budget_module
 from .anchors import ThresholdError, load_thresholds, resolve_anchors_dir
 from .freeze import FrozenError, UnfreezeError, active_freeze, freeze, unfreeze
+from . import canary as canary_module
 from .gate import GateError, evaluate_gate
 from .rollback import RollbackError, assess_ancestors, rollback
 from . import serve as serve_module
@@ -275,6 +276,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "ingest", help="Drain the serving spool into the database."
     )
+
+    canary_parser = subparsers.add_parser(
+        "canary", help="Route a slice of traffic to a candidate, or stop doing so."
+    )
+    canary_sub = canary_parser.add_subparsers(dest="canary_command", required=True)
+    canary_set = canary_sub.add_parser("set", help="Activate a canary. Blocked while frozen.")
+    canary_set.add_argument("candidate_id")
+    canary_set.add_argument("--percent", type=int, required=True)
+    canary_set.add_argument("--reason", required=True)
+    canary_set.add_argument("--actor", default="")
+    canary_set.add_argument("--anchors-dir", default=None)
+    canary_clear = canary_sub.add_parser("clear", help="Stop routing traffic to the canary.")
+    canary_clear.add_argument("--reason", required=True)
+    canary_clear.add_argument("--actor", default="")
+    canary_sub.add_parser("status", help="Show the active canary, if any.")
 
     supervise_parser = subparsers.add_parser(
         "supervise",
@@ -531,6 +547,10 @@ def _cmd_status(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
                 if current_freeze is not None
                 else "no"
             ),
+            "canary        "
+            + (
+                f"{_canary_line(store)}"
+            ),
             "budget        "
             + (
                 ", ".join(
@@ -605,6 +625,60 @@ def _cmd_show(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
         lines.append("")
         lines.append(code.rstrip())
     emit(payload, lines)
+    return EXIT_OK
+
+
+def _cmd_canary(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    if args.canary_command == "status":
+        pointer = canary_module.active_pointer(store)
+        if pointer is None:
+            emit({"canary": None}, ["no active canary"])
+            return EXIT_OK
+        breaches = canary_module.recent_breaches(store, pointer.candidate_id, 3600)
+        emit(
+            {"canary": pointer.public_dict(), "recent_breaches": breaches},
+            [
+                f"canary {pointer.candidate_id}",
+                f"  activation  {pointer.activation_id}",
+                f"  percent     {pointer.percent}%",
+                f"  since       {pointer.activated_at}",
+                f"  breaches    {breaches} in the last hour",
+            ],
+        )
+        return EXIT_OK
+
+    if args.canary_command == "clear":
+        activation_id = canary_module.clear(store, reason=args.reason, actor=args.actor)
+        if activation_id is None:
+            emit({"cleared": None}, ["no active canary to clear"])
+            return EXIT_OK
+        emit({"cleared": activation_id}, [f"cleared canary activation {activation_id}"])
+        return EXIT_OK
+
+    try:
+        pointer = canary_module.activate(
+            store,
+            args.candidate_id,
+            percent=args.percent,
+            reason=args.reason,
+            actor=args.actor,
+            anchors_dir=args.anchors_dir,
+        )
+    except canary_module.CanaryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    assert pointer is not None
+    emit(
+        pointer.public_dict(),
+        [
+            f"canary {pointer.candidate_id} serving {pointer.percent}% of traffic",
+            f"  activation  {pointer.activation_id}",
+            "",
+            "The champion is unchanged. A canary that breaches its hard vetoes is",
+            "cleared automatically and the resident freezes; the champion is never",
+            "moved without a human.",
+        ],
+    )
     return EXIT_OK
 
 
@@ -979,6 +1053,7 @@ HANDLERS = {
     "ask": _cmd_ask,
     "ingest": _cmd_ingest,
     "supervise": _cmd_supervise,
+    "canary": _cmd_canary,
 }
 
 
@@ -1015,6 +1090,16 @@ def _build_mutator(args: argparse.Namespace, spec: Any, environment: Any) -> Mut
 def _read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def _canary_line(store: ResidentStore) -> str:
+    try:
+        pointer = canary_module.active_pointer(store)
+    except ResidentError as exc:
+        return f"unreadable ({exc})"
+    if pointer is None:
+        return "none"
+    return f"{pointer.candidate_id[:12]} at {pointer.percent}%"
 
 
 def _fmt_isolation(profile: dict[str, Any]) -> str:
