@@ -36,3 +36,8 @@ android/**/app/src/main/jniLibs/
 tantular_office_addin/certs/
 tantular_office_addin/*.mp4
 tantular_office_addin/.venv-doc/
+
+# Resident loop runtime state (sqlite metadata, artifacts, champion pointer).
+# Source, tests, and schema definitions under resident/ stay tracked.
+.resident/
+resident/.resident/

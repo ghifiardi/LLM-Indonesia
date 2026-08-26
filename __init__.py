@@ -28,6 +28,7 @@ from .llm_mutator import (
     extract_solve_code,
 )
 from .benchmark_ollama_models import benchmark_models, rank_leaderboard
+from . import resident
 
 __all__ = [
     "Action",
@@ -65,4 +66,5 @@ __all__ = [
     "extract_solve_code",
     "benchmark_models",
     "rank_leaderboard",
+    "resident",
 ]
