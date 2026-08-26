@@ -33,7 +33,7 @@ from .anchors import (
     load_anchor_split,
     resolve_anchors_dir,
 )
-from . import budget, serve, spool, states
+from . import budget, serve, spool, states, supervisor
 from .anchors import (
     ANCHORS_DIR_ENV_VAR as _ANCHORS_ENV,
 )
@@ -63,7 +63,15 @@ from .gate import (
     VetoResult,
     evaluate_gate,
 )
-from .audit import AuditError, AuditOutcome, run_audit
+from .audit import (
+    AuditError,
+    AuditOutcome,
+    BatchAuditReport,
+    DEFAULT_BATCH_LIMIT,
+    audit_all_unaudited,
+    run_audit,
+    unaudited_candidates,
+)
 from .experience import ExperienceLog, KNOWN_OUTCOMES
 from .models import (
     AUDIT_FAILED,
@@ -152,6 +160,11 @@ from .store import (
 )
 
 __all__ = [
+    "unaudited_candidates",
+    "audit_all_unaudited",
+    "DEFAULT_BATCH_LIMIT",
+    "BatchAuditReport",
+    "supervisor",
     "load_all_anchors",
     "ServingConfig",
     "spool",

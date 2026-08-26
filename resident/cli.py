@@ -34,7 +34,13 @@ from .gate import GateError, evaluate_gate
 from .rollback import RollbackError, assess_ancestors, rollback
 from . import serve as serve_module
 from . import spool as spool_module
-from .audit import AuditError, run_audit
+from . import supervisor as supervisor_module
+from .audit import (
+    DEFAULT_BATCH_LIMIT,
+    AuditError,
+    audit_all_unaudited as audit_batch,
+    run_audit,
+)
 from ..code_llm_mutator import CodeLLMMutationProvider
 from ..llm_mutator import LLMMutationProvider, OpenAICompatibleTransport
 from .archive import CandidateArchive
@@ -181,13 +187,28 @@ def build_parser() -> argparse.ArgumentParser:
         "audit",
         help="Audit one candidate against the holdout. Informational; never promotes.",
     )
-    audit_parser.add_argument("candidate_id")
+    audit_parser.add_argument("candidate_id", nargs="?", default=None)
     audit_parser.add_argument(
         "--anchors-dir",
         default=None,
         help="Human-owned evaluation source. Must match the source used at init.",
     )
     audit_parser.add_argument("--timeout", type=float, default=300.0)
+    audit_parser.add_argument(
+        "--all-unaudited",
+        action="store_true",
+        dest="all_unaudited",
+        help=(
+            "Audit every candidate lacking a passing audit of its artifact against "
+            "the current dataset. Serial and bounded; runs even while frozen."
+        ),
+    )
+    audit_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Batch cap. Defaults to a bounded value; anything skipped is reported.",
+    )
 
     gate_parser = subparsers.add_parser(
         "gate",
@@ -253,6 +274,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser(
         "ingest", help="Drain the serving spool into the database."
+    )
+
+    supervise_parser = subparsers.add_parser(
+        "supervise",
+        help="Own the champion pointer and drive the reflect and audit clocks.",
+    )
+    supervise_parser.add_argument("--anchors-dir", default=None)
+    supervise_parser.add_argument("--poll-interval", type=float, default=0.5)
+    supervise_parser.add_argument(
+        "--max-ticks", type=int, default=None, help="Stop after this many ticks."
     )
 
     return parser
@@ -577,7 +608,79 @@ def _cmd_show(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
     return EXIT_OK
 
 
+def _cmd_supervise(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    state_dir = store.state_dir
+    store.close()
+    supervisor = supervisor_module.Supervisor(
+        state_dir, anchors_dir=args.anchors_dir, poll_interval=args.poll_interval
+    )
+    print(f"supervising {state_dir}", file=sys.stderr)
+    print(
+        "owns the champion pointer; reflect and audit run as one-shot children.",
+        file=sys.stderr,
+    )
+    try:
+        supervisor.run(max_ticks=args.max_ticks)
+    except KeyboardInterrupt:
+        pass
+    except (supervisor_module.SupervisorError, ResidentError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    finally:
+        supervisor.close()
+    return EXIT_OK
+
+
+def _delegate_if_supervised(
+    store: ResidentStore, message: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Route a pointer-changing command to the supervisor, if one owns this state.
+
+    While a supervisor holds the lock it is the single writer of the champion
+    pointer, so the CLI asks it rather than writing alongside it. With no
+    supervisor running, direct operation is still available — that is what
+    makes offline use possible.
+    """
+
+    active = supervisor_module.active_supervisor(store.state_dir)
+    if active is None:
+        return None
+    socket_path = active.get("control_socket")
+    if not socket_path:
+        raise supervisor_module.SupervisorError(
+            "A supervisor owns this state directory but published no control socket."
+        )
+    return supervisor_module.call_control(Path(socket_path), message)
+
+
 def _cmd_audit(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    if args.all_unaudited:
+        report = audit_batch(
+            store,
+            anchors_dir=args.anchors_dir,
+            limit=args.limit if args.limit is not None else DEFAULT_BATCH_LIMIT,
+            timeout_seconds=args.timeout,
+        )
+        lines = [
+            f"audited {report.succeeded}/{report.attempted} candidate(s)",
+            f"  failed            {report.failed}",
+            f"  already audited   {report.already_audited}",
+            f"  not auditable     {report.not_auditable}",
+            f"  skipped over limit {report.skipped_over_limit}",
+        ]
+        if report.skipped_over_limit:
+            lines.append("")
+            lines.append(
+                f"{report.skipped_over_limit} candidate(s) were not audited this run. "
+                "Raise --limit or run again."
+            )
+        emit(report.to_dict(), lines)
+        return EXIT_OK if report.failed == 0 else EXIT_ERROR
+
+    if not args.candidate_id:
+        print("error: a candidate id is required unless --all-unaudited is given",
+              file=sys.stderr)
+        return EXIT_ERROR
     try:
         outcome = run_audit(
             store,
@@ -649,6 +752,25 @@ def _cmd_gate(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
 
 def _cmd_promote(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
     try:
+        delegated = _delegate_if_supervised(
+            store,
+            {
+                "command": "promote",
+                "candidate_id": args.candidate_id,
+                "reason": args.reason,
+                "actor": args.actor,
+            },
+        )
+    except supervisor_module.SupervisorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if delegated is not None:
+        if not delegated.get("ok"):
+            print(f"error: {delegated.get('error')}", file=sys.stderr)
+            return EXIT_ERROR
+        emit(delegated, [f"promoted via the supervisor: {delegated.get('champion')}"])
+        return EXIT_OK
+    try:
         champion = promote(
             store,
             args.candidate_id,
@@ -719,6 +841,26 @@ def _cmd_unfreeze(store: ResidentStore, args: argparse.Namespace, emit: Any) -> 
 
 
 def _cmd_rollback(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    if not args.dry_run:
+        try:
+            delegated = _delegate_if_supervised(
+                store,
+                {
+                    "command": "rollback",
+                    "reason": args.reason,
+                    "actor": args.actor,
+                    "target": args.target,
+                },
+            )
+        except supervisor_module.SupervisorError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        if delegated is not None:
+            if not delegated.get("ok"):
+                print(f"error: {delegated.get('error')}", file=sys.stderr)
+                return EXIT_ERROR
+            emit(delegated, [f"rolled back via the supervisor: {delegated.get('champion')}"])
+            return EXIT_OK
     if args.dry_run:
         assessments = assess_ancestors(store, anchors_dir=args.anchors_dir)
         lines = [f"{len(assessments)} ancestor(s) of the current champion"]
@@ -836,6 +978,7 @@ HANDLERS = {
     "serve": _cmd_serve,
     "ask": _cmd_ask,
     "ingest": _cmd_ingest,
+    "supervise": _cmd_supervise,
 }
 
 

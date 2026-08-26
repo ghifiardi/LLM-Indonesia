@@ -11,3 +11,12 @@ max_audits_per_day = 100
 # Consecutive failing gate evaluations tolerated before freezing. Derived from
 # the immutable gate_verdicts log rather than a separate counter.
 max_consecutive_gate_failures = 25
+
+# Supervisor clock cadence. The daily ceilings above are the real limit on how
+# much work happens; these decide how often it is attempted.
+#
+# The audit clock runs even while the resident is frozen: a weekly holdout
+# audit matters more during an incident, not less. Only reflection and
+# promotion are gated on the freeze.
+reflect_interval_seconds = 3600
+audit_interval_seconds = 604800

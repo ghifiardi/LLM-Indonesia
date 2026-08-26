@@ -425,7 +425,9 @@ class ResidentStore:
                     f"No state database at {self.db_path}. Run `init` first."
                 )
             uri = f"file:{self.db_path}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+            conn = sqlite3.connect(
+                uri, uri=True, isolation_level=None, check_same_thread=False
+            )
             conn.row_factory = sqlite3.Row
             self._conn = conn
             return conn
@@ -441,7 +443,11 @@ class ResidentStore:
                 f"Pass --state-dir or set ${STATE_DIR_ENV_VAR} to a writable path."
             ) from exc
 
-        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        # check_same_thread=False lets the store move between threads — the
+        # supervisor is constructed on one and runs its loop on another. It is
+        # never used *concurrently*: the supervisor accepts a control frame and
+        # ticks sequentially in a single thread.
+        conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")

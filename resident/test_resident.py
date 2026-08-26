@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,8 +27,10 @@ from ..godel_agent import Action, EvaluationResult, SelfState
 from ..dataset_env import load_cases_from_dir, split_cases_for_holdout
 from . import audit as audit_module
 from . import budget as budget_module
+from . import audit as audit_module
 from . import serve as serve_module
 from . import spool as spool_module
+from . import supervisor as supervisor_module
 from . import states
 from .anchors import ServingConfig, load_thresholds
 from .freeze import (
@@ -1201,7 +1204,9 @@ def _write_threshold_anchors(directory: Path, **gate_overrides: Any) -> None:
         "max_candidate_executions_per_day = 400\n"
         "max_promotions_per_day = 20\n"
         "max_audits_per_day = 100\n"
-        "max_consecutive_gate_failures = 25\n",
+        "max_consecutive_gate_failures = 25\n"
+        "reflect_interval_seconds = 60\n"
+        "audit_interval_seconds = 300\n",
         encoding="utf-8",
     )
     _write_serving_anchor(directory)
@@ -2479,7 +2484,9 @@ def test_budget_breach_freezes_through_the_single_path_and_is_immutable() -> Non
             "max_candidate_executions_per_day = 400\n"
             "max_promotions_per_day = 20\n"
             "max_audits_per_day = 1\n"
-            "max_consecutive_gate_failures = 25\n",
+            "max_consecutive_gate_failures = 25\n"
+            "reflect_interval_seconds = 60\n"
+            "audit_interval_seconds = 300\n",
             encoding="utf-8",
         )
         _identity, _gate, limits = load_thresholds(anchors)
@@ -3043,6 +3050,239 @@ def test_spool_is_private_and_quarantine_records_no_content() -> None:
         assert (spool_dir / "quarantine").stat().st_mode & 0o777 == 0o700
 
 
+# --- Phase 4B: supervisor, clocks, batch audit -------------------------------
+
+
+@contextmanager
+def supervised_state(seed: str = WEAK_POLICY) -> Iterator[tuple[Path, Path, Any]]:
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        state_dir = root / "state"
+        with opened(state_dir) as store:
+            initialize(store, env_name="id_support", seed_policy=seed,
+                       anchors_dir=str(anchors))
+        supervisor = supervisor_module.Supervisor(
+            state_dir, anchors_dir=str(anchors), poll_interval=0.2
+        )
+        try:
+            yield root, anchors, supervisor
+        finally:
+            supervisor.close()
+
+
+@contextmanager
+def running_supervisor(supervisor: Any) -> Iterator[Path]:
+    stop, ready = threading.Event(), threading.Event()
+    thread = threading.Thread(
+        target=supervisor.run, kwargs={"stop": stop, "ready": ready}, daemon=True
+    )
+    thread.start()
+    assert ready.wait(20), "supervisor did not start"
+    try:
+        yield supervisor_module.control_socket_path(supervisor.state_dir)
+    finally:
+        stop.set()
+        thread.join(timeout=25)
+
+
+def test_supervisor_lock_is_exclusive_and_released_on_exit() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        state_dir = root / "state"
+        assert supervisor_module.active_supervisor(state_dir) is None
+
+        with running_supervisor(supervisor):
+            info = supervisor_module.active_supervisor(state_dir)
+            assert info is not None and info["pid"] == os.getpid()
+            assert info["control_socket"]
+
+            # A second supervisor cannot take a directory that is already owned.
+            try:
+                supervisor_module.SupervisorLock(state_dir).acquire()
+            except supervisor_module.SupervisorError as exc:
+                assert "already owns" in str(exc)
+            else:
+                raise AssertionError("two supervisors owned one state directory")
+
+        # flock is released by the kernel, so a crashed supervisor cannot leave
+        # a directory permanently owned the way a pid file would.
+        assert supervisor_module.active_supervisor(state_dir) is None
+
+
+def test_clocks_fire_when_due_and_not_before() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        first = supervisor.tick()
+        assert first["reflected"] is True and first["audited"] is True
+
+        second = supervisor.tick()
+        assert second["reflected"] is False and second["audited"] is False
+
+
+def test_audit_clock_runs_while_frozen_but_reflection_does_not() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        supervisor.tick()  # consume the initial due-ness
+        freeze(supervisor.store, reason="incident", actor="ops")
+        supervisor.store.set_config(supervisor_module.CONFIG_LAST_REFLECT, "")
+        supervisor.store.set_config(supervisor_module.CONFIG_LAST_AUDIT, "")
+
+        result = supervisor.tick()
+        assert result["frozen"] is True
+        # A weekly holdout audit matters more during an incident, not less.
+        assert result["audited"] is True
+        assert result["reflected"] is False
+
+
+def test_supervisor_control_channel_is_small_and_refuses_the_unknown() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        with running_supervisor(supervisor) as socket_path:
+            assert socket_path.stat().st_mode & 0o777 == 0o600
+
+            status = supervisor_module.call_control(socket_path, {"command": "status"})
+            assert status["ok"] and status["frozen"] is False
+            assert status["champion"]
+
+            unknown = supervisor_module.call_control(socket_path, {"command": "nope"})
+            assert unknown["ok"] is False and "unknown command" in unknown["error"]
+
+            missing = supervisor_module.call_control(socket_path, {"command": "promote"})
+            assert missing["ok"] is False and "missing field" in missing["error"]
+
+        assert supervisor_module.CONTROL_COMMANDS == frozenset(
+            {"promote", "rollback", "status", "ingest"}
+        )
+
+
+def test_pointer_changes_delegate_while_a_supervisor_owns_the_directory() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        state_dir = root / "state"
+        # With no supervisor, the CLI operates directly.
+        with opened(state_dir) as store:
+            assert supervisor_module.active_supervisor(state_dir) is None
+
+        with running_supervisor(supervisor) as socket_path:
+            with opened(state_dir) as store:
+                outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+                _audit_both(store, anchors, outcome.candidate_id)
+
+            response = supervisor_module.call_control(
+                socket_path,
+                {
+                    "command": "promote",
+                    "candidate_id": outcome.candidate_id,
+                    "reason": "via the supervisor",
+                    "actor": "tester",
+                },
+            )
+            assert response["ok"], response
+            assert response["champion"]["candidate_id"] == outcome.candidate_id
+
+        with opened(state_dir) as store:
+            assert store.require_champion().candidate_id == outcome.candidate_id
+            assert store.candidate_state(outcome.candidate_id) == states.CHAMPION
+
+
+def test_supervisor_restart_does_not_refire_a_cycle_that_already_ran() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        first = supervisor.tick()
+        assert first["reflected"] and first["audited"]
+        supervisor.close()
+
+        # A fresh supervisor over the same state reads the recorded timestamps
+        # rather than starting its clocks from zero.
+        restarted = supervisor_module.Supervisor(
+            root / "state", anchors_dir=str(anchors), poll_interval=0.2
+        )
+        try:
+            after = restarted.tick()
+            assert after["reflected"] is False
+            assert after["audited"] is False
+        finally:
+            restarted.close()
+
+
+def test_batch_audit_uses_artifact_and_current_dataset_identity() -> None:
+    with gated_state() as (root, anchors, store):
+        for _ in range(2):
+            reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+
+        pending, already, unauditable = audit_module.unaudited_candidates(store)
+        assert already == 0
+        assert len(pending) >= 2
+
+        first = audit_module.audit_all_unaudited(store, anchors_dir=str(anchors))
+        assert first.attempted == len(pending)
+        assert first.succeeded == first.attempted
+        assert first.skipped_over_limit == 0
+
+        # Nothing is pending a second time.
+        again = audit_module.audit_all_unaudited(store, anchors_dir=str(anchors))
+        assert again.attempted == 0
+        assert again.already_audited == first.attempted
+
+        # A dataset change retires the evidence: an audit against a previous
+        # anchor dataset says nothing about the current one.
+        identity = json.loads(store.get_config(CONFIG_DATASET_IDENTITY))
+        identity["manifest_hash"] = "0" * 64
+        store.set_config(CONFIG_DATASET_IDENTITY, json.dumps(identity, sort_keys=True))
+        stale_pending, stale_already, _ = audit_module.unaudited_candidates(store)
+        assert stale_already == 0, "audits against the old dataset must not count"
+        # Every candidate is pending again, including ones audited a moment ago.
+        assert len(stale_pending) == len(pending)
+
+
+def test_batch_audit_is_bounded_and_reports_what_it_skipped() -> None:
+    with gated_state() as (root, anchors, store):
+        for _ in range(3):
+            reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+
+        report = audit_module.audit_all_unaudited(store, anchors_dir=str(anchors), limit=2)
+        assert report.attempted == 2
+        # Silence about what was dropped would read as "everything was covered".
+        assert report.skipped_over_limit >= 1
+        assert len(report.audit_run_ids) == 2
+
+        event = [e for e in store.list_events() if e.kind == "batch_audit"][0]
+        assert event.payload["skipped_over_limit"] == report.skipped_over_limit
+
+
+def test_batch_audit_continues_past_a_failure_and_runs_while_frozen() -> None:
+    with gated_state() as (root, anchors, store):
+        for _ in range(2):
+            reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        # A rejected candidate is not auditable and must not stop the batch.
+        reflect_once(store, mutator=AlwaysMutator(BANNED_IMPORT_POLICY))
+
+        freeze(store, reason="incident", actor="ops")
+        report = audit_module.audit_all_unaudited(store, anchors_dir=str(anchors))
+
+        assert is_frozen(store), "the batch must not clear the freeze"
+        assert report.succeeded >= 2
+        assert report.not_auditable >= 1
+        # Every audited candidate got its own immutable record.
+        assert len(report.audit_run_ids) == report.attempted
+        assert store.count_audits() >= report.succeeded
+
+
+def test_supervisor_children_are_one_shot_and_their_failure_is_recorded() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        supervisor.python_executable = "/nonexistent/interpreter"
+        supervisor.store.set_config(supervisor_module.CONFIG_LAST_REFLECT, "")
+        result = supervisor.tick()
+        # A child that cannot start is recorded, never raised: the supervisor
+        # is the thing that must not die.
+        assert result["reflected"] is True
+        assert result["reflect"]["ok"] is False
+
+
+def test_supervisor_does_not_hold_self_modification_between_cycles() -> None:
+    source = (Path(__file__).resolve().parent / "supervisor.py").read_text(encoding="utf-8")
+    # Reflection and auditing are spawned as one-shot children rather than
+    # imported and run in-process, so nothing that can propose a
+    # self-modification stays resident between cycles.
+    assert "reflect-once" in source and "_spawn" in source
+    assert "from .reflect import reflect_once" not in source
+    assert "reflect_once(" not in source
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -3161,6 +3401,17 @@ TESTS = [
     test_ingestion_converges_from_every_interruption_point,
     test_oversized_spool_line_is_bounded_and_does_not_block_the_next_record,
     test_spool_is_private_and_quarantine_records_no_content,
+    test_supervisor_lock_is_exclusive_and_released_on_exit,
+    test_clocks_fire_when_due_and_not_before,
+    test_audit_clock_runs_while_frozen_but_reflection_does_not,
+    test_supervisor_control_channel_is_small_and_refuses_the_unknown,
+    test_pointer_changes_delegate_while_a_supervisor_owns_the_directory,
+    test_supervisor_restart_does_not_refire_a_cycle_that_already_ran,
+    test_batch_audit_uses_artifact_and_current_dataset_identity,
+    test_batch_audit_is_bounded_and_reports_what_it_skipped,
+    test_batch_audit_continues_past_a_failure_and_runs_while_frozen,
+    test_supervisor_children_are_one_shot_and_their_failure_is_recorded,
+    test_supervisor_does_not_hold_self_modification_between_cycles,
     test_existing_smoke_suite_still_passes,
 ]
 

@@ -238,6 +238,12 @@ class BudgetLimits:
     max_promotions_per_day: int
     max_audits_per_day: int
     max_consecutive_gate_failures: int
+    #: How often the supervisor's clocks fire. Human-owned like the ceilings
+    #: they sit beside: cadence is not a safety boundary on its own — the daily
+    #: counters are — but an agent that could shorten its own reflect interval
+    #: would be choosing how hard to push against them.
+    reflect_interval_seconds: int
+    audit_interval_seconds: int
 
 
 @dataclass(frozen=True)
@@ -295,6 +301,8 @@ _BUDGET_SPEC = (
     ("max_promotions_per_day", int, 1, 1000),
     ("max_audits_per_day", int, 1, 10000),
     ("max_consecutive_gate_failures", int, 1, 1000),
+    ("reflect_interval_seconds", int, 60, 86400),
+    ("audit_interval_seconds", int, 300, 2592000),
 )
 
 

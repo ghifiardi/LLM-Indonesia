@@ -25,9 +25,73 @@ python3 -m godel_agent_prototype.resident rollback --reason "reverting" [--dry-r
 python3 -m godel_agent_prototype.resident serve
 python3 -m godel_agent_prototype.resident ask "kartu saya hilang"
 python3 -m godel_agent_prototype.resident ingest
+python3 -m godel_agent_prototype.resident supervise
+python3 -m godel_agent_prototype.resident audit --all-unaudited [--limit N]
 ```
 
 Exit code `3` means an action was blocked by a freeze.
+
+## The supervisor and the three clocks
+
+```text
+supervisor (long-lived; the only process that promotes or rolls back)
+├── serve     long-lived, read-only          continuous
+├── reflect   one-shot child, on the clock   spawned per cycle
+└── audit     one-shot child, on the clock   spawned per run
+```
+
+Only two processes are long-lived: the supervisor and `serve`. Reflection and
+auditing are **one-shot children**, so nothing capable of proposing a
+self-modification stays resident between cycles — that keeps self-modification
+off the serving path by construction rather than by care, and a child that
+cannot even start is recorded rather than killing the supervisor.
+
+Ownership is real but bounded. While a supervisor holds the advisory `flock` on
+a state directory, pointer-changing CLI commands delegate to it over a
+`0600` control socket rather than writing the pointer alongside it; direct CLI
+operation stays available when no supervisor owns the directory, which is what
+makes offline use possible. `flock` is released by the kernel, so a crashed
+supervisor does not leave a directory permanently owned the way a pid file
+would.
+
+Under one OS account this is **coordination, not privilege separation** — any
+process running as this user could still write the pointer. Separate UIDs or
+read-only mounts remain deferred under AR-02.
+
+The control channel accepts four commands — `promote`, `rollback`, `status`,
+`ingest` — and nothing else. It exists so pointer changes have one writer, not
+to become a second CLI.
+
+### The audit clock runs while frozen
+
+| operation | frozen |
+|---|---|
+| serve, with output guards | allowed |
+| audit — manual or scheduled | allowed |
+| rollback | allowed |
+| reflect | blocked |
+| promote | blocked |
+
+A weekly holdout audit matters *more* during an incident, not less. Only
+forward motion is gated.
+
+Cadence lives in `budget.toml` beside the daily ceilings: the counters are the
+real limit on how much work happens, and these decide how often it is
+attempted. An agent that could shorten its own reflect interval would be
+choosing how hard to push against its own budget.
+
+### Batch auditing
+
+`audit --all-unaudited` audits every candidate lacking a passing audit **of its
+artifact against the current dataset identity**. An audit taken against a
+previous anchor dataset says nothing about the current one, so it does not
+count — treating it as sufficient would let a dataset change quietly retire the
+evidence requirement.
+
+Serial, bounded by `--limit`, one immutable record per candidate, and one
+candidate's failure never aborts the run. Whatever the limit leaves is reported
+explicitly: silence about what was dropped would read as "everything was
+covered". It does not stop for a freeze.
 
 ## Serving
 

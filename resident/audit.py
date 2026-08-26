@@ -16,6 +16,7 @@ mismatch — so the parent verifies the anchor source without ever opening it.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -40,7 +41,7 @@ from .audit_protocol import (
     message_for,
     parse_audit_response,
 )
-from .models import AUDIT_FAILED, AuditRecord
+from .models import AUDIT_FAILED, AUDIT_OK, AuditRecord
 from .reflect import bound_environment, get_environment_spec
 from .runner.limits import RunnerLimits
 from .runner.protocol import MAX_STDERR_BYTES, encode
@@ -61,6 +62,36 @@ from .store import (
 AUDITOR_MODULE = "godel_agent_prototype.resident.auditor_worker"
 
 AUDIT_EVENT = "holdout_audit"
+
+
+#: How many candidates one batch run will audit unless told otherwise. Present
+#: so a batch is always bounded; whatever it leaves is reported, never dropped
+#: silently.
+DEFAULT_BATCH_LIMIT = 25
+
+
+@dataclass(frozen=True)
+class BatchAuditReport:
+    """What a batch run did, including what it did not do."""
+
+    attempted: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped_over_limit: int = 0
+    already_audited: int = 0
+    not_auditable: int = 0
+    audit_run_ids: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempted": self.attempted,
+            "succeeded": self.succeeded,
+            "failed": self.failed,
+            "skipped_over_limit": self.skipped_over_limit,
+            "already_audited": self.already_audited,
+            "not_auditable": self.not_auditable,
+            "audit_run_ids": list(self.audit_run_ids),
+        }
 
 
 class AuditError(ResidentError):
@@ -115,7 +146,7 @@ def run_audit(
             "not be checked against the dataset that produced the public "
             "snapshot. Re-run `init` with the anchor source."
         )
-    expected = DatasetIdentity.from_dict(__import__("json").loads(recorded_identity))
+    expected = DatasetIdentity.from_dict(json.loads(recorded_identity))
 
     resolved_anchors = resolve_anchors_dir(anchors_dir)
     limits = limits or RunnerLimits()
@@ -223,6 +254,92 @@ def _failed_record(audit_run_id: str, candidate: Any, reason_code: str) -> Audit
         reason_code=reason_code,
         detail=message_for(reason_code),
     )
+
+
+def unaudited_candidates(store: ResidentStore) -> tuple[list[Any], int, int]:
+    """Candidates lacking a passing audit of their artifact against *this* dataset.
+
+    Dataset identity is part of the question. An audit taken against a previous
+    anchor dataset says nothing about the current one, so it does not count as
+    having been audited — treating it as sufficient would let a dataset change
+    quietly retire the evidence requirement.
+
+    Returns (candidates, already audited, not auditable).
+    """
+
+    from .gate import current_audit
+
+    dataset_identity = json.loads(store.get_config(CONFIG_DATASET_IDENTITY) or "{}")
+    archive = CandidateArchive(store)
+    pending: list[Any] = []
+    already = 0
+    unauditable = 0
+    for candidate in archive.list(newest_first=False):
+        if not candidate.is_selectable or candidate.artifact_hash is None:
+            unauditable += 1
+            continue
+        if current_audit(
+            store, candidate.candidate_id, candidate.artifact_hash, dataset_identity
+        ) is not None:
+            already += 1
+            continue
+        pending.append(candidate)
+    return pending, already, unauditable
+
+
+def audit_all_unaudited(
+    store: ResidentStore,
+    anchors_dir: str | Path | None = None,
+    limit: int | None = DEFAULT_BATCH_LIMIT,
+    timeout_seconds: float = 300.0,
+) -> BatchAuditReport:
+    """Audit every candidate lacking a current passing audit. Serial and bounded.
+
+    Runs regardless of the freeze state. A weekly holdout audit matters more
+    during an incident, not less — only reflection and promotion are gated on a
+    freeze, because those are the ones that move forward.
+
+    One candidate's failure never aborts the batch: each gets its own immutable
+    record and the run continues.
+    """
+
+    pending, already, unauditable = unaudited_candidates(store)
+    over_limit = 0
+    if limit is not None and len(pending) > limit:
+        over_limit = len(pending) - limit
+        pending = pending[:limit]
+
+    succeeded = 0
+    failed = 0
+    run_ids: list[str] = []
+    for candidate in pending:
+        try:
+            outcome = run_audit(
+                store, candidate.candidate_id, anchors_dir=anchors_dir,
+                timeout_seconds=timeout_seconds,
+            )
+        except AuditError:
+            # Refused before it began — no record to write, and no reason to
+            # stop auditing everything after it.
+            failed += 1
+            continue
+        run_ids.append(outcome.record.audit_run_id)
+        if outcome.record.status == AUDIT_OK:
+            succeeded += 1
+        else:
+            failed += 1
+
+    report = BatchAuditReport(
+        attempted=len(pending),
+        succeeded=succeeded,
+        failed=failed,
+        skipped_over_limit=over_limit,
+        already_audited=already,
+        not_auditable=unauditable,
+        audit_run_ids=tuple(run_ids),
+    )
+    store.append_event("batch_audit", payload=report.to_dict())
+    return report
 
 
 def _spawn_auditor(
