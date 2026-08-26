@@ -19,7 +19,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -29,17 +29,21 @@ from .anchors import (
     resolve_anchors_dir,
 )
 from .archive import CandidateArchive
-from .auditor_worker import build_audit_request, parse_audit_response
-from .models import AUDIT_FAILED, AUDIT_REFUSED, AuditRecord
+from .audit_protocol import (
+    AuditProtocolError,
+    MAX_AUDIT_RESPONSE_BYTES,
+    REASON_AUDITOR_INTERNAL_FAILURE,
+    REASON_PROTOCOL_FAILURE,
+    build_audit_request,
+    message_for,
+    parse_audit_response,
+)
+from .models import AUDIT_FAILED, AuditRecord
 from .reflect import bound_environment, get_environment_spec
 from .runner.limits import RunnerLimits
-from .runner.protocol import (
-    MAX_RESPONSE_BYTES,
-    MAX_STDERR_BYTES,
-    ProtocolError,
-    encode,
-)
+from .runner.protocol import MAX_STDERR_BYTES, encode
 from .runner.subprocess_runner import (
+    _build_preexec,
     _minimal_environment,
     _read_capped,
     _terminate_group,
@@ -135,33 +139,52 @@ def run_audit(
         limits=limits.to_dict(),
     )
 
-    response, failure_detail = _spawn_auditor(request, timeout_seconds)
+    # Categories the parent already knows, from its own public snapshot. Used to
+    # validate aggregate keys without ever consulting the anchor source.
+    allowed_categories = {
+        str(record.get("category", "general")) for record in store.read_public_snapshot()
+    }
 
-    if response is None:
-        record = AuditRecord(
-            audit_run_id=audit_run_id,
-            candidate_id=candidate.candidate_id,
-            artifact_hash=candidate.artifact_hash,
-            created_at=utcnow(),
-            status=AUDIT_FAILED,
-            detail=failure_detail,
+    raw_response, spawn_failed = _spawn_auditor(request, timeout_seconds, limits)
+
+    if spawn_failed or raw_response is None:
+        record = _failed_record(
+            audit_run_id, candidate, REASON_AUDITOR_INTERNAL_FAILURE
         )
     else:
-        record = AuditRecord(
-            audit_run_id=response.get("audit_run_id") or audit_run_id,
-            candidate_id=candidate.candidate_id,
-            artifact_hash=candidate.artifact_hash,
-            created_at=utcnow(),
-            status=response.get("status") or AUDIT_REFUSED,
-            holdout_score=response.get("holdout_score"),
-            num_cases=int(response.get("num_cases") or 0),
-            safety_failure_count=int(response.get("safety_failure_count") or 0),
-            category_means=dict(response.get("category_means") or {}),
-            dimension_means=dict(response.get("dimension_means") or {}),
-            dataset_identity=dict(response.get("dataset_identity") or {}),
-            isolation=dict(response.get("isolation") or {}),
-            detail=str(response.get("detail") or "")[:600],
-        )
+        try:
+            validated = parse_audit_response(
+                raw_response,
+                expected_audit_run_id=audit_run_id,
+                expected_candidate_id=candidate.candidate_id,
+                expected_artifact_hash=candidate.artifact_hash,
+                expected_identity=expected.to_dict(),
+                allowed_categories=allowed_categories,
+            )
+        except AuditProtocolError:
+            # Fails closed: a response that does not validate is discarded
+            # entirely rather than partially believed.
+            record = _failed_record(audit_run_id, candidate, REASON_PROTOCOL_FAILURE)
+        else:
+            reason_code = validated["reason_code"]
+            record = AuditRecord(
+                # Identifiers are the parent's own, never the wire's; the parser
+                # has already refused any response that named different ones.
+                audit_run_id=audit_run_id,
+                candidate_id=candidate.candidate_id,
+                artifact_hash=candidate.artifact_hash,
+                created_at=utcnow(),
+                status=validated["status"],
+                holdout_score=validated["holdout_score"],
+                num_cases=validated["num_cases"],
+                safety_failure_count=validated["safety_failure_count"],
+                category_means=validated["category_means"],
+                dimension_means=validated["dimension_means"],
+                dataset_identity=validated["dataset_identity"],
+                isolation=validated["isolation"],
+                reason_code=reason_code,
+                detail=message_for(reason_code, validated["mismatch_field"]),
+            )
 
     store.insert_audit(record)
     store.append_event(
@@ -181,10 +204,29 @@ def run_audit(
     )
 
 
+def _failed_record(audit_run_id: str, candidate: Any, reason_code: str) -> AuditRecord:
+    """A failure record authored entirely on this side of the boundary."""
+
+    return AuditRecord(
+        audit_run_id=audit_run_id,
+        candidate_id=candidate.candidate_id,
+        artifact_hash=candidate.artifact_hash,
+        created_at=utcnow(),
+        status=AUDIT_FAILED,
+        reason_code=reason_code,
+        detail=message_for(reason_code),
+    )
+
+
 def _spawn_auditor(
-    request: dict[str, Any], timeout_seconds: float
-) -> tuple[dict[str, Any] | None, str]:
-    """Run the auditor controller. Returns (response, failure detail)."""
+    request: dict[str, Any], timeout_seconds: float, limits: RunnerLimits
+) -> tuple[bytes | None, bool]:
+    """Run the auditor controller. Returns (raw response bytes, spawn failed).
+
+    Returns bytes rather than a parsed object: validation belongs to
+    ``audit_protocol``, and nothing here should be in a position to interpret an
+    auditor response leniently.
+    """
 
     body = encode(request)
     with tempfile.TemporaryDirectory(prefix="resident-audit-") as capture_dir, \
@@ -204,9 +246,15 @@ def _spawn_auditor(
                         env=_minimal_environment(),
                         close_fds=True,
                         start_new_session=True,
+                        # The controller writes its own stdout/stderr files; a
+                        # file-size limit stops a faulty one filling the
+                        # temporary filesystem before the bounded read-back.
+                        preexec_fn=_build_preexec(
+                            replace(limits, cpu_seconds=0, address_space_bytes=None)
+                        ),
                     )
-                except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                    return None, f"could not start auditor: {type(exc).__name__}: {exc}"
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    return None, True
                 try:
                     process.communicate(body, timeout=timeout_seconds)
                 except subprocess.TimeoutExpired:
@@ -214,23 +262,17 @@ def _spawn_auditor(
                     _terminate_group(process, 2.0)
                 except (BrokenPipeError, OSError):
                     _terminate_group(process, 2.0)
-        except OSError as exc:
-            return None, f"could not open auditor capture files: {exc}"
+        except OSError:
+            return None, True
 
         if timed_out:
-            return None, f"auditor exceeded the {timeout_seconds}s timeout"
+            return None, True
 
         returncode = process.poll()
-        stdout_bytes, overflow = _read_capped(stdout_path, MAX_RESPONSE_BYTES)
-        stderr_bytes, _ = _read_capped(stderr_path, MAX_STDERR_BYTES)
-        if overflow:
-            return None, "auditor response exceeded the size cap"
-        if returncode != 0:
-            # Deliberately does not include auditor stderr: that stream is
-            # inside the holdout boundary and must not be copied into a record
-            # the parent stores.
-            return None, f"auditor exited with code {returncode}"
-        try:
-            return parse_audit_response(stdout_bytes), ""
-        except ProtocolError as exc:
-            return None, f"auditor protocol failure: {exc}"
+        stdout_bytes, overflow = _read_capped(stdout_path, MAX_AUDIT_RESPONSE_BYTES)
+        # Read and discarded. Auditor stderr is inside the holdout boundary: it
+        # is never parsed, never persisted, and never surfaced.
+        _read_capped(stderr_path, MAX_STDERR_BYTES)
+        if overflow or returncode != 0:
+            return None, True
+        return stdout_bytes, False

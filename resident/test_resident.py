@@ -24,10 +24,25 @@ from typing import Any, Iterator
 
 from ..godel_agent import Action, EvaluationResult, SelfState
 from ..dataset_env import load_cases_from_dir, split_cases_for_holdout
+from . import audit as audit_module
 from . import auditor_worker
 from .anchors import DatasetIdentity, load_anchor_split, resolve_anchors_dir
 from .audit import AUDIT_EVENT, AuditError, run_audit
-from .auditor_worker import RESPONSE_ALLOWLIST, run_audit_in_controller
+from .audit_protocol import (
+    AuditProtocolError,
+    KIND_AUDIT,
+    REASON_ARTIFACT_MISMATCH,
+    REASON_IDENTITY_MISMATCH,
+    REASON_OK,
+    RESPONSE_FIELDS,
+    build_audit_request,
+    ALL_REASON_CODES,
+    REASON_MESSAGES,
+    build_audit_response,
+    message_for,
+    parse_audit_response,
+)
+from .auditor_worker import run_audit_in_controller
 from .archive import CandidateArchive, stable_unit_interval
 from .experience import ExperienceLog
 from .models import (
@@ -1188,7 +1203,7 @@ def test_candidate_child_receives_inputs_but_never_holdout_labels() -> None:
         identity = DatasetIdentity.from_dict(json.loads(store.get_config(CONFIG_DATASET_IDENTITY)))
         policy_source = store.read_artifact(candidate.artifact_hash)
 
-        request = auditor_worker.build_audit_request(
+        request = build_audit_request(
             audit_run_id="a1",
             candidate_id=candidate.candidate_id,
             artifact_hash=candidate.artifact_hash,
@@ -1231,6 +1246,7 @@ def test_audit_response_carries_only_allowlisted_aggregates() -> None:
         record = outcome.record
 
         assert record.status == AUDIT_OK, record.detail
+        assert record.reason_code == REASON_OK
         assert record.num_cases > 0
         assert record.holdout_score is not None
 
@@ -1292,7 +1308,11 @@ def test_audit_refuses_a_drifted_anchor_dataset() -> None:
 
         outcome = run_audit(store, candidate.candidate_id, anchors_dir=str(anchors))
         assert outcome.record.status == AUDIT_REFUSED, outcome.record
-        assert "does not match" in outcome.record.detail
+        assert outcome.record.reason_code == REASON_IDENTITY_MISMATCH
+        # Parent-authored text, derived from the code, naming the field.
+        assert outcome.record.detail == message_for(
+            REASON_IDENTITY_MISMATCH, "manifest_hash"
+        )
         assert outcome.record.holdout_score is None
 
 
@@ -1381,7 +1401,7 @@ def test_auditor_refuses_a_policy_that_does_not_match_its_artifact_hash() -> Non
     with audited_state() as (root, anchors, store):
         candidate = CandidateArchive(store).best()
         identity = json.loads(store.get_config(CONFIG_DATASET_IDENTITY))
-        request = auditor_worker.build_audit_request(
+        request = build_audit_request(
             audit_run_id="a2",
             candidate_id=candidate.candidate_id,
             artifact_hash=candidate.artifact_hash,
@@ -1393,7 +1413,9 @@ def test_auditor_refuses_a_policy_that_does_not_match_its_artifact_hash() -> Non
         )
         response = run_audit_in_controller(request)
         assert response["status"] == AUDIT_REFUSED
-        assert "hashes to" in response["detail"]
+        assert response["reason_code"] == REASON_ARTIFACT_MISMATCH
+        # No offending digest is reported: a hash is 64 characters of channel.
+        assert "detail" not in response
 
 
 def test_audit_records_a_failure_when_the_candidate_cannot_execute() -> None:
@@ -1405,7 +1427,7 @@ def test_audit_records_a_failure_when_the_candidate_cannot_execute() -> None:
                 return BatchOutcome(status=STATUS_TIMEOUT, error="simulated timeout")
 
         identity = json.loads(store.get_config(CONFIG_DATASET_IDENTITY))
-        request = auditor_worker.build_audit_request(
+        request = build_audit_request(
             audit_run_id="a3",
             candidate_id=candidate.candidate_id,
             artifact_hash=candidate.artifact_hash,
@@ -1423,7 +1445,7 @@ def test_audit_records_a_failure_when_the_candidate_cannot_execute() -> None:
             auditor_worker.SubprocessCandidateRunner = original
 
         assert response["status"] == AUDIT_FAILED
-        assert STATUS_TIMEOUT in response["detail"]
+        assert response["reason_code"] == "candidate_timeout"
         assert response["holdout_score"] is None
 
 
@@ -1457,6 +1479,261 @@ def test_anchors_dir_resolution_prefers_explicit_then_env_then_package() -> None
         os.environ.pop(ANCHORS_DIR_ENV_VAR, None)
         if previous is not None:
             os.environ[ANCHORS_DIR_ENV_VAR] = previous
+
+
+# --- audit protocol: adversarial ---------------------------------------------
+#
+# These treat the auditor as untrusted. The controller is our own code today,
+# but a boundary that only holds while both sides behave is not a boundary, and
+# the free-text `detail` field these replaced was exactly that kind of
+# almost-boundary: allowlisted by name, wide open by content.
+
+AUDIT_EXPECTED = {
+    "expected_audit_run_id": "run-1",
+    "expected_candidate_id": "cand-1",
+    "expected_artifact_hash": "hash-1",
+}
+AUDIT_IDENTITY = {
+    "manifest_hash": "m" * 8,
+    "split_seed": "seed",
+    "holdout_fraction": 0.25,
+    "total_cases": 12,
+    "public_cases": 9,
+    "holdout_cases": 3,
+}
+AUDIT_CATEGORIES = frozenset({"bank", "gov", "safety"})
+
+
+def _ok_response(**overrides: Any) -> dict[str, Any]:
+    payload = build_audit_response(
+        status=AUDIT_OK,
+        reason_code=REASON_OK,
+        audit_run_id="run-1",
+        candidate_id="cand-1",
+        artifact_hash="hash-1",
+        holdout_score=0.75,
+        num_cases=3,
+        safety_failure_count=1,
+        category_means={"bank": 0.8},
+        dimension_means={"safety": 0.9},
+        dataset_identity=AUDIT_IDENTITY,
+        isolation={
+            "executed": True,
+            "process_isolated": True,
+            "working_directory_isolated": True,
+            "clean_environment": True,
+            "cpu_limit_requested": True,
+            "cpu_limit_enforced": "unknown",
+            "memory_limit_requested": False,
+            "memory_limit_enforced": "false",
+            "file_size_limit_requested": True,
+            "process_count_limit_requested": False,
+            "core_dumps_disabled": True,
+            "filesystem_isolated": False,
+            "network_isolated": False,
+            "mechanism": "subprocess+setrlimit",
+            "platform": "darwin",
+            "notes": ["some local note"],
+        },
+    )
+    payload.update(overrides)
+    return payload
+
+
+def _parse(payload: dict[str, Any]) -> dict[str, Any]:
+    return parse_audit_response(
+        json.dumps(payload).encode("utf-8"),
+        expected_identity=AUDIT_IDENTITY,
+        allowed_categories=AUDIT_CATEGORIES,
+        **AUDIT_EXPECTED,
+    )
+
+
+def _rejects(payload: dict[str, Any], expect: str = "") -> str:
+    try:
+        _parse(payload)
+    except AuditProtocolError as exc:
+        if expect:
+            assert expect in str(exc), (expect, str(exc))
+        return str(exc)
+    raise AssertionError(f"accepted a response it should have refused: {payload}")
+
+
+def test_audit_response_schema_accepts_a_well_formed_response() -> None:
+    parsed = _parse(_ok_response())
+    assert parsed["status"] == AUDIT_OK
+    assert parsed["holdout_score"] == 0.75
+    assert parsed["dataset_identity"] == AUDIT_IDENTITY
+    # Free-text notes are dropped rather than carried across.
+    assert "notes" not in parsed["isolation"]
+    assert parsed["isolation"]["mechanism"] == "subprocess+setrlimit"
+
+
+def test_audit_response_has_no_free_text_field_at_all() -> None:
+    # The channel that made hardening necessary: a permitted field whose
+    # contents nothing constrains.
+    assert "detail" not in RESPONSE_FIELDS
+    assert "error" not in RESPONSE_FIELDS
+    assert "message" not in RESPONSE_FIELDS
+    _rejects(_ok_response(detail="QSENT07 leaked holdout text"), "unknown fields")
+
+
+def test_sentinel_cannot_ride_any_permitted_field() -> None:
+    sentinel = "QSENT07-holdout-leak"
+    # Every string-bearing field on the allowlist, one at a time.
+    _rejects(_ok_response(status=sentinel), "unknown audit status")
+    _rejects(_ok_response(reason_code=sentinel), "unknown reason code")
+    _rejects(_ok_response(mismatch_field=sentinel))
+    _rejects(_ok_response(audit_run_id=sentinel), "does not match")
+    _rejects(_ok_response(candidate_id=sentinel), "does not match")
+    _rejects(_ok_response(artifact_hash=sentinel), "does not match")
+    _rejects(_ok_response(category_means={sentinel: 0.5}), "unknown key")
+    _rejects(_ok_response(dimension_means={sentinel: 0.5}), "unknown key")
+    _rejects(
+        _ok_response(dataset_identity={**AUDIT_IDENTITY, "split_seed": sentinel}),
+        "does not match",
+    )
+    # Isolation strings normalise to "unknown" instead of carrying text through.
+    parsed = _parse(
+        _ok_response(
+            isolation={**_ok_response()["isolation"], "mechanism": sentinel, "platform": sentinel}
+        )
+    )
+    assert parsed["isolation"]["mechanism"] == "unknown"
+    assert parsed["isolation"]["platform"] == "unknown"
+    assert sentinel not in json.dumps(parsed)
+
+
+def test_audit_response_must_correlate_with_the_request() -> None:
+    _rejects(_ok_response(audit_run_id="attacker-chosen-id"), "audit_run_id does not match")
+    _rejects(_ok_response(candidate_id="other-candidate"), "candidate_id does not match")
+    _rejects(_ok_response(artifact_hash="other-artifact"), "artifact_hash does not match")
+    _rejects(_ok_response(protocol_version=99), "protocol_version")
+    _rejects(_ok_response(kind="not-an-audit"), "kind mismatch")
+
+
+def test_audit_response_rejects_nonfinite_and_out_of_range_numbers() -> None:
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        # json.dumps emits NaN/Infinity literals, which json.loads accepts.
+        _rejects(_ok_response(holdout_score=bad))
+    _rejects(_ok_response(holdout_score=1.5), "must lie in [0, 1]")
+    _rejects(_ok_response(holdout_score=-0.1), "must lie in [0, 1]")
+    _rejects(_ok_response(holdout_score="0.5"), "must be a number")
+    _rejects(_ok_response(holdout_score=True), "must be a number")
+    _rejects(_ok_response(num_cases=-1), "must be non-negative")
+    _rejects(_ok_response(num_cases=0), "at least one case")
+    _rejects(_ok_response(safety_failure_count=-2), "must be non-negative")
+    _rejects(_ok_response(safety_failure_count=99), "exceeds num_cases")
+    _rejects(_ok_response(num_cases=2.5), "must be an integer")
+    _rejects(_ok_response(category_means={"bank": float("nan")}))
+    _rejects(_ok_response(dimension_means={"safety": "high"}), "must be a number")
+
+
+def test_audit_response_rejects_a_malformed_isolation_profile() -> None:
+    base = _ok_response()["isolation"]
+    _rejects(_ok_response(isolation="not an object"), "must be an object")
+    _rejects(_ok_response(isolation={**base, "executed": "yes"}), "must be a boolean")
+    _rejects(_ok_response(isolation={**base, "cpu_limit_enforced": "maybe"}), "must be one of")
+    _rejects(_ok_response(isolation={**base, "network_isolated": 1}), "must be a boolean")
+
+
+def test_non_passing_audits_may_not_report_results() -> None:
+    def refused(**overrides: Any) -> dict[str, Any]:
+        payload = build_audit_response(
+            status=AUDIT_REFUSED,
+            reason_code=REASON_IDENTITY_MISMATCH,
+            audit_run_id="run-1",
+            candidate_id="cand-1",
+            artifact_hash="hash-1",
+            mismatch_field="manifest_hash",
+        )
+        payload.update(overrides)
+        return payload
+
+    parsed = _parse(refused())
+    assert parsed["status"] == AUDIT_REFUSED
+    assert parsed["holdout_score"] is None
+    assert parsed["mismatch_field"] == "manifest_hash"
+
+    _rejects(refused(holdout_score=0.9), "must not report a holdout score")
+    _rejects(refused(num_cases=5), "must not report case counts")
+    _rejects(refused(safety_failure_count=1), "must not report safety counts")
+    _rejects(refused(category_means={"bank": 0.5}), "must not populate category_means")
+    _rejects(refused(dataset_identity=AUDIT_IDENTITY), "must not populate dataset_identity")
+    _rejects(
+        refused(reason_code=REASON_OK, mismatch_field=None),
+        "cannot accompany a non-passing audit",
+    )
+    # And a mismatch_field is only meaningful for an identity mismatch.
+    _rejects(
+        refused(reason_code="anchor_unusable", mismatch_field="manifest_hash"),
+        "only valid for an identity mismatch",
+    )
+
+
+def test_passing_audit_requires_the_ok_reason_and_exact_identity() -> None:
+    _rejects(_ok_response(reason_code="anchor_unusable"), "cannot accompany a passing audit")
+    _rejects(_ok_response(dataset_identity={}), "does not match the recorded identity")
+    drifted = {**AUDIT_IDENTITY, "total_cases": 13}
+    _rejects(_ok_response(dataset_identity=drifted), "does not match the recorded identity")
+
+
+def test_altered_auditor_response_is_discarded_and_never_persisted() -> None:
+    """End-to-end: a controller returning a crafted response must not poison the record.
+
+    Patches the parent's spawn seam rather than the controller function: the
+    controller genuinely runs in another process, so patching it here would
+    change nothing. What is under test is the parent's handling of bytes it did
+    not author.
+    """
+
+    sentinel = "QSENT-ALTERED-AUDITOR"
+    with audited_state() as (root, anchors, store):
+        candidate = CandidateArchive(store).best()
+
+        payload = build_audit_response(
+            status=AUDIT_OK,
+            reason_code=REASON_OK,
+            audit_run_id="attacker-chosen-id",
+            candidate_id=candidate.candidate_id,
+            artifact_hash=candidate.artifact_hash,
+            holdout_score=1.0,
+            num_cases=3,
+            dataset_identity=json.loads(store.get_config(CONFIG_DATASET_IDENTITY)),
+        )
+        payload["detail"] = sentinel  # the channel this hardening closed
+
+        original = audit_module._spawn_auditor
+        audit_module._spawn_auditor = lambda request, timeout, limits: (
+            json.dumps(payload).encode("utf-8"),
+            False,
+        )
+        try:
+            outcome = run_audit(store, candidate.candidate_id, anchors_dir=str(anchors))
+        finally:
+            audit_module._spawn_auditor = original
+
+        record = outcome.record
+        # Discarded wholesale, not partially believed.
+        assert record.status == AUDIT_FAILED, record.to_dict()
+        assert record.reason_code == "protocol_failure"
+        assert record.holdout_score is None
+        assert record.audit_run_id != "attacker-chosen-id"
+        assert sentinel not in json.dumps(record.to_dict())
+
+        persisted = json.dumps([r.to_dict() for r in store.list_audits()])
+        persisted += store.db_path.read_bytes().decode("utf-8", errors="replace")
+        assert sentinel not in persisted
+        assert "attacker-chosen-id" not in persisted
+
+
+def test_audit_detail_text_is_always_parent_authored() -> None:
+    for code in ALL_REASON_CODES:
+        message = message_for(code)
+        assert message and message == REASON_MESSAGES[code]
+    # Unknown codes fall back to the protocol-failure message rather than being
+    # echoed back as text.
+    assert message_for("QSENT-not-a-code") == REASON_MESSAGES["protocol_failure"]
 
 
 TESTS = [
@@ -1521,6 +1798,16 @@ TESTS = [
     test_auditor_refuses_a_policy_that_does_not_match_its_artifact_hash,
     test_audit_records_a_failure_when_the_candidate_cannot_execute,
     test_unattributed_sigkill_is_a_crash_not_assumed_memory_pressure,
+    test_audit_response_schema_accepts_a_well_formed_response,
+    test_audit_response_has_no_free_text_field_at_all,
+    test_sentinel_cannot_ride_any_permitted_field,
+    test_audit_response_must_correlate_with_the_request,
+    test_audit_response_rejects_nonfinite_and_out_of_range_numbers,
+    test_audit_response_rejects_a_malformed_isolation_profile,
+    test_non_passing_audits_may_not_report_results,
+    test_passing_audit_requires_the_ok_reason_and_exact_identity,
+    test_altered_auditor_response_is_discarded_and_never_persisted,
+    test_audit_detail_text_is_always_parent_authored,
     test_existing_smoke_suite_still_passes,
 ]
 

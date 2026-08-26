@@ -323,6 +323,10 @@ class AuditRecord:
     dimension_means: dict[str, float] = field(default_factory=dict)
     dataset_identity: dict[str, Any] = field(default_factory=dict)
     isolation: dict[str, Any] = field(default_factory=dict)
+    #: Enum from ``audit_protocol``. The machine-readable outcome.
+    reason_code: str = ""
+    #: Parent-authored text derived from ``reason_code``. Never a string the
+    #: auditor composed — the audit wire protocol carries no free text at all.
     detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -339,6 +343,7 @@ class AuditRecord:
             "dimension_means": dict(self.dimension_means),
             "dataset_identity": dict(self.dataset_identity),
             "isolation": dict(self.isolation),
+            "reason_code": self.reason_code,
             "detail": self.detail,
         }
 

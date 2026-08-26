@@ -192,6 +192,10 @@ _MIGRATION_3 = (
     "CREATE INDEX IF NOT EXISTS idx_audits_candidate ON audits(candidate_id)",
 )
 
+_MIGRATION_4 = (
+    "ALTER TABLE audits ADD COLUMN reason_code TEXT NOT NULL DEFAULT ''",
+)
+
 #: Sequential schema migrations, applied in order for any version gap.
 #:
 #: Append a new ``(version, statements)`` entry; never edit a shipped one. Each
@@ -202,6 +206,7 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, _MIGRATION_1),
     (2, _MIGRATION_2),
     (3, _MIGRATION_3),
+    (4, _MIGRATION_4),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -679,8 +684,8 @@ class ResidentStore:
                     (audit_run_id, candidate_id, artifact_hash, created_at, status,
                      holdout_score, num_cases, safety_failure_count,
                      category_means_json, dimension_means_json,
-                     dataset_identity_json, isolation_json, detail)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     dataset_identity_json, isolation_json, reason_code, detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.audit_run_id,
@@ -695,6 +700,7 @@ class ResidentStore:
                     json.dumps(dict(record.dimension_means), ensure_ascii=False),
                     json.dumps(dict(record.dataset_identity), ensure_ascii=False),
                     json.dumps(dict(record.isolation), ensure_ascii=False),
+                    record.reason_code,
                     record.detail,
                 ),
             )
@@ -990,6 +996,7 @@ def _row_to_audit(row: sqlite3.Row) -> AuditRecord:
         dimension_means=json.loads(row["dimension_means_json"]),
         dataset_identity=json.loads(row["dataset_identity_json"]),
         isolation=json.loads(row["isolation_json"]),
+        reason_code=row["reason_code"],
         detail=row["detail"],
     )
 

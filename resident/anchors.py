@@ -94,8 +94,12 @@ class DatasetIdentity:
             holdout_cases=int(payload["holdout_cases"]),
         )
 
-    def mismatch_reason(self, other: "DatasetIdentity") -> str:
-        """Empty string when the two identities agree; otherwise why they do not."""
+    def mismatch_field(self, other: "DatasetIdentity") -> str | None:
+        """Name of the first differing field, or None when the two agree.
+
+        Returns a field *name*, never a rendered message: the name is drawn
+        from a fixed set the wire schema knows, so it carries no free text.
+        """
 
         for field_name in (
             "manifest_hash",
@@ -108,8 +112,8 @@ class DatasetIdentity:
             mine = getattr(self, field_name)
             theirs = getattr(other, field_name)
             if mine != theirs:
-                return f"{field_name} differs: expected {mine!r}, anchor source has {theirs!r}"
-        return ""
+                return field_name
+        return None
 
 
 def dataset_manifest_hash(cases: list[EvalCase]) -> str:

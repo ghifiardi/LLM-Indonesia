@@ -91,10 +91,34 @@ resident parent          -> audit request (candidate, artifact hash, anchors)
 resident parent          <- aggregate allowlist only
 ```
 
-The response is assembled field by field from a fixed allowlist, on both the
-sending and receiving side. Redaction fails open — anything a later edit adds
-and forgets to strip escapes. An allowlist fails closed. No per-case field, no
-query, no answer, no candidate output, and no judge rationale is on it.
+The wire schema lives in `audit_protocol.py`, deliberately not in the
+controller: the code deciding what may cross a boundary should not be the code
+running inside it.
+
+**There is no free text on the audit wire at all.** An allowlist of field
+*names* is not a boundary — a permitted free-text field is an open channel, and
+holdout content placed in it crosses and is persisted like any other string.
+Every field is one of:
+
+- a fixed enum (`status`, `reason_code`, `mismatch_field`);
+- a value the parent already knows and re-checks for equality (`audit_run_id`,
+  `candidate_id`, `artifact_hash`, `dataset_identity`);
+- a bounded number, range-checked and required finite;
+- a mapping whose *keys* come from a vocabulary the parent knows independently —
+  category names from its own public snapshot, dimension names from the rubric —
+  so a mapping key cannot become a text channel either.
+
+Outcomes are reported as reason codes; the parent authors the human-readable
+message from the code, so everything in `AuditRecord.detail` is written on this
+side of the boundary. Isolation profiles are rebuilt field by field, with
+unrecognised `mechanism`/`platform` tokens normalised to `"unknown"` and
+free-text `notes` dropped rather than carried across.
+
+The parser also **correlates**: a response naming a different audit, candidate,
+or artifact than the request is discarded rather than reinterpreted, and a
+response that fails any check is discarded wholesale — never partially believed.
+A passing audit must carry the exact recorded dataset identity; a non-passing
+one may populate nothing but its reason code.
 
 Audits are **informational**. `audit.py` does not import `promote`, and nothing
 reads audit rows to make a decision — not parent selection, not mutation, not
@@ -203,6 +227,12 @@ history string:
 | `rejected_resource_limit` | hit a CPU or file-size limit, or reported `MemoryError` |
 | `rejected_runner_crash` | worker died or could not start; cause unattributed |
 | `rejected_runner_protocol` | oversized or malformed request/response |
+
+Audit records carry `audit_ok`, `audit_refused`, or `audit_failed` plus a reason
+code (`identity_mismatch`, `anchor_unusable`, `artifact_mismatch`,
+`candidate_timeout`, `candidate_resource_limit`, `candidate_runner_crash`,
+`candidate_protocol_failure`, `auditor_internal_failure`, or the
+parent-generated `protocol_failure`).
 
 A raw `SIGKILL` is classified as `rejected_runner_crash`, not as memory
 pressure: the OS, an operator, or a supervisor could all have sent it, and
