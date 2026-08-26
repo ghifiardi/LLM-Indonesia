@@ -45,7 +45,7 @@ from ..models import (
     STATUS_TIMEOUT,
     ScoreVector,
 )
-from .base import CandidateRunner, EvaluationOutcome
+from .base import BatchOutcome, CandidateRunner, EvaluationOutcome
 from .limits import (
     CORE_LIMIT_SUPPORTED,
     CPU_LIMIT_SUPPORTED,
@@ -58,6 +58,9 @@ from .limits import (
 )
 from .protocol import (
     EXIT_OVERSIZED_REQUEST,
+    KIND_EVALUATE,
+    KIND_EXECUTE_BATCH,
+    build_execute_batch_request,
     EXIT_UNREADABLE_REQUEST,
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
@@ -185,13 +188,32 @@ def _terminate_group(process: subprocess.Popen, grace_seconds: float) -> None:
         pass
 
 
+@dataclass(frozen=True)
+class _RawRun:
+    """What one child process produced, before any protocol interpretation."""
+
+    stdout: bytes
+    stdout_overflow: bool
+    stderr_text: str
+    exit_code: int | None
+    signal_number: int | None
+    timed_out: bool
+
+
 @dataclass
 class SubprocessCandidateRunner(CandidateRunner):
-    """Execute a candidate in an isolated child process."""
+    """Execute a candidate in an isolated child process.
+
+    Serves both protocol kinds. ``evaluate`` is used by reflection;
+    ``execute_batch`` is used by the holdout auditor controller, which spawns
+    its *own* runner so candidate code never runs beside holdout labels.
+    """
 
     limits: RunnerLimits = field(default_factory=RunnerLimits)
     name: str = "subprocess"
     python_executable: str = field(default_factory=lambda: sys.executable)
+
+    # --- public API --------------------------------------------------------
 
     def evaluate(
         self,
@@ -202,31 +224,154 @@ class SubprocessCandidateRunner(CandidateRunner):
     ) -> EvaluationOutcome:
         limits = limits or self.limits
         profile = profile_for(limits)
-
         request = build_evaluate_request(
             policy_source=policy_source,
             environment_name=environment_name,
             public_snapshot=public_snapshot,
             limits=limits.to_dict(),
         )
+        raw, failure = self._run(request, limits, profile)
+        if failure is not None:
+            return failure
+        assert raw is not None
+
+        problem = self._classify_process(raw, limits, profile)
+        if problem is not None:
+            return problem
+
+        try:
+            response = parse_response(raw.stdout, expected_kind=KIND_EVALUATE)
+        except ProtocolError as exc:
+            return EvaluationOutcome(
+                status=STATUS_RUNNER_PROTOCOL, error=str(exc),
+                isolation=profile, exit_code=raw.exit_code,
+            )
+
+        if not response["ok"]:
+            observed = profile
+            if response.get("memory_error"):
+                observed = profile.observing(memory_limit_enforced=ENFORCED)
+            return EvaluationOutcome(
+                status=response.get("status") or STATUS_RUNNER_PROTOCOL,
+                error=response.get("error", ""),
+                isolation=observed,
+                exit_code=raw.exit_code,
+            )
+
+        score = response.get("score")
+        if not isinstance(score, dict) or "combined" not in score:
+            return EvaluationOutcome(
+                status=STATUS_RUNNER_PROTOCOL,
+                error="worker reported success without a score vector",
+                isolation=profile, exit_code=raw.exit_code,
+            )
+        try:
+            scores = ScoreVector.from_dict(score)
+        except (KeyError, TypeError, ValueError) as exc:
+            return EvaluationOutcome(
+                status=STATUS_RUNNER_PROTOCOL,
+                error=f"malformed score vector: {exc}",
+                isolation=profile, exit_code=raw.exit_code,
+            )
+        return EvaluationOutcome(
+            scores=scores,
+            feedback=response.get("feedback", ""),
+            isolation=profile,
+            exit_code=raw.exit_code,
+        )
+
+    def execute_batch(
+        self,
+        policy_source: str,
+        artifact_hash: str,
+        inputs: list[Any],
+        kb: dict[str, Any],
+        limits: RunnerLimits | None = None,
+    ) -> BatchOutcome:
+        """Run a candidate over unlabeled inputs and return bounded outputs.
+
+        The child receives queries, the permitted KB, the policy, and its
+        limits. It receives no reference answers, no required or forbidden
+        terms, and no rubric — nothing it could use to recognise what it is
+        being scored against.
+        """
+
+        limits = limits or self.limits
+        profile = profile_for(limits)
+        request = build_execute_batch_request(
+            policy_source=policy_source,
+            artifact_hash=artifact_hash,
+            inputs=inputs,
+            kb=kb,
+            limits=limits.to_dict(),
+        )
+        raw, failure = self._run(request, limits, profile)
+        if failure is not None:
+            return BatchOutcome(
+                status=failure.status, error=failure.error,
+                isolation=failure.isolation, exit_code=failure.exit_code,
+                signal_number=failure.signal_number,
+            )
+        assert raw is not None
+
+        problem = self._classify_process(raw, limits, profile)
+        if problem is not None:
+            return BatchOutcome(
+                status=problem.status, error=problem.error,
+                isolation=problem.isolation, exit_code=problem.exit_code,
+                signal_number=problem.signal_number,
+            )
+
+        try:
+            response = parse_response(raw.stdout, expected_kind=KIND_EXECUTE_BATCH)
+        except ProtocolError as exc:
+            return BatchOutcome(
+                status=STATUS_RUNNER_PROTOCOL, error=str(exc),
+                isolation=profile, exit_code=raw.exit_code,
+            )
+        if not response["ok"]:
+            return BatchOutcome(
+                status=response.get("status") or STATUS_RUNNER_PROTOCOL,
+                error=response.get("error", ""),
+                isolation=profile, exit_code=raw.exit_code,
+            )
+        outputs = response.get("outputs")
+        if not isinstance(outputs, list) or len(outputs) != len(inputs):
+            return BatchOutcome(
+                status=STATUS_RUNNER_PROTOCOL,
+                error=(
+                    f"worker returned {len(outputs) if isinstance(outputs, list) else '?'} "
+                    f"outputs for {len(inputs)} inputs"
+                ),
+                isolation=profile, exit_code=raw.exit_code,
+            )
+        return BatchOutcome(outputs=outputs, isolation=profile, exit_code=raw.exit_code)
+
+    # --- shared machinery --------------------------------------------------
+
+    def _run(
+        self, request: dict[str, Any], limits: RunnerLimits, profile: Any
+    ) -> tuple[_RawRun | None, EvaluationOutcome | None]:
         body = encode(request)
         if len(body) > MAX_REQUEST_BYTES:
             # Checked before spawning: never pay for a process that cannot work.
-            return EvaluationOutcome(
+            return None, EvaluationOutcome(
                 status=STATUS_RUNNER_PROTOCOL,
                 error=f"request of {len(body)} bytes exceeds the {MAX_REQUEST_BYTES} byte cap",
                 isolation=profile,
             )
-
         with tempfile.TemporaryDirectory(prefix="resident-capture-") as capture_dir, \
                 tempfile.TemporaryDirectory(prefix="resident-work-") as work_dir:
-            stdout_path = Path(capture_dir) / "stdout.bin"
-            stderr_path = Path(capture_dir) / "stderr.bin"
-            return self._run_once(
-                body, limits, profile, Path(work_dir), stdout_path, stderr_path
+            return self._spawn(
+                body,
+                limits,
+                profile,
+                Path(work_dir),
+                Path(capture_dir) / "stdout.bin",
+                Path(capture_dir) / "stderr.bin",
             )
 
-    def _run_once(
+    def _spawn(
         self,
         body: bytes,
         limits: RunnerLimits,
@@ -234,7 +379,7 @@ class SubprocessCandidateRunner(CandidateRunner):
         work_dir: Path,
         stdout_path: Path,
         stderr_path: Path,
-    ) -> EvaluationOutcome:
+    ) -> tuple[_RawRun | None, EvaluationOutcome | None]:
         timed_out = False
         try:
             with open(stdout_path, "wb") as out_handle, open(stderr_path, "wb") as err_handle:
@@ -252,14 +397,13 @@ class SubprocessCandidateRunner(CandidateRunner):
                     )
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
                     # No silent in-process fallback. A runner that cannot start
-                    # is a failed evaluation, not a reason to run untrusted code
-                    # in the parent.
-                    return EvaluationOutcome(
+                    # is a failed execution, not a reason to run untrusted code
+                    # in this process.
+                    return None, EvaluationOutcome(
                         status=STATUS_RUNNER_CRASH,
                         error=f"could not start worker: {type(exc).__name__}: {exc}",
                         isolation=profile,
                     )
-
                 try:
                     process.communicate(body, timeout=limits.wall_clock_seconds)
                 except subprocess.TimeoutExpired:
@@ -269,7 +413,7 @@ class SubprocessCandidateRunner(CandidateRunner):
                 except (BrokenPipeError, OSError):
                     _terminate_group(process, limits.grace_period_seconds)
         except OSError as exc:
-            return EvaluationOutcome(
+            return None, EvaluationOutcome(
                 status=STATUS_RUNNER_CRASH,
                 error=f"could not open capture files: {exc}",
                 isolation=profile,
@@ -281,13 +425,25 @@ class SubprocessCandidateRunner(CandidateRunner):
             returncode = process.poll()
 
         stdout_bytes, stdout_overflow = _read_capped(stdout_path, MAX_STDOUT_BYTES)
-        stderr_bytes, stderr_overflow = _read_capped(stderr_path, MAX_STDERR_BYTES)
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+        stderr_bytes, _ = _read_capped(stderr_path, MAX_STDERR_BYTES)
+        return (
+            _RawRun(
+                stdout=stdout_bytes,
+                stdout_overflow=stdout_overflow,
+                stderr_text=stderr_bytes.decode("utf-8", errors="replace"),
+                exit_code=returncode if (returncode is not None and returncode >= 0) else None,
+                signal_number=-returncode if (returncode is not None and returncode < 0) else None,
+                timed_out=timed_out,
+            ),
+            None,
+        )
 
-        exit_code = returncode if (returncode is not None and returncode >= 0) else None
-        signal_number = -returncode if (returncode is not None and returncode < 0) else None
+    def _classify_process(
+        self, raw: _RawRun, limits: RunnerLimits, profile: Any
+    ) -> EvaluationOutcome | None:
+        """Failure outcome, or None if the child exited cleanly enough to parse."""
 
-        if timed_out:
+        if raw.timed_out:
             return EvaluationOutcome(
                 status=STATUS_TIMEOUT,
                 error=(
@@ -295,91 +451,41 @@ class SubprocessCandidateRunner(CandidateRunner):
                     "process group terminated"
                 ),
                 isolation=profile.observing(notes=profile.notes + ("terminated by timeout",)),
-                exit_code=exit_code,
-                signal_number=signal_number,
+                exit_code=raw.exit_code,
+                signal_number=raw.signal_number,
             )
-
-        if stdout_overflow:
+        if raw.stdout_overflow:
             return EvaluationOutcome(
                 status=STATUS_RUNNER_PROTOCOL,
                 error=f"worker stdout exceeded {MAX_STDOUT_BYTES} bytes",
                 isolation=profile,
-                exit_code=exit_code,
-                signal_number=signal_number,
+                exit_code=raw.exit_code,
+                signal_number=raw.signal_number,
             )
-
-        if signal_number is not None:
-            return self._classify_signal(signal_number, stderr_text, profile, stderr_overflow)
-
-        if returncode == EXIT_OVERSIZED_REQUEST:
+        if raw.signal_number is not None:
+            return self._classify_signal(raw.signal_number, raw.stderr_text, profile)
+        if raw.exit_code == EXIT_OVERSIZED_REQUEST:
             return EvaluationOutcome(
                 status=STATUS_RUNNER_PROTOCOL,
                 error="worker rejected the request as oversized",
-                isolation=profile,
-                exit_code=exit_code,
+                isolation=profile, exit_code=raw.exit_code,
             )
-        if returncode == EXIT_UNREADABLE_REQUEST:
+        if raw.exit_code == EXIT_UNREADABLE_REQUEST:
             return EvaluationOutcome(
                 status=STATUS_RUNNER_PROTOCOL,
-                error=f"worker could not read the request: {stderr_text[:500]}",
-                isolation=profile,
-                exit_code=exit_code,
+                error=f"worker could not read the request: {raw.stderr_text[:500]}",
+                isolation=profile, exit_code=raw.exit_code,
             )
-        if returncode != 0:
+        if raw.exit_code != 0:
             return EvaluationOutcome(
                 status=STATUS_RUNNER_CRASH,
-                error=f"worker exited with code {returncode}: {stderr_text[:500]}",
-                isolation=profile,
-                exit_code=exit_code,
+                error=f"worker exited with code {raw.exit_code}: {raw.stderr_text[:500]}",
+                isolation=profile, exit_code=raw.exit_code,
             )
-
-        try:
-            response = parse_response(stdout_bytes)
-        except ProtocolError as exc:
-            return EvaluationOutcome(
-                status=STATUS_RUNNER_PROTOCOL,
-                error=f"{exc}",
-                isolation=profile,
-                exit_code=exit_code,
-            )
-
-        if not response["ok"]:
-            observed = profile
-            if response.get("memory_error"):
-                observed = profile.observing(memory_limit_enforced=ENFORCED)
-            return EvaluationOutcome(
-                status=response.get("status") or STATUS_RUNNER_PROTOCOL,
-                error=response.get("error", ""),
-                isolation=observed,
-                exit_code=exit_code,
-            )
-
-        score = response.get("score")
-        if not isinstance(score, dict) or "combined" not in score:
-            return EvaluationOutcome(
-                status=STATUS_RUNNER_PROTOCOL,
-                error="worker reported success without a score vector",
-                isolation=profile,
-                exit_code=exit_code,
-            )
-        try:
-            scores = ScoreVector.from_dict(score)
-        except (KeyError, TypeError, ValueError) as exc:
-            return EvaluationOutcome(
-                status=STATUS_RUNNER_PROTOCOL,
-                error=f"malformed score vector: {exc}",
-                isolation=profile,
-                exit_code=exit_code,
-            )
-        return EvaluationOutcome(
-            scores=scores,
-            feedback=response.get("feedback", ""),
-            isolation=profile,
-            exit_code=exit_code,
-        )
+        return None
 
     def _classify_signal(
-        self, signal_number: int, stderr_text: str, profile: Any, stderr_overflow: bool
+        self, signal_number: int, stderr_text: str, profile: Any
     ) -> EvaluationOutcome:
         """Map a fatal signal to a status without over-claiming the cause.
 
@@ -389,9 +495,10 @@ class SubprocessCandidateRunner(CandidateRunner):
         the kernel sends them precisely because a limit was exceeded.
         """
 
-        name = signal.Signals(signal_number).name if signal_number in set(
-            s.value for s in signal.Signals
-        ) else str(signal_number)
+        try:
+            name = signal.Signals(signal_number).name
+        except ValueError:
+            name = str(signal_number)
 
         if signal_number == int(signal.SIGXCPU):
             return EvaluationOutcome(

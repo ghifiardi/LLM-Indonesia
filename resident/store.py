@@ -35,6 +35,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from .models import (
+    AuditRecord,
     Candidate,
     Champion,
     CycleEvent,
@@ -169,6 +170,28 @@ _MIGRATION_2 = (
     """,
 )
 
+_MIGRATION_3 = (
+    """
+    CREATE TABLE IF NOT EXISTS audits (
+        seq                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        audit_run_id          TEXT NOT NULL UNIQUE,
+        candidate_id          TEXT NOT NULL,
+        artifact_hash         TEXT NOT NULL,
+        created_at            TEXT NOT NULL,
+        status                TEXT NOT NULL,
+        holdout_score         REAL,
+        num_cases             INTEGER NOT NULL DEFAULT 0,
+        safety_failure_count  INTEGER NOT NULL DEFAULT 0,
+        category_means_json   TEXT NOT NULL DEFAULT '{}',
+        dimension_means_json  TEXT NOT NULL DEFAULT '{}',
+        dataset_identity_json TEXT NOT NULL DEFAULT '{}',
+        isolation_json        TEXT NOT NULL DEFAULT '{}',
+        detail                TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_audits_candidate ON audits(candidate_id)",
+)
+
 #: Sequential schema migrations, applied in order for any version gap.
 #:
 #: Append a new ``(version, statements)`` entry; never edit a shipped one. Each
@@ -178,6 +201,7 @@ _MIGRATION_2 = (
 MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, _MIGRATION_1),
     (2, _MIGRATION_2),
+    (3, _MIGRATION_3),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -185,6 +209,11 @@ SCHEMA_VERSION = MIGRATIONS[-1][0]
 #: Config key binding a state directory to one environment. See ``reflect.py``:
 #: candidates from different task domains must not share an archive.
 CONFIG_ENVIRONMENT = "environment"
+
+#: Config key recording the identity of the anchor dataset the public snapshot
+#: came from. An audit against a different dataset is refused rather than
+#: silently scored — see ``anchors.DatasetIdentity``.
+CONFIG_DATASET_IDENTITY = "dataset_identity"
 
 PUBLIC_SNAPSHOT_FILENAME = "public_cases.jsonl"
 
@@ -636,6 +665,64 @@ class ResidentStore:
         ).fetchone()
         return int(row["n"])
 
+    # --- audits ------------------------------------------------------------
+    #
+    # Append-only by construction: there is no update or delete method here, and
+    # an audit never touches a candidate's reflection verdict. A candidate
+    # accumulates audit rows; it never has one rewritten.
+
+    def insert_audit(self, record: "AuditRecord") -> "AuditRecord":
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO audits
+                    (audit_run_id, candidate_id, artifact_hash, created_at, status,
+                     holdout_score, num_cases, safety_failure_count,
+                     category_means_json, dimension_means_json,
+                     dataset_identity_json, isolation_json, detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.audit_run_id,
+                    record.candidate_id,
+                    record.artifact_hash,
+                    record.created_at,
+                    record.status,
+                    record.holdout_score,
+                    record.num_cases,
+                    record.safety_failure_count,
+                    json.dumps(dict(record.category_means), ensure_ascii=False),
+                    json.dumps(dict(record.dimension_means), ensure_ascii=False),
+                    json.dumps(dict(record.dataset_identity), ensure_ascii=False),
+                    json.dumps(dict(record.isolation), ensure_ascii=False),
+                    record.detail,
+                ),
+            )
+        return record
+
+    def list_audits(
+        self, candidate_id: str | None = None, limit: int | None = None
+    ) -> list["AuditRecord"]:
+        sql = "SELECT * FROM audits"
+        params: list[Any] = []
+        if candidate_id is not None:
+            sql += " WHERE candidate_id = ?"
+            params.append(candidate_id)
+        sql += " ORDER BY seq DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return [_row_to_audit(row) for row in self.conn.execute(sql, tuple(params))]
+
+    def count_audits(self, candidate_id: str | None = None) -> int:
+        if candidate_id is None:
+            row = self.conn.execute("SELECT COUNT(*) AS n FROM audits").fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM audits WHERE candidate_id = ?", (candidate_id,)
+            ).fetchone()
+        return int(row["n"])
+
     # --- events ------------------------------------------------------------
 
     def append_event(
@@ -886,6 +973,24 @@ def _row_to_experience(row: sqlite3.Row) -> Experience:
         source=row["source"],
         tags=tuple(json.loads(row["tags_json"])),
         metadata=json.loads(row["metadata_json"]),
+    )
+
+
+def _row_to_audit(row: sqlite3.Row) -> AuditRecord:
+    return AuditRecord(
+        audit_run_id=row["audit_run_id"],
+        candidate_id=row["candidate_id"],
+        artifact_hash=row["artifact_hash"],
+        created_at=row["created_at"],
+        status=row["status"],
+        holdout_score=row["holdout_score"],
+        num_cases=int(row["num_cases"]),
+        safety_failure_count=int(row["safety_failure_count"]),
+        category_means=json.loads(row["category_means_json"]),
+        dimension_means=json.loads(row["dimension_means_json"]),
+        dataset_identity=json.loads(row["dataset_identity_json"]),
+        isolation=json.loads(row["isolation_json"]),
+        detail=row["detail"],
     )
 
 

@@ -27,12 +27,18 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from ...godel_agent import PolicyValidationError, SafePolicyLoader
 from ..eval_records import build_environment_from_records
-from ..models import STATUS_RESOURCE_LIMIT, STATUS_RUNTIME
-from .base import evaluate_in_process
+from ..models import STATUS_RESOURCE_LIMIT, STATUS_RUNTIME, STATUS_SYNTAX, STATUS_VALIDATION
+from .base import cap_policy_output, evaluate_in_process
 from .limits import RunnerLimits, profile_for
 from .protocol import (
     EXIT_OK,
+    KIND_EXECUTE_BATCH,
+    MAX_BATCH_OUTPUT_CHARS,
+    build_batch_response,
+    parse_execute_batch_request,
+    peek_kind,
     EXIT_OVERSIZED_REQUEST,
     EXIT_UNREADABLE_REQUEST,
     EXIT_UNWRITABLE_RESPONSE,
@@ -65,6 +71,71 @@ def _emit(message: dict[str, Any]) -> int:
     return EXIT_OK
 
 
+def _run_batch(request: dict[str, Any]) -> int:
+    """Execute a candidate over unlabeled inputs, for the holdout auditor.
+
+    The request carries queries, the permitted KB, and the policy. It carries no
+    reference answers, no required or forbidden terms and no rubric, so nothing
+    here can recognise or report what the candidate is being scored against.
+    Scoring happens in the auditor controller that spawned this process.
+
+    The artifact hash is verified here as well as by the controller: a child
+    that will not run code it cannot identify is one fewer place a swap can go
+    unnoticed.
+    """
+
+    from ..store import policy_digest
+
+    policy_source = request["policy_source"]
+    expected_hash = request["artifact_hash"]
+    actual_hash = policy_digest(policy_source)
+    if actual_hash != expected_hash:
+        return _emit(
+            build_batch_response(
+                ok=False,
+                status=STATUS_VALIDATION,
+                error=(
+                    f"policy source hashes to {actual_hash}, "
+                    f"not the requested {expected_hash}"
+                ),
+            )
+        )
+
+    limits = RunnerLimits.from_dict(request.get("limits") or {})
+    try:
+        policy = SafePolicyLoader().load(policy_source)
+    except PolicyValidationError as exc:
+        message = str(exc)
+        status = STATUS_SYNTAX if message.startswith("Syntax error") else STATUS_VALIDATION
+        return _emit(build_batch_response(ok=False, status=status, error=message))
+
+    output_cap = min(limits.max_output_chars, MAX_BATCH_OUTPUT_CHARS)
+    guarded = cap_policy_output(policy, output_cap)
+    kb = request.get("kb") or {}
+
+    outputs: list[Any] = []
+    try:
+        for item in request["inputs"]:
+            try:
+                result = guarded(item, kb)
+            except Exception as exc:
+                # A candidate that raises on one input has simply failed that
+                # case; the controller scores the empty answer.
+                result = f"<ERROR {type(exc).__name__}>"
+            if not isinstance(result, str):
+                result = str(result)[:output_cap]
+            outputs.append(result)
+    except MemoryError:
+        return _emit(
+            build_batch_response(
+                ok=False,
+                status=STATUS_RESOURCE_LIMIT,
+                error="MemoryError during batch execution",
+            )
+        )
+    return _emit(build_batch_response(ok=True, outputs=outputs))
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
@@ -74,6 +145,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OVERSIZED_REQUEST
 
     try:
+        kind = peek_kind(raw)
+        if kind == KIND_EXECUTE_BATCH:
+            return _run_batch(parse_execute_batch_request(raw))
         request = parse_evaluate_request(raw)
     except ProtocolError as exc:
         # A malformed request cannot be answered in kind; the parent classifies

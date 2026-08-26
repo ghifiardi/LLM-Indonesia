@@ -16,6 +16,7 @@ python3 -m godel_agent_prototype.resident reflect-once
 python3 -m godel_agent_prototype.resident archive-list
 python3 -m godel_agent_prototype.resident show <candidate-id>
 python3 -m godel_agent_prototype.resident status
+python3 -m godel_agent_prototype.resident audit <candidate-id>
 python3 -m godel_agent_prototype.resident promote <candidate-id> --reason "reviewed diff"
 ```
 
@@ -71,6 +72,43 @@ human-invoked bootstrap. After it runs, deleting the snapshot makes reflection
 fail rather than silently fall back — there is a test for that. This is a real
 file boundary, not a convention, but it is not yet an OS-level one: the isolated
 holdout auditor with its own process and its own data is Phase 2 (AR-04).
+
+**Holdout audits run behind two process boundaries.** `audit <candidate-id>`
+spawns an auditor controller that owns the holdout queries, answers, and rubric.
+The controller never executes candidate code: it spawns a *second* child that
+receives the policy, the permitted KB, and unlabeled inputs — no reference
+answers, no required terms, no rubric — and returns bounded outputs. Scoring
+happens in the controller, and only aggregates come back.
+
+One boundary would not be enough. A single process holding both the answers and
+the untrusted code has nothing but good intentions between them.
+
+```text
+resident parent          -> audit request (candidate, artifact hash, anchors)
+  auditor controller     -> owns holdout labels and scoring; never runs candidates
+    candidate child      -> unlabeled inputs only; bounded outputs
+  auditor controller     -> scores internally
+resident parent          <- aggregate allowlist only
+```
+
+The response is assembled field by field from a fixed allowlist, on both the
+sending and receiving side. Redaction fails open — anything a later edit adds
+and forgets to strip escapes. An allowlist fails closed. No per-case field, no
+query, no answer, no candidate output, and no judge rationale is on it.
+
+Audits are **informational**. `audit.py` does not import `promote`, and nothing
+reads audit rows to make a decision — not parent selection, not mutation, not
+experience feedback, not public improvement labels. A holdout result becomes a
+promotion veto in Phase 3, not before.
+
+**Anchors are configurable and identity-checked.** The anchor source resolves
+from `--anchors-dir`, then `$GODEL_RESIDENT_ANCHORS_DIR`, then the package
+`eval_sets/` — the last being a documented development convenience, not a
+production anchor location, and flagged as such in `audit` output. `init`
+records a canonical dataset identity (manifest hash, split seed and fraction,
+case counts); the auditor recomputes it independently and refuses the audit on
+any mismatch, so a drifted anchor directory cannot yield a holdout number whose
+meaning nobody can establish.
 
 **One state directory serves one task domain.** `init` binds the directory to an
 environment and records it in `config`. `reflect-once --env` and `init --force`
@@ -217,7 +255,14 @@ smoke test must not break this.
 
 ## Not in this phase
 
-The holdout auditor and immutable audit records (Phase 2 PR B); the promotion gate
-with hard vetoes, shadow/canary states, budgets and freeze (Phase 3); split
+The promotion gate
+with hard vetoes, shadow/canary states, budgets and freeze (Phase 3) — including
+using a holdout audit as a veto; split
 serve/reflect/audit clocks (Phase 4); automatic promotion (Phase 5); proactive
-triggers (Phase 6); tiers above T1 (Phase 7).
+triggers (Phase 6); tiers above T1 (Phase 7). Batch and scheduled auditing
+arrives with the audit clock in Phase 4; Phase 2 has `audit <candidate-id>`
+only, because batching brings queue limits, partial-failure semantics, and
+cancellation with it.
+
+Anchor isolation remains process-level. Separate OS ownership and read-only
+mounts stay deferred under AR-02.

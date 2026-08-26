@@ -10,7 +10,12 @@ Anything the child is not handed, it cannot read.
 
 from __future__ import annotations
 
-from .base import CandidateRunner, EvaluationOutcome, InProcessCandidateRunner
+from .base import (
+    BatchOutcome,
+    CandidateRunner,
+    EvaluationOutcome,
+    InProcessCandidateRunner,
+)
 from .limits import (
     ENFORCED,
     IsolationProfile,
@@ -21,6 +26,8 @@ from .limits import (
     early_rejection_profile,
 )
 from .protocol import (
+    KIND_EVALUATE,
+    KIND_EXECUTE_BATCH,
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
     MAX_STDERR_BYTES,
@@ -34,7 +41,10 @@ from .protocol import (
 from .subprocess_runner import SubprocessCandidateRunner
 
 __all__ = [
+    "BatchOutcome",
     "CandidateRunner",
+    "KIND_EVALUATE",
+    "KIND_EXECUTE_BATCH",
     "ENFORCED",
     "EvaluationOutcome",
     "InProcessCandidateRunner",

@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 from ..code_mutator import RuleBasedCodeMutator
 from ..dataset_env import EvalCase, load_cases_from_dir, split_cases_for_holdout
+from .anchors import DatasetIdentity, load_anchor_split, resolve_anchors_dir
 from ..demo_indonesia_support import INITIAL_POLICY as ID_SUPPORT_SEED_POLICY
 from ..godel_agent import Environment, PolicyValidationError, SafePolicyLoader
 from ..rule_based_mutator import RuleBasedIndonesianSupportMutator
@@ -112,7 +113,7 @@ class EnvironmentSpec:
 
     name: str
     description: str
-    prepare: Callable[[ResidentStore], None]
+    prepare: Callable[[ResidentStore, Path], DatasetIdentity | None]
     #: Snapshot records handed to the runner. Serialisable by construction —
     #: the child is never given a path it could widen into a dataset read.
     read_records: Callable[[ResidentStore], list[dict[str, Any]]]
@@ -142,21 +143,28 @@ def load_public_cases(store: ResidentStore) -> list[EvalCase]:
     return [record_to_case(record) for record in store.read_public_snapshot()]
 
 
-def _prepare_id_support(store: ResidentStore) -> None:
-    """Write the public half of the Indonesian support split into the state dir.
+def _prepare_id_support(store: ResidentStore, anchors_dir: Path) -> DatasetIdentity:
+    """Write the public half of the anchor split into the state directory.
 
-    This is the only code path in the resident that opens ``eval_sets/``, and it
-    runs solely during ``init``. The holdout half is read to reproduce the
-    deterministic split and is then dropped: it is not written out, evaluated,
-    shown to a mutator, logged, or referenced in any verdict.
+    This is the only code path in the resident parent that opens the anchor
+    source, and it runs solely during ``init``. The holdout half is read to
+    reproduce the deterministic split and is then dropped: it is not written
+    out, evaluated, shown to a mutator, logged, or referenced in any verdict.
+
+    Returns the dataset identity so ``init`` can record what the snapshot came
+    from — an audit against a different dataset is refused later on the strength
+    of this.
     """
 
-    public_cases, _holdout_cases = split_cases_for_holdout(load_cases_from_dir(EVAL_SETS_DIR))
+    identity, public_cases, _holdout_cases = load_anchor_split(anchors_dir)
     write_public_cases(store, public_cases)
+    return identity
 
 
-def _prepare_code_task(store: ResidentStore) -> None:
+def _prepare_code_task(store: ResidentStore, anchors_dir: Path) -> None:
     """No snapshot needed: the cases are defined in code and have no holdout."""
+
+    return None
 
 
 ENVIRONMENTS: dict[str, EnvironmentSpec] = {

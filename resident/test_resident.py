@@ -24,9 +24,16 @@ from typing import Any, Iterator
 
 from ..godel_agent import Action, EvaluationResult, SelfState
 from ..dataset_env import load_cases_from_dir, split_cases_for_holdout
+from . import auditor_worker
+from .anchors import DatasetIdentity, load_anchor_split, resolve_anchors_dir
+from .audit import AUDIT_EVENT, AuditError, run_audit
+from .auditor_worker import RESPONSE_ALLOWLIST, run_audit_in_controller
 from .archive import CandidateArchive, stable_unit_interval
 from .experience import ExperienceLog
 from .models import (
+    AUDIT_FAILED,
+    AUDIT_OK,
+    AUDIT_REFUSED,
     STATUS_IMPROVEMENT,
     STATUS_NO_CANDIDATE,
     STATUS_NO_IMPROVEMENT,
@@ -53,6 +60,7 @@ from .promote import (
     promote,
 )
 from .runner import (
+    BatchOutcome,
     CandidateRunner,
     EvaluationOutcome,
     InProcessCandidateRunner,
@@ -69,6 +77,7 @@ from .reflect import (
 )
 from .store import (
     ArtifactIntegrityError,
+    CONFIG_DATASET_IDENTITY,
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
     MIGRATIONS,
@@ -1062,6 +1071,394 @@ def test_terminate_group_reaps_the_whole_process_group() -> None:
             process.wait()
 
 
+# --- PR B: holdout auditor --------------------------------------------------
+#
+# Leakage is tested with planted sentinels rather than by scanning real data:
+# an absence-of-string assertion is weak on ordinary text and strong on a token
+# that exists for no other reason.
+#
+# Two sentinel families, because they have different rules:
+#   QUERY sentinels  - holdout *inputs*. The candidate child legitimately
+#                      receives these; they must never come back to the parent.
+#   LABEL sentinels  - reference answers and required terms. These must never
+#                      leave the auditor controller at all.
+
+QUERY_SENTINEL = "QSENT"
+ANSWER_SENTINEL = "ASENT"
+TERM_SENTINEL = "TSENT"
+
+ID_BETTER_POLICY = (
+    "\ndef solve(query, kb):\n"
+    '    return "Silakan gunakan kanal resmi bank. '
+    'Jangan berikan OTP, PIN, atau password."\n'
+)
+
+
+def _write_sentinel_anchors(directory: Path, extra_case: bool = False) -> Path:
+    """A small anchor dataset where every field is individually traceable."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    records = []
+    index = 0
+    for category in ("bank", "gov", "safety"):
+        for _ in range(4):
+            index += 1
+            records.append(
+                {
+                    "query": f"{QUERY_SENTINEL}{index:02d} pertanyaan nasabah",
+                    "required_terms": [f"{TERM_SENTINEL}{index:02d}"],
+                    "forbidden_terms": [],
+                    "weight": 1.0,
+                    "category": category,
+                    "reference_answer": f"{ANSWER_SENTINEL}{index:02d} jawaban resmi",
+                    "baseline_outputs": {},
+                }
+            )
+    if extra_case:
+        records.append(
+            {
+                "query": f"{QUERY_SENTINEL}99 kasus tambahan",
+                "required_terms": [f"{TERM_SENTINEL}99"],
+                "forbidden_terms": [],
+                "weight": 1.0,
+                "category": "bank",
+                "reference_answer": f"{ANSWER_SENTINEL}99 jawaban",
+                "baseline_outputs": {},
+            }
+        )
+    path = directory / "sentinel_cases.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n", encoding="utf-8"
+    )
+    return directory
+
+
+def _holdout_sentinels(anchors_dir: Path) -> tuple[set[str], set[str]]:
+    """(query sentinels, label sentinels) for the holdout half specifically."""
+
+    _identity, _public, holdout = load_anchor_split(anchors_dir)
+    queries = {case.query for case in holdout}
+    labels = {case.reference_answer for case in holdout}
+    labels |= {term for case in holdout for term in case.required_terms}
+    return queries, labels
+
+
+@contextmanager
+def audited_state() -> Iterator[tuple[Path, Path, ResidentStore]]:
+    """A state directory bound to id_support over the sentinel anchors."""
+
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        state_dir = root / "state"
+        with opened(state_dir) as store:
+            initialize(
+                store,
+                env_name="id_support",
+                seed_policy=WEAK_POLICY,
+                anchors_dir=str(anchors),
+            )
+            yield root, anchors, store
+
+
+class RecordingBatchRunner:
+    """Captures exactly what the controller hands the candidate child."""
+
+    captured: list[dict[str, Any]] = []
+
+    def __init__(self, limits=None):
+        self.limits = limits
+
+    def execute_batch(self, policy_source, artifact_hash, inputs, kb, limits=None):
+        RecordingBatchRunner.captured.append(
+            {
+                "policy_source": policy_source,
+                "artifact_hash": artifact_hash,
+                "inputs": list(inputs),
+                "kb": dict(kb),
+            }
+        )
+        return BatchOutcome(outputs=["jawaban umum" for _ in inputs])
+
+
+def test_candidate_child_receives_inputs_but_never_holdout_labels() -> None:
+    with audited_state() as (root, anchors, store):
+        query_sentinels, label_sentinels = _holdout_sentinels(anchors)
+        candidate = CandidateArchive(store).best()
+        assert candidate is not None
+        identity = DatasetIdentity.from_dict(json.loads(store.get_config(CONFIG_DATASET_IDENTITY)))
+        policy_source = store.read_artifact(candidate.artifact_hash)
+
+        request = auditor_worker.build_audit_request(
+            audit_run_id="a1",
+            candidate_id=candidate.candidate_id,
+            artifact_hash=candidate.artifact_hash,
+            policy_source=policy_source,
+            environment_name="id_support",
+            anchors_dir=str(anchors),
+            expected_identity=identity.to_dict(),
+            limits={},
+        )
+
+        RecordingBatchRunner.captured = []
+        original = auditor_worker.SubprocessCandidateRunner
+        auditor_worker.SubprocessCandidateRunner = RecordingBatchRunner
+        try:
+            response = run_audit_in_controller(request)
+        finally:
+            auditor_worker.SubprocessCandidateRunner = original
+
+        assert response["status"] == AUDIT_OK, response
+        assert len(RecordingBatchRunner.captured) == 1
+        handed = RecordingBatchRunner.captured[0]
+        serialized = json.dumps(handed, ensure_ascii=False)
+
+        # Inputs are legitimately handed over...
+        assert any(q in serialized for q in query_sentinels), "child got no holdout inputs"
+        # ...but no label, in any field, ever is.
+        for label in label_sentinels:
+            assert label not in serialized, f"label leaked to the candidate child: {label!r}"
+        assert ANSWER_SENTINEL not in serialized
+        assert TERM_SENTINEL not in serialized
+        # And nothing rubric-shaped rode along.
+        assert set(handed) == {"policy_source", "artifact_hash", "inputs", "kb"}
+
+
+def test_audit_response_carries_only_allowlisted_aggregates() -> None:
+    with audited_state() as (root, anchors, store):
+        query_sentinels, label_sentinels = _holdout_sentinels(anchors)
+        candidate = CandidateArchive(store).best()
+        outcome = run_audit(store, candidate.candidate_id, anchors_dir=str(anchors))
+        record = outcome.record
+
+        assert record.status == AUDIT_OK, record.detail
+        assert record.num_cases > 0
+        assert record.holdout_score is not None
+
+        serialized = json.dumps(record.to_dict(), ensure_ascii=False)
+        for sentinel in query_sentinels | label_sentinels:
+            assert sentinel not in serialized, f"leaked into the audit record: {sentinel!r}"
+        for family in (QUERY_SENTINEL, ANSWER_SENTINEL, TERM_SENTINEL):
+            assert family not in serialized
+
+        # Aggregates only: no per-case structure of any kind.
+        payload = record.to_dict()
+        assert "cases" not in payload and "outputs" not in payload
+        assert "answers" not in payload and "details" not in payload
+
+
+def test_no_holdout_content_reaches_the_database_or_events() -> None:
+    with audited_state() as (root, anchors, store):
+        query_sentinels, label_sentinels = _holdout_sentinels(anchors)
+        candidate = CandidateArchive(store).best()
+        run_audit(store, candidate.candidate_id, anchors_dir=str(anchors))
+
+        # Audit-owned surfaces must contain no case content at all, public or
+        # holdout: an audit record is aggregates only, so even a public-case
+        # sentinel appearing here would mean something leaked into it.
+        audit_surfaces = [json.dumps(r.to_dict(), ensure_ascii=False) for r in store.list_audits()]
+        audit_surfaces += [
+            json.dumps(e.to_dict(), ensure_ascii=False)
+            for e in store.list_events()
+            if e.kind == AUDIT_EVENT
+        ]
+        audit_blob = "\n".join(audit_surfaces)
+        assert audit_blob, "no audit surfaces to check"
+        for family in (QUERY_SENTINEL, ANSWER_SENTINEL, TERM_SENTINEL):
+            assert family not in audit_blob, f"case content in an audit surface: {family}"
+
+        # Every other persisted surface the parent owns may legitimately carry
+        # *public* case content — the snapshot is public by definition — but
+        # never a holdout query, answer, or required term.
+        surfaces = list(audit_surfaces)
+        surfaces += [json.dumps(e.to_dict(), ensure_ascii=False) for e in store.list_events()]
+        surfaces += [
+            json.dumps(c.to_dict(), ensure_ascii=False) for c in CandidateArchive(store).list()
+        ]
+        surfaces.append(store.public_snapshot_path.read_text(encoding="utf-8"))
+        surfaces.append(store.champion_path.read_text(encoding="utf-8"))
+        # And the raw database file, so nothing hides in a column we forgot.
+        surfaces.append(store.db_path.read_bytes().decode("utf-8", errors="replace"))
+
+        blob = "\n".join(surfaces)
+        for sentinel in query_sentinels | label_sentinels:
+            assert sentinel not in blob, f"holdout content persisted: {sentinel!r}"
+
+
+def test_audit_refuses_a_drifted_anchor_dataset() -> None:
+    with audited_state() as (root, anchors, store):
+        candidate = CandidateArchive(store).best()
+        # Same directory, one more case: identity must no longer match.
+        _write_sentinel_anchors(anchors, extra_case=True)
+
+        outcome = run_audit(store, candidate.candidate_id, anchors_dir=str(anchors))
+        assert outcome.record.status == AUDIT_REFUSED, outcome.record
+        assert "does not match" in outcome.record.detail
+        assert outcome.record.holdout_score is None
+
+
+def test_audit_refuses_an_environment_without_a_holdout() -> None:
+    with initialized() as (state_dir, store):  # phone_normalizer
+        candidate = CandidateArchive(store).best()
+        try:
+            run_audit(store, candidate.candidate_id)
+        except AuditError as exc:
+            assert "no holdout" in str(exc)
+        else:
+            raise AssertionError("audited an environment with no holdout")
+
+
+def test_audit_refuses_a_non_selectable_candidate() -> None:
+    with audited_state() as (root, anchors, store):
+        rejected = reflect_once(store, mutator=StaticMutator(candidates=[BANNED_IMPORT_POLICY]))
+        assert rejected.verdict.status == STATUS_VALIDATION
+        try:
+            run_audit(store, rejected.candidate_id, anchors_dir=str(anchors))
+        except AuditError as exc:
+            assert "not auditable" in str(exc)
+        else:
+            raise AssertionError("audited a rejected candidate")
+
+
+def test_repeated_audits_create_separate_immutable_records() -> None:
+    with audited_state() as (root, anchors, store):
+        candidate = CandidateArchive(store).best()
+        first = run_audit(store, candidate.candidate_id, anchors_dir=str(anchors)).record
+        second = run_audit(store, candidate.candidate_id, anchors_dir=str(anchors)).record
+
+        assert first.audit_run_id != second.audit_run_id
+        rows = store.list_audits(candidate_id=candidate.candidate_id)
+        assert len(rows) == 2
+        # The earlier record is untouched, not updated in place.
+        earlier = [r for r in rows if r.audit_run_id == first.audit_run_id][0]
+        assert earlier.to_dict() == first.to_dict()
+        # The store offers no way to change one.
+        assert not hasattr(store, "update_audit")
+        assert not hasattr(store, "delete_audit")
+
+
+def test_audits_do_not_rewrite_the_public_verdict_or_touch_the_champion() -> None:
+    with audited_state() as (root, anchors, store):
+        reflect_once(store, mutator=StaticMutator(candidates=[ID_BETTER_POLICY]))
+        candidate = CandidateArchive(store).best()
+        verdict_before = candidate.verdict.to_dict()
+        champion_before = store.champion_path.read_bytes()
+        promotions_before = store.count_events(kind="promotion_finalized")
+
+        run_audit(store, candidate.candidate_id, anchors_dir=str(anchors))
+
+        after = CandidateArchive(store).get(candidate.candidate_id)
+        assert after.verdict.to_dict() == verdict_before, "audit rewrote a reflection verdict"
+        assert after.verdict.holdout_evaluated is False
+        assert store.champion_path.read_bytes() == champion_before
+        assert store.count_events(kind="promotion_finalized") == promotions_before
+
+
+def test_audits_do_not_influence_parent_selection() -> None:
+    with audited_state() as (root, anchors, store):
+        reflect_once(store, mutator=StaticMutator(candidates=[ID_BETTER_POLICY]))
+        archive = CandidateArchive(store)
+        before = [archive.select_parent(c).candidate_id for c in range(1, 10)]
+        best = archive.best()
+
+        for _ in range(2):
+            run_audit(store, best.candidate_id, anchors_dir=str(anchors))
+
+        after = [CandidateArchive(store).select_parent(c).candidate_id for c in range(1, 10)]
+        assert before == after, "audit rows changed parent selection"
+        assert CandidateArchive(store).best().candidate_id == best.candidate_id
+
+
+def test_audit_module_does_not_import_promotion_code() -> None:
+    here = Path(__file__).resolve().parent
+    source = (here / "audit.py").read_text(encoding="utf-8")
+    assert "from .promote" not in source
+    assert "import promote" not in source
+    auditor = (here / "auditor_worker.py").read_text(encoding="utf-8")
+    assert "promote" not in auditor
+
+
+def test_auditor_refuses_a_policy_that_does_not_match_its_artifact_hash() -> None:
+    with audited_state() as (root, anchors, store):
+        candidate = CandidateArchive(store).best()
+        identity = json.loads(store.get_config(CONFIG_DATASET_IDENTITY))
+        request = auditor_worker.build_audit_request(
+            audit_run_id="a2",
+            candidate_id=candidate.candidate_id,
+            artifact_hash=candidate.artifact_hash,
+            policy_source=GOOD_POLICY,  # not the artifact this hash names
+            environment_name="id_support",
+            anchors_dir=str(anchors),
+            expected_identity=identity,
+            limits={},
+        )
+        response = run_audit_in_controller(request)
+        assert response["status"] == AUDIT_REFUSED
+        assert "hashes to" in response["detail"]
+
+
+def test_audit_records_a_failure_when_the_candidate_cannot_execute() -> None:
+    with audited_state() as (root, anchors, store):
+        candidate = CandidateArchive(store).best()
+
+        class FailingRunner(RecordingBatchRunner):
+            def execute_batch(self, policy_source, artifact_hash, inputs, kb, limits=None):
+                return BatchOutcome(status=STATUS_TIMEOUT, error="simulated timeout")
+
+        identity = json.loads(store.get_config(CONFIG_DATASET_IDENTITY))
+        request = auditor_worker.build_audit_request(
+            audit_run_id="a3",
+            candidate_id=candidate.candidate_id,
+            artifact_hash=candidate.artifact_hash,
+            policy_source=store.read_artifact(candidate.artifact_hash),
+            environment_name="id_support",
+            anchors_dir=str(anchors),
+            expected_identity=identity,
+            limits={},
+        )
+        original = auditor_worker.SubprocessCandidateRunner
+        auditor_worker.SubprocessCandidateRunner = FailingRunner
+        try:
+            response = run_audit_in_controller(request)
+        finally:
+            auditor_worker.SubprocessCandidateRunner = original
+
+        assert response["status"] == AUDIT_FAILED
+        assert STATUS_TIMEOUT in response["detail"]
+        assert response["holdout_score"] is None
+
+
+def test_unattributed_sigkill_is_a_crash_not_assumed_memory_pressure() -> None:
+    with temp_state_dir() as tmp:
+        exe = _fake_worker_executable(tmp, "cat > /dev/null; kill -9 $$")
+        outcome = SubprocessCandidateRunner(python_executable=exe).evaluate(
+            GOOD_POLICY, TEST_ENV, [], RunnerLimits()
+        )
+        assert outcome.status == STATUS_RUNNER_CRASH, (outcome.status, outcome.error)
+        assert "unattributed" in outcome.error
+        # The profile must not claim a memory limit fired.
+        assert outcome.isolation.memory_limit_enforced != "true"
+
+
+def test_anchors_dir_resolution_prefers_explicit_then_env_then_package() -> None:
+    from .anchors import ANCHORS_DIR_ENV_VAR, is_development_anchor_location
+
+    previous = os.environ.get(ANCHORS_DIR_ENV_VAR)
+    try:
+        os.environ[ANCHORS_DIR_ENV_VAR] = "/tmp/anchors-from-env"
+        assert resolve_anchors_dir("/tmp/anchors-explicit") == Path("/tmp/anchors-explicit").resolve()
+        assert resolve_anchors_dir(None) == Path("/tmp/anchors-from-env").resolve()
+        os.environ.pop(ANCHORS_DIR_ENV_VAR)
+        fallback = resolve_anchors_dir(None)
+        assert fallback.name == "eval_sets"
+        # The package location is flagged as a development convenience.
+        assert is_development_anchor_location(fallback)
+        assert not is_development_anchor_location(Path("/tmp/anchors-explicit").resolve())
+    finally:
+        os.environ.pop(ANCHORS_DIR_ENV_VAR, None)
+        if previous is not None:
+            os.environ[ANCHORS_DIR_ENV_VAR] = previous
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -1110,6 +1507,20 @@ TESTS = [
     test_worker_environment_carries_no_credentials_or_user_paths,
     test_request_carries_records_not_a_dataset_path,
     test_terminate_group_reaps_the_whole_process_group,
+    test_anchors_dir_resolution_prefers_explicit_then_env_then_package,
+    test_candidate_child_receives_inputs_but_never_holdout_labels,
+    test_audit_response_carries_only_allowlisted_aggregates,
+    test_no_holdout_content_reaches_the_database_or_events,
+    test_audit_refuses_a_drifted_anchor_dataset,
+    test_audit_refuses_an_environment_without_a_holdout,
+    test_audit_refuses_a_non_selectable_candidate,
+    test_repeated_audits_create_separate_immutable_records,
+    test_audits_do_not_rewrite_the_public_verdict_or_touch_the_champion,
+    test_audits_do_not_influence_parent_selection,
+    test_audit_module_does_not_import_promotion_code,
+    test_auditor_refuses_a_policy_that_does_not_match_its_artifact_hash,
+    test_audit_records_a_failure_when_the_candidate_cannot_execute,
+    test_unattributed_sigkill_is_a_crash_not_assumed_memory_pressure,
     test_existing_smoke_suite_still_passes,
 ]
 

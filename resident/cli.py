@@ -25,11 +25,13 @@ import sys
 from typing import Any, Sequence
 
 from ..code_agent_env import CodeTaskEnvironment
+from .anchors import ANCHORS_DIR_ENV_VAR, is_development_anchor_location
+from .audit import AuditError, run_audit
 from ..code_llm_mutator import CodeLLMMutationProvider
 from ..llm_mutator import LLMMutationProvider, OpenAICompatibleTransport
 from .archive import CandidateArchive
 from .experience import ExperienceLog, KNOWN_OUTCOMES
-from .models import SCORED_STATUSES
+from .models import AUDIT_OK, SCORED_STATUSES
 from .mutators import MutationProviderAdapter, Mutator
 from .promote import (
     AlreadyInitializedError,
@@ -95,6 +97,14 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--seed-policy", default=None, help="Path to a solve(query, kb) source file."
     )
+    init_parser.add_argument(
+        "--anchors-dir",
+        default=None,
+        help=(
+            "Human-owned evaluation source. Defaults to $" + ANCHORS_DIR_ENV_VAR
+            + ", then the package eval_sets/ (development only)."
+        ),
+    )
     init_parser.add_argument("--actor", default="", help="Who ran this command.")
     init_parser.add_argument(
         "--force", action="store_true", help="Seed a new champion even if one exists."
@@ -157,6 +167,18 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser = subparsers.add_parser("show", help="Show one candidate in full.")
     show_parser.add_argument("candidate_id")
 
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Audit one candidate against the holdout. Informational; never promotes.",
+    )
+    audit_parser.add_argument("candidate_id")
+    audit_parser.add_argument(
+        "--anchors-dir",
+        default=None,
+        help="Human-owned evaluation source. Must match the source used at init.",
+    )
+    audit_parser.add_argument("--timeout", type=float, default=300.0)
+
     promote_parser = subparsers.add_parser(
         "promote", help="Make an archived candidate the champion. Human-invoked only."
     )
@@ -204,6 +226,7 @@ def _cmd_init(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
             seed_policy=seed_policy,
             actor=args.actor,
             force=args.force,
+            anchors_dir=args.anchors_dir,
         )
     except (AlreadyInitializedError, EnvironmentMismatchError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -334,6 +357,7 @@ def _cmd_status(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
         "best_candidate_id": best.candidate_id if best is not None else None,
         "best_public_score": best.public_score if best is not None else None,
         "pending_promotions": len(pending),
+        "audits": store.count_audits(),
         "holdout_evaluated": False,
         "auto_promotion": "not implemented",
     }
@@ -384,6 +408,8 @@ def _cmd_show(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
             integrity = "verified"
         except ResidentError as exc:
             integrity = f"FAILED: {exc}"
+    audits = store.list_audits(candidate_id=candidate.candidate_id)
+    payload["audits"] = [record.to_dict() for record in audits]
     payload["artifact_integrity"] = integrity
     payload["policy_code"] = code
 
@@ -399,7 +425,13 @@ def _cmd_show(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
         f"delta {_fmt_delta(candidate.verdict.delta)})",
         f"  artifact {candidate.artifact_hash or '(none)'} [{integrity}]",
         f"  detail   {candidate.verdict.detail}",
+        f"  audits   {len(audits)} (informational; never gate promotion)",
     ]
+    for record in audits:
+        lines.append(
+            f"    - {record.created_at} {record.status} "
+            f"holdout={_fmt_score(record.holdout_score)} n={record.num_cases}"
+        )
     for reason in candidate.verdict.reasons:
         lines.append(f"  - {reason}")
     if code:
@@ -407,6 +439,45 @@ def _cmd_show(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
         lines.append(code.rstrip())
     emit(payload, lines)
     return EXIT_OK
+
+
+def _cmd_audit(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    try:
+        outcome = run_audit(
+            store,
+            args.candidate_id,
+            anchors_dir=args.anchors_dir,
+            timeout_seconds=args.timeout,
+        )
+    except AuditError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    record = outcome.record
+    lines = [
+        f"audit {record.audit_run_id}",
+        f"  candidate  {record.candidate_id}",
+        f"  status     {record.status}",
+        f"  holdout    {_fmt_score(record.holdout_score)} over {record.num_cases} case(s)",
+        f"  safety     {record.safety_failure_count} case(s) below the safety floor",
+        f"  dataset    {(record.dataset_identity.get('manifest_hash') or '(none)')[:12]}"
+        f" seed={record.dataset_identity.get('split_seed', '?')}",
+        f"  isolation  {_fmt_isolation(record.isolation)}",
+    ]
+    if record.detail:
+        lines.append(f"  detail     {record.detail}")
+    if outcome.development_anchors:
+        lines.append("")
+        lines.append(
+            "note: anchors read from the package eval_sets/ (development default). "
+            f"Set --anchors-dir or ${ANCHORS_DIR_ENV_VAR} for real use."
+        )
+    lines.append("")
+    lines.append(
+        "Informational only: this audit changed no champion and gates no promotion."
+    )
+    emit(record.to_dict(), lines)
+    return EXIT_OK if record.status == AUDIT_OK else EXIT_ERROR
 
 
 def _cmd_promote(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
@@ -442,6 +513,7 @@ HANDLERS = {
     "status": _cmd_status,
     "show": _cmd_show,
     "promote": _cmd_promote,
+    "audit": _cmd_audit,
 }
 
 

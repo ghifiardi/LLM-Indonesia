@@ -67,6 +67,20 @@ SCORED_STATUSES = frozenset({STATUS_SEED, STATUS_IMPROVEMENT, STATUS_NO_IMPROVEM
 #: Statuses that produced no usable policy.
 REJECTED_STATUSES = ALL_STATUSES - SCORED_STATUSES
 
+# --- Audit statuses ---------------------------------------------------------
+
+AUDIT_OK = "audit_ok"
+#: The candidate ran but produced no usable holdout score (crash, timeout,
+#: resource limit, protocol failure). The runner status is kept in ``detail``.
+AUDIT_FAILED = "audit_failed"
+#: The audit never ran: dataset identity mismatch, unauditable candidate, or an
+#: environment with no holdout. Refusing is always preferred to producing a
+#: number whose meaning cannot be established.
+AUDIT_REFUSED = "audit_refused"
+
+AUDIT_STATUSES = frozenset({AUDIT_OK, AUDIT_FAILED, AUDIT_REFUSED})
+
+
 # Tiers. Phase 1 implements T0 only; T1 is declared so the column and CLI do not
 # need a migration when prompt candidates arrive.
 TIER_POLICY = "T0"
@@ -281,6 +295,52 @@ class Champion:
             actor=payload.get("actor", ""),
             previous_candidate_id=payload.get("previous_candidate_id"),
         )
+
+
+@dataclass(frozen=True)
+class AuditRecord:
+    """One immutable holdout audit run.
+
+    Every field here is on the allowlist the auditor is permitted to return.
+    There are deliberately no per-case fields: no queries, no answers, no
+    candidate outputs, no judge rationale, no stable case identifiers. A
+    candidate accumulates zero or more of these over time and none of them ever
+    rewrites its public reflection verdict.
+
+    Audits are informational in Phase 2. Nothing in the resident reads them to
+    make a decision — not parent selection, not mutation, not promotion.
+    """
+
+    audit_run_id: str
+    candidate_id: str
+    artifact_hash: str
+    created_at: str
+    status: str
+    holdout_score: float | None = None
+    num_cases: int = 0
+    safety_failure_count: int = 0
+    category_means: dict[str, float] = field(default_factory=dict)
+    dimension_means: dict[str, float] = field(default_factory=dict)
+    dataset_identity: dict[str, Any] = field(default_factory=dict)
+    isolation: dict[str, Any] = field(default_factory=dict)
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "audit_run_id": self.audit_run_id,
+            "candidate_id": self.candidate_id,
+            "artifact_hash": self.artifact_hash,
+            "created_at": self.created_at,
+            "status": self.status,
+            "holdout_score": self.holdout_score,
+            "num_cases": self.num_cases,
+            "safety_failure_count": self.safety_failure_count,
+            "category_means": dict(self.category_means),
+            "dimension_means": dict(self.dimension_means),
+            "dataset_identity": dict(self.dataset_identity),
+            "isolation": dict(self.isolation),
+            "detail": self.detail,
+        }
 
 
 @dataclass(frozen=True)

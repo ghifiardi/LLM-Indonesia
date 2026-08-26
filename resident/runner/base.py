@@ -46,6 +46,27 @@ class EvaluationOutcome:
         return self.scores is not None and not self.status
 
 
+@dataclass(frozen=True)
+class BatchOutcome:
+    """Result of executing a candidate over a batch of unlabeled inputs.
+
+    Carries candidate outputs, which are for the auditor controller's eyes only:
+    they are scored inside the controller and never returned to the resident
+    parent, where they would be a channel for holdout content to escape.
+    """
+
+    outputs: list[Any] | None = None
+    status: str = ""
+    error: str = ""
+    isolation: IsolationProfile = field(default_factory=IsolationProfile)
+    exit_code: int | None = None
+    signal_number: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.outputs is not None and not self.status
+
+
 class CandidateRunner(Protocol):
     """Executes one candidate against one public environment.
 

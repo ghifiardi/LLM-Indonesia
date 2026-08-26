@@ -19,9 +19,21 @@ to opt out of:
 
 from __future__ import annotations
 
+from .anchors import (
+    ANCHORS_DIR_ENV_VAR,
+    DatasetIdentity,
+    dataset_manifest_hash,
+    load_anchor_split,
+    resolve_anchors_dir,
+)
 from .archive import CandidateArchive, stable_unit_interval
+from .audit import AuditError, AuditOutcome, run_audit
 from .experience import ExperienceLog, KNOWN_OUTCOMES
 from .models import (
+    AUDIT_FAILED,
+    AUDIT_OK,
+    AUDIT_REFUSED,
+    AuditRecord,
     Candidate,
     Champion,
     CycleEvent,
@@ -72,6 +84,7 @@ from .reflect import (
     write_public_cases,
 )
 from .runner import (
+    BatchOutcome,
     CandidateRunner,
     EvaluationOutcome,
     InProcessCandidateRunner,
@@ -85,6 +98,7 @@ from .runner import (
 from .store import (
     ArtifactIntegrityError,
     ArtifactMissingError,
+    CONFIG_DATASET_IDENTITY,
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
     MIGRATIONS,
@@ -101,6 +115,20 @@ from .store import (
 )
 
 __all__ = [
+    "BatchOutcome",
+    "run_audit",
+    "resolve_anchors_dir",
+    "load_anchor_split",
+    "dataset_manifest_hash",
+    "DatasetIdentity",
+    "CONFIG_DATASET_IDENTITY",
+    "AuditRecord",
+    "AuditOutcome",
+    "AuditError",
+    "AUDIT_REFUSED",
+    "AUDIT_OK",
+    "AUDIT_FAILED",
+    "ANCHORS_DIR_ENV_VAR",
     "score_vector_from_result",
     "default_runner",
     "early_rejection_profile",

@@ -25,8 +25,11 @@ function of the pointer's contents, so repeating it is a no-op.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
+
+from .anchors import resolve_anchors_dir
 
 from ..godel_agent import SafePolicyLoader
 from .archive import CandidateArchive
@@ -44,6 +47,7 @@ from .reflect import (
 )
 from .runner import CandidateRunner, RunnerLimits
 from .store import (
+    CONFIG_DATASET_IDENTITY,
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
     ResidentError,
@@ -174,6 +178,7 @@ def initialize(
     seed_policy: str | None = None,
     actor: str = "",
     force: bool = False,
+    anchors_dir: str | None = None,
     runner: CandidateRunner | None = None,
     limits: RunnerLimits | None = None,
 ) -> tuple[Candidate, Champion]:
@@ -212,7 +217,10 @@ def initialize(
 
     # Runs before anything is archived: this is the one path allowed to read the
     # source eval set, and it writes public cases only.
-    spec.prepare(store)
+    resolved_anchors = resolve_anchors_dir(anchors_dir)
+    identity = spec.prepare(store, resolved_anchors)
+    if identity is not None:
+        store.set_config(CONFIG_DATASET_IDENTITY, json.dumps(identity.to_dict(), sort_keys=True))
     outcome = evaluate_policy_source(store, spec, code, runner=runner, limits=limits)
     if outcome.scores is None:
         raise PromotionError(
@@ -257,6 +265,8 @@ def initialize(
             "artifact_hash": artifact_hash,
             "public_score": scores.combined,
             "forced": force,
+            "anchors_dir": str(resolved_anchors),
+            "dataset_identity": identity.to_dict() if identity is not None else None,
         },
     )
     return candidate, champion
