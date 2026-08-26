@@ -58,11 +58,6 @@ from .store import (
 
 AUDITOR_MODULE = "godel_agent_prototype.resident.auditor_worker"
 
-#: Environments that have a holdout to audit. A code task whose cases are
-#: defined in source has none, and asking for one should say so plainly rather
-#: than return an empty result that reads like a pass.
-AUDITABLE_ENVIRONMENTS = frozenset({"id_support"})
-
 AUDIT_EVENT = "holdout_audit"
 
 
@@ -87,12 +82,11 @@ def run_audit(
     """Audit one archived candidate against the holdout. Human-invoked only."""
 
     environment_name = bound_environment(store)
-    if environment_name not in AUDITABLE_ENVIRONMENTS:
+    spec = get_environment_spec(environment_name)
+    if not spec.has_holdout:
         raise AuditError(
-            f"Environment {environment_name!r} has no holdout to audit "
-            f"(auditable: {', '.join(sorted(AUDITABLE_ENVIRONMENTS))})."
+            f"Environment {environment_name!r} has no holdout to audit."
         )
-    get_environment_spec(environment_name)
 
     archive = CandidateArchive(store)
     candidate = archive.get(candidate_id)

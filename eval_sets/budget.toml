@@ -1,0 +1,13 @@
+# Daily budget ceilings. Anchor file: human-owned, never written by the
+# resident. Counters live in state.db (agent-owned); the limits live here.
+# Breaching any of these freezes the resident through the single freeze path.
+
+[budget]
+max_reflect_cycles_per_day = 200
+max_candidate_executions_per_day = 400
+max_promotions_per_day = 20
+max_audits_per_day = 100
+
+# Consecutive failing gate evaluations tolerated before freezing. Derived from
+# the immutable gate_verdicts log rather than a separate counter.
+max_consecutive_gate_failures = 25

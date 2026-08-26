@@ -26,6 +26,8 @@ from typing import Any, Sequence
 
 from ..code_agent_env import CodeTaskEnvironment
 from .anchors import ANCHORS_DIR_ENV_VAR, is_development_anchor_location
+from . import states
+from .gate import GateError, evaluate_gate
 from .audit import AuditError, run_audit
 from ..code_llm_mutator import CodeLLMMutationProvider
 from ..llm_mutator import LLMMutationProvider, OpenAICompatibleTransport
@@ -49,6 +51,7 @@ from .reflect import (
     reflect_once,
 )
 from .store import (
+    CONFIG_DATASET_IDENTITY,
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
     ResidentError,
@@ -179,12 +182,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit_parser.add_argument("--timeout", type=float, default=300.0)
 
+    gate_parser = subparsers.add_parser(
+        "gate",
+        help="Evaluate the promotion gate for a candidate. Records a verdict; never promotes.",
+    )
+    gate_parser.add_argument("candidate_id")
+    gate_parser.add_argument("--anchors-dir", default=None)
+
     promote_parser = subparsers.add_parser(
         "promote", help="Make an archived candidate the champion. Human-invoked only."
     )
     promote_parser.add_argument("candidate_id")
     promote_parser.add_argument("--reason", required=True, help="Why this candidate is promoted.")
     promote_parser.add_argument("--actor", default="", help="Who approved the promotion.")
+    promote_parser.add_argument(
+        "--anchors-dir", default=None, help="Anchor source for gate thresholds."
+    )
+    promote_parser.add_argument(
+        "--gate-verdict-id",
+        default=None,
+        help="Reuse an existing verdict. Refused if stale; omit to evaluate fresh.",
+    )
 
     return parser
 
@@ -297,7 +315,7 @@ def _cmd_reflect_once(store: ResidentStore, args: argparse.Namespace, emit: Any)
         f"  score      {_fmt_score(verdict.public_score)}"
         f"  (parent {_fmt_score(verdict.parent_score)}, delta {_fmt_delta(verdict.delta)})",
         f"  isolation  {_fmt_isolation(verdict.isolation)}",
-        "  holdout    not evaluated (isolated auditor arrives in PR B)",
+        "  holdout    not evaluated here; run `audit` for an isolated holdout check",
     ]
     for reason in verdict.reasons:
         lines.append(f"  - {reason}")
@@ -358,9 +376,24 @@ def _cmd_status(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
         "best_public_score": best.public_score if best is not None else None,
         "pending_promotions": len(pending),
         "audits": store.count_audits(),
+        "champion_audit_current": None,
         "holdout_evaluated": False,
         "auto_promotion": "not implemented",
     }
+
+    champion_audit = None
+    if champion is not None:
+        from .gate import current_audit
+
+        champion_audit = current_audit(
+            store,
+            champion.candidate_id,
+            champion.artifact_hash,
+            json.loads(store.get_config(CONFIG_DATASET_IDENTITY) or "{}"),
+        )
+        payload["champion_audit_current"] = (
+            champion_audit.audit_run_id if champion_audit is not None else None
+        )
 
     if champion is None:
         lines = [
@@ -382,8 +415,19 @@ def _cmd_status(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
             f" ({(best.candidate_id[:12] if best else '-')})",
             f"cycles        {payload['reflect_cycles']} reflection(s)",
             f"experiences   {log.count()} {log.outcome_counts() or ''}",
-            "holdout       never evaluated in this process (phase 2)",
-            "promotion     manual only",
+            f"audits        {store.count_audits()} holdout audit(s)",
+            "champion aud  "
+            + (
+                f"current ({champion_audit.audit_run_id[:12]}, "
+                f"holdout {_fmt_score(champion_audit.holdout_score)}, "
+                f"{champion_audit.safety_failure_count} safety failure(s))"
+                if champion_audit is not None
+                else "MISSING - promotion is blocked until "
+                f"`resident audit {champion.candidate_id[:12]}` runs"
+            ),
+            "holdout       never loaded in this process; audits run isolated",
+            f"state         {store.candidate_state(champion.candidate_id) or '(none)'}",
+            "promotion     manual only, gated",
         ]
     if pending:
         lines.append(f"WARNING: {len(pending)} promotion(s) still pending after recovery.")
@@ -408,6 +452,10 @@ def _cmd_show(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
             integrity = "verified"
         except ResidentError as exc:
             integrity = f"FAILED: {exc}"
+    state = store.candidate_state(candidate.candidate_id)
+    verdicts = store.list_gate_verdicts(candidate_id=candidate.candidate_id)
+    payload["state"] = state
+    payload["gate_verdicts"] = [v.to_dict() for v in verdicts]
     audits = store.list_audits(candidate_id=candidate.candidate_id)
     payload["audits"] = [record.to_dict() for record in audits]
     payload["artifact_integrity"] = integrity
@@ -425,8 +473,14 @@ def _cmd_show(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
         f"delta {_fmt_delta(candidate.verdict.delta)})",
         f"  artifact {candidate.artifact_hash or '(none)'} [{integrity}]",
         f"  detail   {candidate.verdict.detail}",
-        f"  audits   {len(audits)} (informational; never gate promotion)",
+        f"  state    {state or '(none)'}",
+        f"  gates    {len(verdicts)} evaluation(s)"
+        + (f", latest {'PASS' if verdicts[0].passed else 'REFUSED'}" if verdicts else ""),
+        f"  audits   {len(audits)} (evidence for the gate; never promote by themselves)",
     ]
+    if verdicts:
+        for veto in verdicts[0].failures():
+            lines.append(f"    gate FAIL {veto.name}: {veto.detail}")
     for record in audits:
         lines.append(
             f"    - {record.created_at} {record.status} "
@@ -480,6 +534,37 @@ def _cmd_audit(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int
     return EXIT_OK if record.status == AUDIT_OK else EXIT_ERROR
 
 
+def _render_verdict(verdict: Any) -> list[str]:
+    lines = [
+        f"gate {verdict.gate_verdict_id}",
+        f"  candidate  {verdict.candidate_id}",
+        f"  champion   {verdict.champion_candidate_id or '(none)'}",
+        f"  result     {'PASS' if verdict.passed else 'REFUSED'}",
+    ]
+    for veto in verdict.vetoes:
+        if not veto.applicable:
+            mark = "n/a "
+        elif not veto.evaluable:
+            mark = "??  "
+        else:
+            mark = "ok  " if veto.passed else "FAIL"
+        lines.append(f"    [{mark}] {veto.name}{(' - ' + veto.detail) if veto.detail else ''}")
+    return lines
+
+
+def _cmd_gate(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    try:
+        verdict = evaluate_gate(store, args.candidate_id, anchors_dir=args.anchors_dir)
+    except GateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    lines = _render_verdict(verdict)
+    lines.append("")
+    lines.append("Evaluating the gate promotes nothing. Run `promote` to act on a pass.")
+    emit(verdict.to_dict(), lines)
+    return EXIT_OK if verdict.passed else EXIT_ERROR
+
+
 def _cmd_promote(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
     try:
         champion = promote(
@@ -487,6 +572,8 @@ def _cmd_promote(store: ResidentStore, args: argparse.Namespace, emit: Any) -> i
             args.candidate_id,
             reason=args.reason,
             actor=args.actor,
+            anchors_dir=args.anchors_dir,
+            gate_verdict_id=args.gate_verdict_id,
         )
     except PromotionError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -514,6 +601,7 @@ HANDLERS = {
     "show": _cmd_show,
     "promote": _cmd_promote,
     "audit": _cmd_audit,
+    "gate": _cmd_gate,
 }
 
 

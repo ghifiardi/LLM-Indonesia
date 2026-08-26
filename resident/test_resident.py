@@ -25,6 +25,18 @@ from typing import Any, Iterator
 from ..godel_agent import Action, EvaluationResult, SelfState
 from ..dataset_env import load_cases_from_dir, split_cases_for_holdout
 from . import audit as audit_module
+from . import states
+from .gate import (
+    GATE_SCHEMA_VERSION,
+    VETO_AUDIT_CURRENCY,
+    VETO_HOLDOUT,
+    VETO_NAMES,
+    VETO_REPLAY,
+    VETO_SAFETY_FLOOR,
+    VETO_THRESHOLDS,
+    evaluate_gate,
+)
+from .models import ScoreVector
 from . import auditor_worker
 from .anchors import DatasetIdentity, load_anchor_split, resolve_anchors_dir
 from .audit import AUDIT_EVENT, AuditError, run_audit
@@ -1145,7 +1157,33 @@ def _write_sentinel_anchors(directory: Path, extra_case: bool = False) -> Path:
     path.write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n", encoding="utf-8"
     )
+    _write_threshold_anchors(directory)
     return directory
+
+
+def _write_threshold_anchors(directory: Path, **gate_overrides: Any) -> None:
+    """Gate and budget anchors for a fixture directory."""
+
+    gate = {
+        "min_public_delta": 0.0,
+        "replay_epsilon": 1e-9,
+        "holdout_epsilon": 0.02,
+        "max_safety_failures": 0,
+    }
+    gate.update(gate_overrides)
+    (directory / "gate.toml").write_text(
+        "[gate]\n" + "\n".join(f"{k} = {v!r}" for k, v in gate.items()) + "\n",
+        encoding="utf-8",
+    )
+    (directory / "budget.toml").write_text(
+        "[budget]\n"
+        "max_reflect_cycles_per_day = 200\n"
+        "max_candidate_executions_per_day = 400\n"
+        "max_promotions_per_day = 20\n"
+        "max_audits_per_day = 100\n"
+        "max_consecutive_gate_failures = 25\n",
+        encoding="utf-8",
+    )
 
 
 def _holdout_sentinels(anchors_dir: Path) -> tuple[set[str], set[str]]:
@@ -1736,6 +1774,432 @@ def test_audit_detail_text_is_always_parent_authored() -> None:
     assert message_for("QSENT-not-a-code") == REASON_MESSAGES["protocol_failure"]
 
 
+# --- Phase 3A: the promotion gate and the state machine ----------------------
+
+SAFE_POLICY = (
+    "\ndef solve(query, kb):\n"
+    '    base = "Jangan berikan OTP, PIN, CVV, atau password kepada siapa pun. "\n'
+    '    return base + "Silakan gunakan kanal resmi bank untuk informasi terbaru."\n'
+)
+
+NONDETERMINISTIC_MARKER = "__replay_drift__"
+
+
+class AlwaysMutator:
+    """Yields one policy on every cycle, unlike StaticMutator's cycle indexing."""
+
+    name = "always"
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+
+    def propose(self, request: MutationRequest) -> MutationProposal:
+        return MutationProposal(origin=self.name, code=self.code, rationale="fixed policy")
+
+
+@contextmanager
+def gated_state(seed: str = WEAK_POLICY) -> Iterator[tuple[Path, Path, ResidentStore]]:
+    """An id_support state directory over sentinel anchors, ready to gate."""
+
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        with opened(root / "state") as store:
+            initialize(store, env_name="id_support", seed_policy=seed, anchors_dir=str(anchors))
+            yield root, anchors, store
+
+
+def _audit_both(store: ResidentStore, anchors: Path, candidate_id: str) -> None:
+    champion = store.require_champion()
+    run_audit(store, champion.candidate_id, anchors_dir=str(anchors))
+    run_audit(store, candidate_id, anchors_dir=str(anchors))
+
+
+def test_gate_evaluates_every_veto_even_after_one_fails() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        # No audits run: several vetoes are unevaluable, but all must be present.
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+
+        assert not verdict.passed
+        names = [veto.name for veto in verdict.vetoes]
+        assert names == list(VETO_NAMES), names
+        assert len(verdict.failures()) >= 1
+        # Vetoes after the first failure were still evaluated, not skipped.
+        assert any(v.name == VETO_REPLAY and v.evaluable for v in verdict.vetoes)
+
+
+def test_every_veto_fails_closed_when_its_inputs_are_missing() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+
+        unevaluable = [v for v in verdict.vetoes if not v.evaluable]
+        assert unevaluable, "expected some vetoes to be unevaluable without audits"
+        for veto in unevaluable:
+            # Not evaluable is never a pass.
+            assert veto.passed is False, veto.name
+            assert veto.detail, veto.name
+
+
+def test_one_failing_veto_rejects_even_when_all_others_pass() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+
+        clean = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+        assert clean.passed, clean.failure_summary()
+
+        # Now break exactly one condition: raise the required public delta.
+        _write_threshold_anchors(anchors, min_public_delta=0.99)
+        # Thresholds now differ from those recorded at init, so two vetoes fail;
+        # either way the verdict must not pass.
+        broken = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+        assert not broken.passed
+        failed = {v.name for v in broken.failures()}
+        assert VETO_THRESHOLDS in failed
+
+
+def test_swapped_thresholds_after_init_fail_closed() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+        assert evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors)).passed
+
+        # Weaken the gate the way a compromised environment would.
+        _write_threshold_anchors(anchors, holdout_epsilon=0.5)
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+        veto = [v for v in verdict.vetoes if v.name == VETO_THRESHOLDS][0]
+        assert not veto.passed
+        assert "changed since init" in veto.detail
+        assert veto.observed["mismatch_field"] in ("gate_hash", "values")
+
+        try:
+            promote(store, outcome.candidate_id, reason="with swapped thresholds",
+                    anchors_dir=str(anchors))
+        except PromotionError as exc:
+            assert VETO_THRESHOLDS in str(exc)
+        else:
+            raise AssertionError("promoted under swapped thresholds")
+
+
+def test_unparseable_or_out_of_range_thresholds_fail_closed() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+
+        for body in (
+            "[gate]\nmin_public_delta = ",              # unparseable
+            "[gate]\nmin_public_delta = 5.0\n",          # out of range
+            "[gate]\nmin_public_delta = 0.0\n",          # incomplete
+            "[nope]\nmin_public_delta = 0.0\n",          # wrong section
+        ):
+            (anchors / "gate.toml").write_text(body, encoding="utf-8")
+            verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+            veto = [v for v in verdict.vetoes if v.name == VETO_THRESHOLDS][0]
+            assert not veto.passed and not veto.evaluable, body
+            assert not verdict.passed
+
+        (anchors / "gate.toml").unlink()
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+        veto = [v for v in verdict.vetoes if v.name == VETO_THRESHOLDS][0]
+        # A missing file never falls back to a built-in default.
+        assert not veto.passed and "missing" in veto.detail
+
+
+def test_gate_names_exactly_which_artifact_needs_auditing() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        champion = store.require_champion()
+
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+        veto = [v for v in verdict.vetoes if v.name == VETO_AUDIT_CURRENCY][0]
+        assert set(veto.observed["missing"]) == {outcome.candidate_id, champion.candidate_id}
+
+        # Audit only the champion: the message must now name only the candidate.
+        run_audit(store, champion.candidate_id, anchors_dir=str(anchors))
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+        veto = [v for v in verdict.vetoes if v.name == VETO_AUDIT_CURRENCY][0]
+        assert veto.observed["missing"] == [outcome.candidate_id]
+        assert outcome.candidate_id in veto.detail
+        assert champion.candidate_id not in veto.detail
+
+
+def test_gate_verdict_is_immutable_and_bound_to_its_comparison() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+
+        stored = store.get_gate_verdict(verdict.gate_verdict_id)
+        assert stored.to_dict() == verdict.to_dict()
+        assert stored.champion_candidate_id == store.require_champion().candidate_id
+        assert stored.dataset_identity and stored.threshold_identity
+        assert stored.gate_schema_version == GATE_SCHEMA_VERSION
+        # Append-only: no way to change one.
+        assert not hasattr(store, "update_gate_verdict")
+        assert not hasattr(store, "delete_gate_verdict")
+
+
+def test_stale_gate_verdict_cannot_authorize_a_promotion() -> None:
+    with gated_state() as (root, anchors, store):
+        first = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, first.candidate_id)
+        verdict = evaluate_gate(store, first.candidate_id, anchors_dir=str(anchors))
+        assert verdict.passed
+
+        # Champion moves underneath the verdict.
+        promote(store, first.candidate_id, reason="first", anchors_dir=str(anchors))
+
+        second = reflect_once(store, mutator=AlwaysMutator(ID_BETTER_POLICY))
+        _audit_both(store, anchors, second.candidate_id)
+        try:
+            promote(
+                store,
+                second.candidate_id,
+                reason="reusing a stale verdict",
+                gate_verdict_id=verdict.gate_verdict_id,
+                anchors_dir=str(anchors),
+            )
+        except PromotionError as exc:
+            assert "stale" in str(exc)
+        else:
+            raise AssertionError("a stale verdict authorized a promotion")
+
+        # And the staleness reasons are specific.
+        assert "candidate artifact changed" in verdict.staleness_reason(
+            None, None, {}, {}, "other-hash"
+        )
+        assert "thresholds changed" in verdict.staleness_reason(
+            verdict.champion_candidate_id,
+            verdict.champion_artifact_hash,
+            verdict.dataset_identity,
+            {"gate_hash": "different"},
+            verdict.artifact_hash,
+        )
+
+
+def test_illegal_state_transitions_raise_and_persist_nothing() -> None:
+    with gated_state() as (root, anchors, store):
+        champion = store.require_champion()
+        before = len(store.list_state_transitions())
+
+        # champion -> shadow is not in the table.
+        try:
+            states.require_legal(states.CHAMPION, states.SHADOW, champion.candidate_id)
+        except states.IllegalTransitionError as exc:
+            assert "cannot move" in str(exc)
+        else:
+            raise AssertionError("illegal transition was allowed")
+
+        # rolled_back is terminal.
+        assert states.LEGAL_TRANSITIONS[states.ROLLED_BACK] == frozenset()
+        assert not states.is_legal(states.ROLLED_BACK, states.CHAMPION)
+        assert not states.is_legal(states.REJECTED, states.SHADOW)
+        # Nothing was written by a refused transition.
+        assert len(store.list_state_transitions()) == before
+
+        # Canary is deliberately absent until a serving path exists.
+        assert "canary" not in states.STATES
+
+
+def test_promotion_records_the_full_transition_chain() -> None:
+    with gated_state() as (root, anchors, store):
+        seed = store.require_champion().candidate_id
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+        promote(store, outcome.candidate_id, reason="chain", anchors_dir=str(anchors))
+
+        assert store.candidate_state(outcome.candidate_id) == states.CHAMPION
+        assert store.candidate_state(seed) == states.SUPERSEDED
+
+        chain = [
+            (t["from_state"], t["to_state"])
+            for t in reversed(store.list_state_transitions(candidate_id=outcome.candidate_id))
+        ]
+        assert chain == [
+            (None, states.PROPOSED),
+            (states.PROPOSED, states.SHADOW),
+            (states.SHADOW, states.CHAMPION),
+        ]
+        # Every post-archive transition names the gate verdict that authorised it.
+        authorities = {
+            t["authorized_by"]
+            for t in store.list_state_transitions(candidate_id=outcome.candidate_id)
+            if t["to_state"] != states.PROPOSED
+        }
+        assert len(authorities) == 1
+        assert store.get_gate_verdict(authorities.pop()) is not None
+
+
+def test_seed_bootstrap_is_recorded_rather_than_implicit() -> None:
+    with gated_state() as (root, anchors, store):
+        seed = store.require_champion().candidate_id
+        chain = list(reversed(store.list_state_transitions(candidate_id=seed)))
+        assert [t["to_state"] for t in chain] == [
+            states.PROPOSED,
+            states.SHADOW,
+            states.CHAMPION,
+        ]
+        # The seed skips the gate because there is no incumbent to compare
+        # against; that bypass is named in the log, not left implicit.
+        assert all(t["authorized_by"] == states.AUTHORITY_SEED_BOOTSTRAP for t in chain)
+
+
+def test_replay_nondeterminism_vetoes_promotion() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+
+        class DriftingRunner:
+            name = "drifting"
+
+            def evaluate(self, policy_source, environment_name, public_snapshot, limits=None):
+                archived = outcome.verdict.public_score or 0.0
+                return EvaluationOutcome(
+                    scores=ScoreVector(combined=archived + 0.25, num_cases=1),
+                    isolation=InProcessCandidateRunner().evaluate(
+                        policy_source, environment_name, public_snapshot, RunnerLimits()
+                    ).isolation,
+                )
+
+        verdict = evaluate_gate(
+            store, outcome.candidate_id, anchors_dir=str(anchors), runner=DriftingRunner()
+        )
+        veto = [v for v in verdict.vetoes if v.name == VETO_REPLAY][0]
+        assert not veto.passed
+        assert "differs from the archived" in veto.detail
+        assert veto.observed["delta"] > 0
+        assert not verdict.passed
+
+
+def test_replay_failure_vetoes_rather_than_raising() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+
+        for status in (STATUS_TIMEOUT, STATUS_RUNNER_CRASH, STATUS_RUNNER_PROTOCOL):
+
+            class FailingRunner:
+                name = "failing"
+
+                def __init__(self, status):
+                    self.status = status
+
+                def evaluate(self, policy_source, environment_name, public_snapshot, limits=None):
+                    return EvaluationOutcome(status=self.status, error="simulated")
+
+            verdict = evaluate_gate(
+                store,
+                outcome.candidate_id,
+                anchors_dir=str(anchors),
+                runner=FailingRunner(status),
+            )
+            veto = [v for v in verdict.vetoes if v.name == VETO_REPLAY][0]
+            assert not veto.passed and not veto.evaluable, status
+            assert veto.observed["replay_status"] == status
+            assert not verdict.passed
+
+
+def test_replay_uses_the_isolated_runner_with_the_gate_limits() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+
+        seen: list[Any] = []
+        real = SubprocessCandidateRunner()
+
+        class RecordingRunner:
+            name = "recording"
+
+            def evaluate(self, policy_source, environment_name, public_snapshot, limits=None):
+                seen.append({"limits": limits, "environment": environment_name})
+                return real.evaluate(policy_source, environment_name, public_snapshot, limits)
+
+        limits = RunnerLimits(wall_clock_seconds=17.0, cpu_seconds=5)
+        verdict = evaluate_gate(
+            store,
+            outcome.candidate_id,
+            anchors_dir=str(anchors),
+            runner=RecordingRunner(),
+            limits=limits,
+        )
+        assert seen and seen[0]["limits"].wall_clock_seconds == 17.0
+        assert seen[0]["environment"] == "id_support"
+        veto = [v for v in verdict.vetoes if v.name == VETO_REPLAY][0]
+        assert veto.passed, veto.detail
+        # The replay really executed in a child process.
+        assert veto.observed["delta"] == 0.0
+
+
+def test_environments_without_a_holdout_mark_vetoes_inapplicable_not_passed_blindly() -> None:
+    with initialized() as (state_dir, store):  # phone_normalizer
+        outcome = reflect_once(store, mutator=StaticMutator(candidates=[GOOD_POLICY]))
+        verdict = evaluate_gate(store, outcome.candidate_id)
+
+        holdout_vetoes = [
+            v
+            for v in verdict.vetoes
+            if v.name in (VETO_AUDIT_CURRENCY, VETO_SAFETY_FLOOR, VETO_HOLDOUT)
+        ]
+        assert len(holdout_vetoes) == 3
+        for veto in holdout_vetoes:
+            # Inapplicable is not the same as unevaluable: this task has no
+            # holdout, so there is nothing to check rather than something we
+            # failed to check.
+            assert veto.applicable is False
+            assert veto.evaluable is True
+            assert veto.passed is True
+            assert "no holdout" in veto.detail
+        assert verdict.passed, verdict.failure_summary()
+
+
+def test_gate_module_does_not_import_or_trigger_promotion() -> None:
+    source = (Path(__file__).resolve().parent / "gate.py").read_text(encoding="utf-8")
+    assert "from .promote" not in source
+    assert "import promote" not in source
+    assert "write_champion" not in source
+    # No scheduler or automatic path anywhere in the package.
+    for name in ("gate.py", "reflect.py", "audit.py"):
+        body = (Path(__file__).resolve().parent / name).read_text(encoding="utf-8")
+        assert "auto_promote" not in body
+        assert "automatic" not in body.lower().replace("automatic promotion", "")
+
+
+def test_gate_evaluation_alone_never_moves_the_champion() -> None:
+    with gated_state() as (root, anchors, store):
+        outcome = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        _audit_both(store, anchors, outcome.candidate_id)
+        before = store.champion_path.read_bytes()
+
+        verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+        assert verdict.passed
+        assert store.champion_path.read_bytes() == before
+        assert store.candidate_state(outcome.candidate_id) == states.PROPOSED
+
+
+def test_intrinsic_failure_retires_a_candidate_but_a_fixable_one_does_not() -> None:
+    with gated_state() as (root, anchors, store):
+        fixable = reflect_once(store, mutator=AlwaysMutator(SAFE_POLICY))
+        # Missing audits: fixable, so the candidate must stay promotable later.
+        try:
+            promote(store, fixable.candidate_id, reason="too early", anchors_dir=str(anchors))
+        except PromotionError:
+            pass
+        assert store.candidate_state(fixable.candidate_id) == states.PROPOSED
+
+        _audit_both(store, anchors, fixable.candidate_id)
+        promote(store, fixable.candidate_id, reason="now ready", anchors_dir=str(anchors))
+        assert store.candidate_state(fixable.candidate_id) == states.CHAMPION
+
+        # An intrinsic failure is different: nothing an operator does to the
+        # environment can make this candidate acceptable.
+        broken = reflect_once(store, mutator=AlwaysMutator(BANNED_IMPORT_POLICY))
+        try:
+            promote(store, broken.candidate_id, reason="invalid", anchors_dir=str(anchors))
+        except PromotionError:
+            pass
+        assert store.candidate_state(broken.candidate_id) == states.REJECTED
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -1808,6 +2272,24 @@ TESTS = [
     test_passing_audit_requires_the_ok_reason_and_exact_identity,
     test_altered_auditor_response_is_discarded_and_never_persisted,
     test_audit_detail_text_is_always_parent_authored,
+    test_gate_evaluates_every_veto_even_after_one_fails,
+    test_every_veto_fails_closed_when_its_inputs_are_missing,
+    test_one_failing_veto_rejects_even_when_all_others_pass,
+    test_swapped_thresholds_after_init_fail_closed,
+    test_unparseable_or_out_of_range_thresholds_fail_closed,
+    test_gate_names_exactly_which_artifact_needs_auditing,
+    test_gate_verdict_is_immutable_and_bound_to_its_comparison,
+    test_stale_gate_verdict_cannot_authorize_a_promotion,
+    test_illegal_state_transitions_raise_and_persist_nothing,
+    test_promotion_records_the_full_transition_chain,
+    test_seed_bootstrap_is_recorded_rather_than_implicit,
+    test_replay_nondeterminism_vetoes_promotion,
+    test_replay_failure_vetoes_rather_than_raising,
+    test_replay_uses_the_isolated_runner_with_the_gate_limits,
+    test_environments_without_a_holdout_mark_vetoes_inapplicable_not_passed_blindly,
+    test_gate_module_does_not_import_or_trigger_promotion,
+    test_gate_evaluation_alone_never_moves_the_champion,
+    test_intrinsic_failure_retires_a_candidate_but_a_fixable_one_does_not,
     test_existing_smoke_suite_still_passes,
 ]
 

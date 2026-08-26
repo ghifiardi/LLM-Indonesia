@@ -196,6 +196,39 @@ _MIGRATION_4 = (
     "ALTER TABLE audits ADD COLUMN reason_code TEXT NOT NULL DEFAULT ''",
 )
 
+_MIGRATION_5 = (
+    """
+    CREATE TABLE IF NOT EXISTS gate_verdicts (
+        seq                     INTEGER PRIMARY KEY AUTOINCREMENT,
+        gate_verdict_id         TEXT NOT NULL UNIQUE,
+        created_at              TEXT NOT NULL,
+        gate_schema_version     INTEGER NOT NULL,
+        candidate_id            TEXT NOT NULL,
+        artifact_hash           TEXT NOT NULL,
+        champion_candidate_id   TEXT,
+        champion_artifact_hash  TEXT,
+        dataset_identity_json   TEXT NOT NULL DEFAULT '{}',
+        threshold_identity_json TEXT NOT NULL DEFAULT '{}',
+        vetoes_json             TEXT NOT NULL DEFAULT '[]',
+        passed                  INTEGER NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_gate_candidate ON gate_verdicts(candidate_id)",
+    """
+    CREATE TABLE IF NOT EXISTS state_transitions (
+        seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+        transition_id   TEXT NOT NULL UNIQUE,
+        created_at      TEXT NOT NULL,
+        candidate_id    TEXT NOT NULL,
+        from_state      TEXT,
+        to_state        TEXT NOT NULL,
+        authorized_by   TEXT NOT NULL,
+        evidence_json   TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_transitions_candidate ON state_transitions(candidate_id)",
+)
+
 #: Sequential schema migrations, applied in order for any version gap.
 #:
 #: Append a new ``(version, statements)`` entry; never edit a shipped one. Each
@@ -207,6 +240,7 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (2, _MIGRATION_2),
     (3, _MIGRATION_3),
     (4, _MIGRATION_4),
+    (5, _MIGRATION_5),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -219,6 +253,11 @@ CONFIG_ENVIRONMENT = "environment"
 #: came from. An audit against a different dataset is refused rather than
 #: silently scored — see ``anchors.DatasetIdentity``.
 CONFIG_DATASET_IDENTITY = "dataset_identity"
+
+#: Config key recording the identity of the gate/budget threshold files in
+#: force at init. The gate re-checks it, so swapping thresholds afterwards
+#: fails closed instead of quietly changing what the gate enforces.
+CONFIG_THRESHOLD_IDENTITY = "threshold_identity"
 
 PUBLIC_SNAPSHOT_FILENAME = "public_cases.jsonl"
 
@@ -729,6 +768,142 @@ class ResidentStore:
             ).fetchone()
         return int(row["n"])
 
+    # --- gate verdicts and state transitions --------------------------------
+    #
+    # Both append-only. There is no update or delete method: a gate verdict is
+    # evidence about a moment, and a transition is something that happened.
+
+    def insert_gate_verdict(self, verdict: Any) -> Any:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO gate_verdicts
+                    (gate_verdict_id, created_at, gate_schema_version, candidate_id,
+                     artifact_hash, champion_candidate_id, champion_artifact_hash,
+                     dataset_identity_json, threshold_identity_json, vetoes_json, passed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    verdict.gate_verdict_id,
+                    verdict.created_at,
+                    verdict.gate_schema_version,
+                    verdict.candidate_id,
+                    verdict.artifact_hash,
+                    verdict.champion_candidate_id,
+                    verdict.champion_artifact_hash,
+                    json.dumps(dict(verdict.dataset_identity), ensure_ascii=False),
+                    json.dumps(dict(verdict.threshold_identity), ensure_ascii=False),
+                    json.dumps([v.to_dict() for v in verdict.vetoes], ensure_ascii=False),
+                    1 if verdict.passed else 0,
+                ),
+            )
+        return verdict
+
+    def get_gate_verdict(self, gate_verdict_id: str) -> Any:
+        row = self.conn.execute(
+            "SELECT * FROM gate_verdicts WHERE gate_verdict_id = ?", (gate_verdict_id,)
+        ).fetchone()
+        return _row_to_gate_verdict(row) if row is not None else None
+
+    def list_gate_verdicts(
+        self, candidate_id: str | None = None, limit: int | None = None
+    ) -> list[Any]:
+        sql = "SELECT * FROM gate_verdicts"
+        params: list[Any] = []
+        if candidate_id is not None:
+            sql += " WHERE candidate_id = ?"
+            params.append(candidate_id)
+        sql += " ORDER BY seq DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return [_row_to_gate_verdict(row) for row in self.conn.execute(sql, tuple(params))]
+
+    def consecutive_gate_failures(self) -> int:
+        """Failing gate evaluations since the last passing one.
+
+        Derived from the immutable log rather than kept as a mutable counter,
+        so it cannot drift from the evidence.
+        """
+
+        count = 0
+        for row in self.conn.execute(
+            "SELECT passed FROM gate_verdicts ORDER BY seq DESC"
+        ):
+            if row["passed"]:
+                break
+            count += 1
+        return count
+
+    def insert_state_transition(
+        self,
+        candidate_id: str,
+        from_state: str | None,
+        to_state: str,
+        authorized_by: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        record = {
+            "transition_id": new_id(),
+            "created_at": utcnow(),
+            "candidate_id": candidate_id,
+            "from_state": from_state,
+            "to_state": to_state,
+            "authorized_by": authorized_by,
+            "evidence": dict(evidence or {}),
+        }
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO state_transitions
+                    (transition_id, created_at, candidate_id, from_state, to_state,
+                     authorized_by, evidence_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["transition_id"],
+                    record["created_at"],
+                    candidate_id,
+                    from_state,
+                    to_state,
+                    authorized_by,
+                    json.dumps(record["evidence"], ensure_ascii=False),
+                ),
+            )
+        return record
+
+    def candidate_state(self, candidate_id: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT to_state FROM state_transitions WHERE candidate_id = ? ORDER BY seq DESC LIMIT 1",
+            (candidate_id,),
+        ).fetchone()
+        return row["to_state"] if row is not None else None
+
+    def list_state_transitions(
+        self, candidate_id: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM state_transitions"
+        params: list[Any] = []
+        if candidate_id is not None:
+            sql += " WHERE candidate_id = ?"
+            params.append(candidate_id)
+        sql += " ORDER BY seq DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return [
+            {
+                "transition_id": row["transition_id"],
+                "created_at": row["created_at"],
+                "candidate_id": row["candidate_id"],
+                "from_state": row["from_state"],
+                "to_state": row["to_state"],
+                "authorized_by": row["authorized_by"],
+                "evidence": json.loads(row["evidence_json"]),
+            }
+            for row in self.conn.execute(sql, tuple(params))
+        ]
+
     # --- events ------------------------------------------------------------
 
     def append_event(
@@ -979,6 +1154,24 @@ def _row_to_experience(row: sqlite3.Row) -> Experience:
         source=row["source"],
         tags=tuple(json.loads(row["tags_json"])),
         metadata=json.loads(row["metadata_json"]),
+    )
+
+
+def _row_to_gate_verdict(row: sqlite3.Row) -> Any:
+    from .gate import GateVerdict, VetoResult
+
+    return GateVerdict(
+        gate_verdict_id=row["gate_verdict_id"],
+        created_at=row["created_at"],
+        gate_schema_version=int(row["gate_schema_version"]),
+        candidate_id=row["candidate_id"],
+        artifact_hash=row["artifact_hash"],
+        champion_candidate_id=row["champion_candidate_id"],
+        champion_artifact_hash=row["champion_artifact_hash"],
+        dataset_identity=json.loads(row["dataset_identity_json"]),
+        threshold_identity=json.loads(row["threshold_identity_json"]),
+        vetoes=tuple(VetoResult.from_dict(v) for v in json.loads(row["vetoes_json"])),
+        passed=bool(row["passed"]),
     )
 
 

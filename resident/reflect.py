@@ -117,6 +117,11 @@ class EnvironmentSpec:
     #: Snapshot records handed to the runner. Serialisable by construction —
     #: the child is never given a path it could widen into a dataset read.
     read_records: Callable[[ResidentStore], list[dict[str, Any]]]
+    #: Whether this task has a private holdout. A code task whose cases are
+    #: defined in source has none — not "we could not load it", but "there is
+    #: none". The gate treats the two differently: an unavailable check fails
+    #: closed, an inapplicable one is recorded as inapplicable and passes.
+    has_holdout: bool
     seed_policy: str
     build_mutator: Callable[[], Mutator]
 
@@ -173,6 +178,7 @@ ENVIRONMENTS: dict[str, EnvironmentSpec] = {
         description="Indonesian support rubric, public split only.",
         prepare=_prepare_id_support,
         read_records=lambda store: store.read_public_snapshot(),
+        has_holdout=True,
         seed_policy=ID_SUPPORT_SEED_POLICY,
         build_mutator=lambda: MutationProviderAdapter(
             RuleBasedIndonesianSupportMutator(), name="rule-based-id-support"
@@ -183,6 +189,7 @@ ENVIRONMENTS: dict[str, EnvironmentSpec] = {
         description="Indonesian phone-number normalisation unit tests.",
         prepare=_prepare_code_task,
         read_records=lambda store: [],
+        has_holdout=False,
         seed_policy=CODE_TASK_SEED_POLICY,
         build_mutator=lambda: MutationProviderAdapter(
             RuleBasedCodeMutator(), name="rule-based-code"

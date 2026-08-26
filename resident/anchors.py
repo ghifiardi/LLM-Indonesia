@@ -158,3 +158,164 @@ def load_anchor_split(
         holdout_cases=len(holdout_cases),
     )
     return identity, public_cases, holdout_cases
+
+
+# --- gate thresholds --------------------------------------------------------
+#
+# Thresholds are anchors, not state. They live in the human-owned anchor
+# directory and are never written by the resident: a gate whose numbers the
+# agent can edit is not a gate. Their identity is recorded at init and
+# re-checked at every evaluation, so swapping the file between init and
+# promotion fails closed rather than quietly weakening the gate.
+
+GATE_THRESHOLDS_FILENAME = "gate.toml"
+BUDGET_LIMITS_FILENAME = "budget.toml"
+
+
+class ThresholdError(ValueError):
+    """Raised when a threshold file is missing, unparseable, or out of range.
+
+    Always fails closed. There is deliberately no built-in default: silently
+    substituting one would mean a gate could be disarmed by deleting a file.
+    """
+
+
+@dataclass(frozen=True)
+class ThresholdIdentity:
+    """Identity of the threshold files in force."""
+
+    gate_hash: str
+    budget_hash: str
+    values: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "gate_hash": self.gate_hash,
+            "budget_hash": self.budget_hash,
+            "values": dict(self.values),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ThresholdIdentity":
+        return cls(
+            gate_hash=payload["gate_hash"],
+            budget_hash=payload["budget_hash"],
+            values=dict(payload.get("values") or {}),
+        )
+
+    def mismatch_field(self, other: "ThresholdIdentity") -> str | None:
+        if self.gate_hash != other.gate_hash:
+            return "gate_hash"
+        if self.budget_hash != other.budget_hash:
+            return "budget_hash"
+        if self.values != other.values:
+            return "values"
+        return None
+
+
+@dataclass(frozen=True)
+class GateThresholds:
+    """Numbers the promotion gate enforces."""
+
+    min_public_delta: float
+    replay_epsilon: float
+    holdout_epsilon: float
+    max_safety_failures: int
+
+
+@dataclass(frozen=True)
+class BudgetLimits:
+    """Daily ceilings. Exceeding one freezes the resident."""
+
+    max_reflect_cycles_per_day: int
+    max_candidate_executions_per_day: int
+    max_promotions_per_day: int
+    max_audits_per_day: int
+    max_consecutive_gate_failures: int
+
+
+#: (key, type, low, high) for each threshold. Ranges are inclusive.
+_GATE_SPEC = (
+    ("min_public_delta", float, 0.0, 1.0),
+    ("replay_epsilon", float, 0.0, 0.1),
+    ("holdout_epsilon", float, 0.0, 0.5),
+    ("max_safety_failures", int, 0, 0),
+)
+_BUDGET_SPEC = (
+    ("max_reflect_cycles_per_day", int, 1, 100000),
+    ("max_candidate_executions_per_day", int, 1, 100000),
+    ("max_promotions_per_day", int, 1, 1000),
+    ("max_audits_per_day", int, 1, 10000),
+    ("max_consecutive_gate_failures", int, 1, 1000),
+)
+
+
+def _read_toml_section(path: Path, section: str) -> tuple[str, dict[str, Any]]:
+    import hashlib
+    import tomllib
+
+    if not path.is_file():
+        raise ThresholdError(
+            f"Required threshold file {path} is missing. Create it (see "
+            "resident/README.md); there is no built-in default."
+        )
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ThresholdError(f"Threshold file {path} is unreadable: {exc}") from exc
+    try:
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ThresholdError(f"Threshold file {path} is not valid TOML: {exc}") from exc
+    body = parsed.get(section)
+    if not isinstance(body, dict):
+        raise ThresholdError(f"Threshold file {path} has no [{section}] table.")
+    return hashlib.sha256(raw).hexdigest(), body
+
+
+def _coerce(body: dict[str, Any], spec: tuple, path: Path) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for key, kind, low, high in spec:
+        if key not in body:
+            raise ThresholdError(f"{path}: missing required threshold {key!r}.")
+        raw = body[key]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ThresholdError(f"{path}: {key!r} must be a number.")
+        if kind is int and not isinstance(raw, int):
+            raise ThresholdError(f"{path}: {key!r} must be an integer.")
+        value = kind(raw)
+        if not low <= value <= high:
+            raise ThresholdError(
+                f"{path}: {key!r} = {value!r} is outside the permitted range [{low}, {high}]."
+            )
+        values[key] = value
+    unknown = set(body) - {key for key, _, _, _ in spec}
+    if unknown:
+        raise ThresholdError(f"{path}: unknown threshold keys {sorted(unknown)}.")
+    return values
+
+
+def load_thresholds(
+    anchors_dir: Path,
+) -> tuple[ThresholdIdentity, GateThresholds, BudgetLimits]:
+    """Load and validate both anchor threshold files. Raises ThresholdError."""
+
+    anchors_dir = Path(anchors_dir)
+    gate_path = anchors_dir / GATE_THRESHOLDS_FILENAME
+    budget_path = anchors_dir / BUDGET_LIMITS_FILENAME
+
+    gate_hash, gate_body = _read_toml_section(gate_path, "gate")
+    budget_hash, budget_body = _read_toml_section(budget_path, "budget")
+    gate_values = _coerce(gate_body, _GATE_SPEC, gate_path)
+    budget_values = _coerce(budget_body, _BUDGET_SPEC, budget_path)
+
+    identity = ThresholdIdentity(
+        gate_hash=gate_hash,
+        budget_hash=budget_hash,
+        values={**gate_values, **budget_values},
+    )
+    return (
+        identity,
+        GateThresholds(**gate_values),
+        BudgetLimits(**budget_values),
+    )

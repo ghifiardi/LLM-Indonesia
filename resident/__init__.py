@@ -21,12 +21,26 @@ from __future__ import annotations
 
 from .anchors import (
     ANCHORS_DIR_ENV_VAR,
+    BudgetLimits,
     DatasetIdentity,
+    GateThresholds,
+    ThresholdError,
+    ThresholdIdentity,
+    load_thresholds,
     dataset_manifest_hash,
     load_anchor_split,
     resolve_anchors_dir,
 )
+from . import states
 from .archive import CandidateArchive, stable_unit_interval
+from .gate import (
+    GATE_SCHEMA_VERSION,
+    GateError,
+    GateVerdict,
+    VETO_NAMES,
+    VetoResult,
+    evaluate_gate,
+)
 from .audit import AuditError, AuditOutcome, run_audit
 from .experience import ExperienceLog, KNOWN_OUTCOMES
 from .models import (
@@ -100,6 +114,7 @@ from .store import (
     ArtifactMissingError,
     CONFIG_DATASET_IDENTITY,
     CONFIG_ENVIRONMENT,
+    CONFIG_THRESHOLD_IDENTITY,
     EnvironmentMismatchError,
     MIGRATIONS,
     PUBLIC_SNAPSHOT_FILENAME,
@@ -115,6 +130,19 @@ from .store import (
 )
 
 __all__ = [
+    "CONFIG_THRESHOLD_IDENTITY",
+    "load_thresholds",
+    "ThresholdIdentity",
+    "ThresholdError",
+    "GateThresholds",
+    "BudgetLimits",
+    "states",
+    "evaluate_gate",
+    "VetoResult",
+    "VETO_NAMES",
+    "GateVerdict",
+    "GateError",
+    "GATE_SCHEMA_VERSION",
     "BatchOutcome",
     "run_audit",
     "resolve_anchors_dir",

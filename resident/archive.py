@@ -47,6 +47,7 @@ class CandidateArchive:
         tier: str = TIER_POLICY,
         cycle: int = 0,
         candidate_id: str | None = None,
+        record_state: bool = True,
     ) -> Candidate:
         """Archive one attempt.
 
@@ -65,7 +66,20 @@ class CandidateArchive:
             rationale=rationale,
             cycle=cycle,
         )
-        return self.store.insert_candidate(candidate)
+        stored = self.store.insert_candidate(candidate)
+        # Every archived attempt starts in `proposed`. The seed's own
+        # transition is recorded by `initialize`, which needs it to carry the
+        # bootstrap authority rather than a generic one.
+        if record_state:
+            from . import states
+
+            self.store.insert_state_transition(
+                candidate_id=stored.candidate_id,
+                from_state=None,
+                to_state=states.PROPOSED,
+                authorized_by="archived",
+            )
+        return stored
 
     # --- reading -----------------------------------------------------------
 
