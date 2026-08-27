@@ -36,5 +36,9 @@
   ],
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@azure/msal-browser": "^5.19.0",
+    "tldts": "7.4.11"
   }
 }

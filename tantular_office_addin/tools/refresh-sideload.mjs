@@ -26,22 +26,48 @@ const WEF_DIRS = {
   PowerPoint: path.join(process.env.HOME || "", "Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef")
 };
 
+function bootVersion(boot) {
+  // Office caches its parsed manifest catalogue by add-in ID + Version. A new
+  // SourceLocation in a file with the old Version can therefore be ignored.
+  // Encode epoch seconds into two schema-safe (0..65535) components so every
+  // Companion restart gets a new catalogue identity without editing the source
+  // manifest or overflowing Office's four-part version fields.
+  const seconds = Math.floor(Number(boot) / 1000);
+  return `0.9.${Math.floor(seconds / 65535) % 65535}.${seconds % 65535}`;
+}
+
+export function stampSideloadManifest(xml, {
+  boot = String(Date.now()),
+  port = Number(process.env.PORT || 3000)
+} = {}) {
+  const version = bootVersion(boot);
+  return String(xml)
+    .replace(/<Version>[^<]+<\/Version>/, `<Version>${version}</Version>`)
+    // A temporary acceptance server (for example :3010) must not survive in
+    // the installed manifest after the normal Companion returns to :3000.
+    .replace(/https:\/\/localhost:\d+/g, `https://localhost:${port}`)
+    .replace(/(https:\/\/localhost:\d+\/src\/taskpane\.html)(?:\?([^"']*))?/g,
+      (_match, base, rawQuery = "") => {
+        const query = rawQuery
+          .split(/&amp;|&/)
+          .filter(Boolean)
+          .filter((part) => !/^boot=/.test(part));
+        query.push(`boot=${boot}`);
+        return `${base}?${query.join("&amp;")}`;
+      });
+}
+
 export function refreshSideload(log = () => {}) {
   if (process.platform !== "darwin") return; // wef sideloading is a Mac-only mechanism
   const manifestPath = path.join(root, "manifest.xml");
   if (!fs.existsSync(manifestPath)) return;
 
   const boot = String(Date.now());
-  const stamped = fs
-    .readFileSync(manifestPath, "utf8")
-    // These URLs sit inside XML attribute values (DefaultValue="..."), where a
-    // bare "&" is invalid XML — it must be the entity "&amp;". Missing this
-    // corrupted every sideloaded manifest.xml, which made Word/Excel/PowerPoint
-    // silently drop the whole add-in as unparseable rather than show an error.
-    .replace(/(https:\/\/localhost:3000\/src\/taskpane\.html(?:\?[^"']*)?)/g, (url) => {
-      const sep = url.includes("?") ? "&amp;" : "?";
-      return `${url}${sep}boot=${boot}`;
-    });
+  const port = Number(process.env.PORT || 3000);
+  const stamped = stampSideloadManifest(
+    fs.readFileSync(manifestPath, "utf8"),
+    { boot, port }
+  );
 
   for (const [app, dir] of Object.entries(WEF_DIRS)) {
     const target = path.join(dir, "manifest.xml");
@@ -49,6 +75,6 @@ export function refreshSideload(log = () => {}) {
     // never set up (that is npm run sideload:*'s job, run once, deliberately).
     if (!fs.existsSync(target)) continue;
     fs.writeFileSync(target, stamped);
-    log(`${app}: manifest sideload disegarkan (boot=${boot}).`);
+    log(`${app}: manifest sideload disegarkan (port=${port}, boot=${boot}).`);
   }
 }

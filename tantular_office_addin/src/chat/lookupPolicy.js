@@ -18,11 +18,46 @@
 // leaving the machine.
 
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import { deriveProtected } from "./verifyWebAnswer.js";
+import { searchProvider } from "./searchProviders.js";
 
 // Off unless the operator turns it on. Mode Lokal must keep its promise for
 // anyone who never opts in.
 export function lookupEnabled(env = process.env) {
   return String(env.TANTULAR_LOOKUP_ENABLED || "").toLowerCase() === "true";
+}
+
+export function discoveryAlphaEnabled(env = process.env) {
+  return lookupEnabled(env)
+    && String(env.TANTULAR_LOOKUP_DISCOVERY_ALPHA || "").toLowerCase() === "true";
+}
+
+export function configuredSearchProvider(env = process.env) {
+  return String(env.TANTULAR_SEARCH_PROVIDER || "official-federated").trim().toLowerCase();
+}
+
+export function queryLeakWarnings(query, document = "") {
+  const text = String(query || "");
+  const lower = text.toLowerCase();
+  const warnings = [];
+  if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(text)) {
+    warnings.push("Query tampak memuat alamat email.");
+  }
+  if (/(?:\+?62|0)[\s.-]?\d(?:[\s.-]?\d){7,13}/.test(text)) {
+    warnings.push("Query tampak memuat nomor telepon.");
+  }
+  if (/\b(?:sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{10,}\.|AIza[A-Za-z0-9_-]{10,})/.test(text)) {
+    warnings.push("Query tampak memuat secret atau token.");
+  }
+  if (/\d[\d .,-]{8,}\d/.test(text)) {
+    warnings.push("Query memuat rangkaian angka panjang yang mungkin merupakan ID atau nilai sensitif.");
+  }
+  for (const protectedText of deriveProtected(document)) {
+    if (protectedText && lower.includes(protectedText.toLowerCase())) {
+      warnings.push(`Query menyalin data dokumen: ${protectedText}`);
+    }
+  }
+  return [...new Set(warnings)];
 }
 
 // HOST ADAPTERS. One entry per host, each building the exact URL for that
@@ -36,6 +71,11 @@ export function lookupEnabled(env = process.env) {
 //
 // Starting with ONE host deliberately. Adding the rest is per-host work, not a
 // wildcard.
+// One entry per OFFICIAL source, each with its own documented endpoint. The
+// user's standing policy: hosts are added per host, with an adapter and clear
+// retention — never as a wildcard. `available` lets an adapter exist in code
+// yet stay OFF until its precondition (an API key) is met, so a host never
+// appears in the allowlist half-working.
 export const HOST_ADAPTERS = Object.freeze({
   "id.wikipedia.org": {
     label: "Wikipedia Bahasa Indonesia",
@@ -44,11 +84,34 @@ export const HOST_ADAPTERS = Object.freeze({
       "https://id.wikipedia.org/w/rest.php/v1/search/page?limit=5&q="
       + encodeURIComponent(query),
   },
+  "peraturan.bpk.go.id": {
+    label: "JDIH BPK — peraturan perundang-undangan",
+    // Official legal-documentation search. Returns HTML; the HTML response
+    // shape is measured by the injection e2e (INJECTION_E2E_FORMAT=html).
+    buildUrl: (query) =>
+      "https://peraturan.bpk.go.id/Search?keywords=" + encodeURIComponent(query),
+  },
+  "webapi.bps.go.id": {
+    label: "BPS — statistik resmi",
+    // Statistics-table search on the official BPS web API. Requires a free
+    // registered key; without one the adapter reports itself unavailable and
+    // the host never enters the allowlist.
+    available: (env) => Boolean(String(env?.TANTULAR_BPS_API_KEY || "").trim()),
+    buildUrl: (query, env) =>
+      "https://webapi.bps.go.id/v1/api/list/model/statictable/domain/0000/keyword/"
+      + encodeURIComponent(query) + "/key/"
+      + encodeURIComponent(String(env?.TANTULAR_BPS_API_KEY || "").trim()) + "/",
+  },
 });
 
 // Narrow by default. A wildcard allowlist is not an allowlist, and a host
 // without an adapter cannot be reached even if it is listed.
-export const DEFAULT_ALLOWED_HOSTS = Object.freeze(Object.keys(HOST_ADAPTERS));
+export function defaultAllowedHosts(env = process.env) {
+  return Object.entries(HOST_ADAPTERS)
+    .filter(([, adapter]) => !adapter.available || adapter.available(env))
+    .map(([host]) => host);
+}
+export const DEFAULT_ALLOWED_HOSTS = Object.freeze(defaultAllowedHosts({}));
 
 export function adapterFor(host) {
   return HOST_ADAPTERS[String(host || "").trim().toLowerCase()] || null;
@@ -56,8 +119,15 @@ export function adapterFor(host) {
 
 export function allowedHosts(env = process.env) {
   const raw = String(env.TANTULAR_LOOKUP_HOSTS || "").trim();
-  if (!raw) return [...DEFAULT_ALLOWED_HOSTS];
+  if (!raw) return defaultAllowedHosts(env);
   return raw.split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
+}
+
+// For the pane's host picker: every allowed host with its human label.
+export function describedHosts(env = process.env) {
+  return allowedHosts(env).map((host) => ({
+    host, label: HOST_ADAPTERS[host]?.label || host
+  }));
 }
 
 export function hostAllowed(host, hosts = allowedHosts()) {
@@ -78,7 +148,8 @@ export function allowTestAdapter(env = process.env) {
 
 export function resolveUrl(host, query, env = process.env) {
   const adapter = adapterFor(host);
-  if (adapter) return adapter.buildUrl(query);
+  if (adapter && adapter.available && !adapter.available(env)) return null;
+  if (adapter) return adapter.buildUrl(query, env);
   const origin = String(env.TANTULAR_LOOKUP_TEST_ORIGIN || "").trim();
   if (origin && String(host).toLowerCase() === new URL(origin).host) {
     return `${origin}/?q=${encodeURIComponent(query)}`;
@@ -102,7 +173,7 @@ export function documentHash(document) {
 }
 
 // Prepare: validate, and mint a token bound to this exact query and host.
-export function prepareLookup({ query, host, document, env = process.env,
+export function prepareLookup({ query, host, provider, document, env = process.env,
                                 now = () => Date.now(),
                                 ttlMs = 120_000 }) {
   if (!lookupEnabled(env)) {
@@ -114,15 +185,33 @@ export function prepareLookup({ query, host, document, env = process.env,
     return { ok: false, reason: "empty_query",
              message: "Query kosong; tidak ada yang dikirim." };
   }
-  if (!hostAllowed(host, allowedHosts(env))) {
-    return { ok: false, reason: "host_not_allowed",
-             message: `Host ${host} tidak ada dalam daftar yang diizinkan.` };
-  }
-  // Allowlisted is not enough: without an adapter there is no correct URL for
-  // this host, and guessing one sends the query nowhere useful.
-  if (!adapterFor(host) && !allowTestAdapter(env)) {
-    return { ok: false, reason: "no_adapter",
-             message: `Host ${host} belum punya adapter pencarian.` };
+  const providerId = String(provider || "").trim().toLowerCase();
+  const providerConfig = providerId ? searchProvider(providerId) : null;
+  if (providerId) {
+    if (!discoveryAlphaEnabled(env)) {
+      return { ok: false, reason: "discovery_disabled",
+               message: "Discovery via search engine belum diaktifkan." };
+    }
+    if (!providerConfig || providerId !== configuredSearchProvider(env)) {
+      return { ok: false, reason: "provider_not_allowed",
+               message: "Provider pencarian tidak diizinkan." };
+    }
+  } else {
+    if (!hostAllowed(host, allowedHosts(env))) {
+      return { ok: false, reason: "host_not_allowed",
+               message: `Host ${host} tidak ada dalam daftar yang diizinkan.` };
+    }
+    // Allowlisted is not enough: without an adapter there is no correct URL for
+    // this host, and guessing one sends the query nowhere useful.
+    const hostAdapter = adapterFor(host);
+    if (!hostAdapter && !allowTestAdapter(env)) {
+      return { ok: false, reason: "no_adapter",
+               message: `Host ${host} belum punya adapter pencarian.` };
+    }
+    if (hostAdapter?.available && !hostAdapter.available(env)) {
+      return { ok: false, reason: "adapter_unavailable",
+               message: `Host ${host} butuh konfigurasi (mis. API key) sebelum bisa dipakai.` };
+    }
   }
   // No document means nothing to verify the answer against, so the answer
   // could only ever be refused. Failing here costs the user one dialog; the
@@ -132,25 +221,31 @@ export function prepareLookup({ query, host, document, env = process.env,
     return { ok: false, reason: "no_document",
              message: "Tidak ada dokumen untuk memeriksa jawaban; permintaan dibatalkan." };
   }
+  const targetKey = providerId ? `provider:${providerId}` : String(host).trim().toLowerCase();
+  const warnings = queryLeakWarnings(text, document);
   return {
     ok: true,
     token: randomUUID(),
     query: text,
-    host: String(host).trim().toLowerCase(),
-    fingerprint: fingerprint(text, host),
+    ...(providerId ? { provider: providerId } : { host: targetKey }),
+    fingerprint: fingerprint(text, targetKey),
     documentHash: docHash,
     expiresAt: now() + ttlMs,
     // What the pane must show the user, verbatim, before Setujui.
     disclosure: {
-      host: String(host).trim().toLowerCase(),
+      host: providerId
+        ? `${providerConfig.label} — retrieval hanya domain resmi/tepercaya`
+        : targetKey,
+      ...(providerId ? { provider: providerId } : {}),
       query: text,
-      note: "Teks ini akan dikirim keluar dari komputer Anda."
+      warning: warnings.join(" "),
+      note: "Query ini akan dikirim ke provider pencarian. Isi dokumen tetap lokal."
     }
   };
 }
 
 // Execute: only for a token we issued, unexpired, and only with the SAME bytes.
-export function authorizeExecution({ pending, token, query, host, document,
+export function authorizeExecution({ pending, token, query, host, provider, document,
                                      now = () => Date.now() }) {
   const entry = pending.get(token);
   if (!entry) {
@@ -162,7 +257,10 @@ export function authorizeExecution({ pending, token, query, host, document,
     return { ok: false, reason: "expired",
              message: "Persetujuan kedaluwarsa; setujui ulang." };
   }
-  if (fingerprint(String(query || "").trim(), host) !== entry.fingerprint) {
+  const targetKey = entry.provider
+    ? `provider:${String(provider || "").trim().toLowerCase()}`
+    : String(host || "").trim().toLowerCase();
+  if (fingerprint(String(query || "").trim(), targetKey) !== entry.fingerprint) {
     // The displayed string and the sent string must match exactly.
     pending.delete(token);
     return { ok: false, reason: "mismatch",
@@ -224,17 +322,29 @@ export function plaintextAuditEnabled(env = process.env) {
   return String(env.TANTULAR_AUDIT_PLAINTEXT || "").toLowerCase() === "true";
 }
 
-export function auditRecord({ query, host, approved, at = new Date(),
+export function auditRecord({ query, host, provider = null, approved, at = new Date(),
                               outcome = "sent", responseBytes = null,
-                              reason = null, env = process.env, key = "" }) {
+                              reason = null, env = process.env, key = "",
+                              requestedUrl = null, finalUrl = null,
+                              domainTier = null, policyReason = null,
+                              contentHash = null, status = null, stage = null }) {
+  const auditTarget = provider ? `provider:${provider}` : host;
   const record = {
     at: at.toISOString(),
-    host,
+    host: host || null,
+    provider,
     approved: Boolean(approved),
     outcome,
     reason,
     response_bytes: responseBytes,
-    ...queryDigest(query, host, key),
+    requested_url: requestedUrl,
+    final_url: finalUrl,
+    domain_tier: domainTier,
+    policy_reason: policyReason,
+    content_hash: contentHash,
+    status,
+    stage,
+    ...queryDigest(query, auditTarget, key),
     _note: "query recorded as a keyed digest; set TANTULAR_AUDIT_PLAINTEXT=true "
            + "to also record the text (debugging only)"
   };

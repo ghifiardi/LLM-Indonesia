@@ -21,6 +21,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { refreshSideload } from "./refresh-sideload.mjs";
+import { companionEnvironment } from "./companion-config.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const stamp = () => new Date().toTimeString().slice(0, 8);
@@ -32,10 +33,10 @@ function log(tag, line) {
 // Restart on crash, but stop if it is crash-looping: a service that dies three
 // times in a minute has a real problem, and restarting forever would bury the
 // error under an endless scroll instead of showing it.
-function supervise(tag, command, args, { optional = false } = {}) {
+function supervise(tag, command, args, { optional = false, env = process.env } = {}) {
   const recent = [];
   const start = () => {
-    const child = spawn(command, args, { cwd: root, env: process.env });
+    const child = spawn(command, args, { cwd: root, env });
     child.stdout.on("data", (d) => String(d).split("\n").forEach((l) => log(tag, l)));
     child.stderr.on("data", (d) => String(d).split("\n").forEach((l) => log(tag, l)));
     child.on("exit", (code, signal) => {
@@ -109,11 +110,29 @@ async function launch() {
   refreshSideload((line) => log("sideload", line));
 
   const port = process.env.PORT || 3000;
+  const companion = companionEnvironment({ root });
+  if (companion.warning) {
+    log("config", companion.warning);
+  }
+  log("lookup", companion.lookupEnabled
+    ? `aktif (opt-in lokal${companion.lookupHosts.length
+      ? `; host: ${companion.lookupHosts.join(", ")}` : "; host default aman"})`
+    : "nonaktif (default fail-closed)");
+  if (companion.discoveryAlpha) {
+    log("lookup", `discovery alpha aktif; provider=${companion.searchProvider}; `
+      + "retrieval default-deny via domain policy");
+    if (companion.searchProvider === "searxng") {
+      log("lookup", companion.searxngUrl
+        ? `searxng instance: ${companion.searxngUrl}`
+        : "searxng dipilih tetapi TANTULAR_SEARXNG_URL/ searxngUrl belum diset — provider nonaktif");
+    }
+  }
   if (await alive(`https://localhost:${port}/manifest.xml`)) {
     log("companion", `sudah berjalan di port ${port} — dibiarkan apa adanya.`);
   } else {
     console.log(`${stamp()} menjalankan Companion...`);
-    supervise("companion", process.execPath, [path.join(root, "tools", "dev-server.mjs")]);
+    supervise("companion", process.execPath, [path.join(root, "tools", "dev-server.mjs")],
+      { env: companion.env });
   }
 
   const venv = path.join(root, ".venv-doc", "bin", "python");

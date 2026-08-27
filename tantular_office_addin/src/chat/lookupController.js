@@ -51,7 +51,12 @@ export function createLookupController({
     return response;
   };
 
-  return async function runLookup({ mode, query }) {
+  return async function runLookup({ mode, query, host: chosenHost, provider }) {
+    // The pane's picker chooses among allowed hosts; enforcement is NOT here.
+    // The companion's allowlist and adapter checks decide what is reachable —
+    // a pane bug can at worst ask for a host the server will refuse.
+    const HOST_CHOSEN = String(chosenHost || HOST).trim().toLowerCase();
+    const PROVIDER_CHOSEN = String(provider || "").trim().toLowerCase();
     if (!searchAllowed(mode)) {
       // Mode Lokal is a printed promise. Nothing may be read or sent here.
       return show({ ok: false, reason: "disabled",
@@ -73,11 +78,12 @@ export function createLookupController({
     const document = doc.text;
 
     const prepared = await postLocal("/api/lookup/prepare",
-                                     { query: text, host: HOST, document });
+      { query: text, ...(PROVIDER_CHOSEN
+        ? { provider: PROVIDER_CHOSEN } : { host: HOST_CHOSEN }), document });
     if (!prepared?.ok || !prepared.token) {
       return show({ ok: false, reason: prepared?.reason || "prepare_failed",
                     message: prepared?.message || "Permintaan ditolak.",
-                    host: HOST });
+                    host: PROVIDER_CHOSEN || HOST_CHOSEN });
     }
 
     const dialog = approvalDialogModel(prepared.disclosure);
@@ -86,13 +92,22 @@ export function createLookupController({
                     message: "Tidak ada yang bisa ditinjau; permintaan dibatalkan." });
     }
 
-    const approved = await confirm(disclosureWithDocumentNote(dialog, doc));
+    // A dialog that cannot run is a refusal, not an exception. Before this
+    // guard, real Excel's failing window.confirm() rejected the whole chain
+    // silently: buttons recovered (finally), nothing rendered, and the click
+    // appeared to do nothing at all.
+    let approved = false;
+    try {
+      approved = await confirm(disclosureWithDocumentNote(dialog, doc));
+    } catch {
+      approved = false;
+    }
     if (!approved) {
       // No execute call is made. This is an unmade request, not a cancelled
       // one: nothing has left the machine.
       return show({ ok: false, reason: "declined",
                     message: "Dibatalkan. Tidak ada yang dikirim keluar.",
-                    host: HOST });
+                    host: PROVIDER_CHOSEN || HOST_CHOSEN });
     }
 
     // The exact bytes the user read, and the exact document they were read
@@ -100,7 +115,9 @@ export function createLookupController({
     const executed = await postLocal("/api/lookup/execute", {
       token: prepared.token,
       query: prepared.disclosure.query,
-      host: prepared.disclosure.host,
+      ...(prepared.disclosure.provider
+        ? { provider: prepared.disclosure.provider }
+        : { host: prepared.disclosure.host }),
       document
     });
     return show(executed);
@@ -127,7 +144,7 @@ export function createLocalCompanionPost({
   // URL would actually resolve against.
   getPageUrl = () => globalThis.location?.href || "https://localhost/"
 }) {
-  return async function postLocal(path, body) {
+  return async function postLocal(path, body, { timeoutMs = 0 } = {}) {
     if (isCloudSession()) {
       return { ok: false, reason: "cloud_session",
                message: "Pencarian hanya tersedia dengan Tantular Companion lokal; "
@@ -151,15 +168,26 @@ export function createLocalCompanionPost({
       return { ok: false, reason: "not_local",
                message: "Companion bukan lokal; permintaan dibatalkan." };
     }
+    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => controller.abort(new DOMException("Timeout", "AbortError")), timeoutMs)
+      : null;
     try {
       const response = await fetchImpl(url, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        ...(controller ? { signal: controller.signal } : {})
       });
       return await response.json();
     } catch (error) {
+      if (controller?.signal.aborted || error?.name === "AbortError") {
+        return { ok: false, reason: "timeout",
+                 message: "Companion terlalu lama merespons. Coba lagi." };
+      }
       return { ok: false, reason: "companion_unreachable",
                message: `Tidak bisa menghubungi Companion: ${error?.message || error}` };
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 }

@@ -39,8 +39,20 @@ const REASON_MESSAGES = Object.freeze({
   no_adapter: "Host itu belum punya adapter pencarian.",
   mismatch: "Query berubah setelah disetujui.",
   expired: "Persetujuan kedaluwarsa.",
-  unknown_token: "Permintaan tidak dikenal atau sudah dipakai."
+  unknown_token: "Permintaan tidak dikenal atau sudah dipakai.",
+  declined: "Dibatalkan. Tidak ada yang dikirim keluar."
 });
+
+// Refusals that happen BEFORE any answer exists. Rendering these as "the
+// answer failed verification" told a user who clicked Batal that something
+// was withheld — found in real-Excel acceptance, 2026-08-25. No answer means
+// no "Teks jawaban tidak ditampilkan" note either.
+const NO_ANSWER_REASONS = new Set([
+  "declined", "empty_query", "empty_selection", "empty_document",
+  "host_unavailable", "unsupported_host", "read_failed", "disabled",
+  "cloud_session", "not_local", "companion_unreachable", "no_document",
+  "host_not_allowed", "no_adapter", "busy"
+]);
 
 export function explainFindings(findings) {
   if (!findings || typeof findings !== "object") return [];
@@ -78,20 +90,32 @@ export function lookupResultView(response) {
       findings: [], host,
       // What was checked, so "terverifikasi" is inspectable rather than a badge.
       protectedStrings: Array.isArray(response.protected)
-        ? response.protected.map(String) : []
+        ? response.protected.map(String) : [],
+      sources: Array.isArray(response.sources) ? response.sources.map((source) => ({
+        id: String(source?.id || ""),
+        title: String(source?.title || source?.host || ""),
+        url: String(source?.url || ""),
+        host: String(source?.host || ""),
+        tier: String(source?.tier || "")
+      })).filter((source) => source.id && source.url) : []
     };
   }
 
   const reason = String(response.reason || "unknown");
+  const preFlight = NO_ANSWER_REASONS.has(reason);
   return {
     state: "blocked", canEdit: false, answer: null,
-    title: "Jawaban ditahan",
+    title: preFlight ? "Pencarian tidak dilanjutkan" : "Jawaban ditahan",
+    // The mapped text wins; the transport's own message is the fallback so an
+    // unmapped reason still explains itself instead of blaming verification.
     message: REASON_MESSAGES[reason]
+      || String(response.message || "").trim()
       || "Jawaban tidak lolos pemeriksaan dan tidak ditampilkan.",
     reason,
     findings: explainFindings(response.findings),
     host,
-    note: "Teks jawaban tidak ditampilkan karena tidak lolos pemeriksaan."
+    note: preFlight ? ""
+      : "Teks jawaban tidak ditampilkan karena tidak lolos pemeriksaan."
   };
 }
 
@@ -114,10 +138,18 @@ export function renderLookupResultHtml(response) {
       ? `<div class="lookup-checked">Dicocokkan: `
         + view.protectedStrings.map((s) => escapeHtml(s)).join(", ") + `</div>`
       : "";
+    const sources = view.sources.length
+      ? `<div class="lookup-sources"><strong>Sumber yang benar-benar diambil:</strong><ul>`
+        + view.sources.map((source) =>
+          `<li>${escapeHtml(source.id)} — ${escapeHtml(source.title)} `
+          + `(${escapeHtml(source.tier)}): ${escapeHtml(source.url)}</li>`).join("")
+        + `</ul></div>`
+      : "";
     return `<div class="lookup-result lookup-verified" data-state="verified">`
       + `<div class="lookup-title">✅ ${escapeHtml(view.title)}</div>`
       + hostLine
       + `<div class="lookup-answer">${escapeHtml(view.answer)}</div>`
+      + sources
       + checked
       + `<button type="button" class="lookup-edit" data-can-edit="true">`
       + `Terapkan sebagai edit</button></div>`;
@@ -138,7 +170,8 @@ export function renderLookupResultHtml(response) {
     + hostLine
     + `<div class="lookup-message">${escapeHtml(view.message)}</div>`
     + findings
-    + `<div class="lookup-note">${escapeHtml(view.note)}</div></div>`;
+    + (view.note ? `<div class="lookup-note">${escapeHtml(view.note)}</div>` : "")
+    + `</div>`;
 }
 
 // Mount into the pane. Separated from the string builder so the rendering can

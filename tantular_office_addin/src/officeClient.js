@@ -1159,7 +1159,7 @@ function basicBlockText(block, listIndex) {
 // just edited — Word caches the bundle from when the pane was opened.
 // It sat at b0818a across the progress/cancel work (5cf7fee) and so
 // reported "current" for a pane that was two features behind.
-export const TASKPANE_BUILD = "host05";
+export const TASKPANE_BUILD = "host10";
 
 // Insert a formatted answer. When `afterText` is provided and located, the
 // content is placed immediately after that anchor (end of the queried

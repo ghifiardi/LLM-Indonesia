@@ -11,6 +11,8 @@ import {
 } from "./tantularClient.js";
 import { isCloudSession, isPortalMode, loadMode, modeIsKnown, companionUrl } from "./companionUrl.js";
 import { createLookupController, createLocalCompanionPost } from "./chat/lookupController.js";
+import { resolveLookupHost, readLookupDocument } from "./chat/lookupDocument.js";
+
 import { bindLookupEntry } from "./chat/lookupUi.js";
 import {
   getSelectionContext,
@@ -63,6 +65,17 @@ import { extractPptxSlides, extractRequestedSlideIndex } from "./chat/pptTools.j
 
 const DECK_STUDIO_BUILD = "0.10.9-deselect-before-delete";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
+let authModulePromise = null;
+let chatMountPromise = null;
+
+// Authentication is optional infrastructure, not a prerequisite for chat or
+// document editing. Keep the large MSAL/import-map graph out of the taskpane's
+// static module graph: an older Office WKWebView that rejects one MSAL import
+// must still register Office.onReady and mount the core Tantular UI.
+function loadAuthModule() {
+  if (!authModulePromise) authModulePromise = import("./auth.js");
+  return authModulePromise;
+}
 
 const state = {
   host: "Office",
@@ -77,11 +90,15 @@ const state = {
   refineSpec: null,
   documentSpec: null,
   workbookSpec: null,
-  lastContextUpdatedAt: null
+  lastContextUpdatedAt: null,
+  lookupDiscovery: null
 };
 
 const els = {
+  settingsTitle: document.querySelector("#settings-title"),
   subtitle: document.querySelector("#host-subtitle"),
+  authStatus: document.querySelector("#auth-status"),
+  microsoftSignin: document.querySelector("#microsoft-signin"),
   settingsToggle: document.querySelector("#settings-toggle"),
   settingsBody: document.querySelector("#settings-body"),
   modeBanner: document.querySelector("#mode-banner"),
@@ -93,6 +110,15 @@ const els = {
   lookupQuery: document.querySelector("#lookup-query"),
   lookupRun: document.querySelector("#lookup-run"),
   lookupResult: document.querySelector("#lookup-result-container"),
+  lookupRefine: document.querySelector("#lookup-refine"),
+  lookupHost: document.querySelector("#lookup-host"),
+  // `closest("label")` is the compatibility path for an Office WebView that
+  // mixed a newer JS entry with an older cached HTML document (the old HTML
+  // has the select but not lookup-host-row). Discovery must still remove the
+  // picker in that mixed-generation state.
+  lookupHostRow: document.querySelector("#lookup-host-row")
+    || document.querySelector("#lookup-host")?.closest?.("label"),
+  lookupRefineArea: document.querySelector("#lookup-refine-area"),
   modeHint: document.querySelector("#mode-hint"),
   modeConfirm: document.querySelector("#mode-confirm"),
   modeConfirmText: document.querySelector("#mode-confirm-text"),
@@ -186,11 +212,20 @@ const els = {
 bootstrap();
 
 function bootstrap() {
-  bindStaticEvents();
-  hydrateSettings();
-  renderDeckStyleOptions();
-  hydrateProjectInstructions();
+  // The manifest already carries the authoritative host in ?host=. Use it
+  // immediately: mounting static chat controls does not call an Office API,
+  // and waiting for Office.onReady made a slow/stalled callback look like a
+  // broken manifest (the entire chat card stayed hidden).
+  const hintedHost = detectHost(undefined);
+  if (hintedHost !== "Office") {
+    state.host = hintedHost;
+    step("renderForHost", renderForHost);
+    mountChatForHost();
+  }
 
+  // Register readiness BEFORE any nonessential synchronous hydration. A
+  // storage/UI exception must not prevent Office from ever getting its
+  // callback, which previously stranded auth at "memeriksa sesi..." forever.
   if (globalThis.Office?.onReady) {
     Office.onReady((info) => {
       // Not normalizeHostName(info.host) alone: an unpopulated info.host
@@ -202,7 +237,7 @@ function bootstrap() {
       // that states the mode this session actually runs in. Doing it ahead of
       // renderForHost() means a failure there can never strand the pane showing
       // a mode claim that does not match how it routes.
-      hydrateSettings();
+      step("hydrateSettings", hydrateSettings);
 
       // Each step runs INDEPENDENTLY. These used to be bare statements, so a
       // throw in renderForHost() — one null element, one unexpected host —
@@ -213,29 +248,72 @@ function bootstrap() {
       step("renderForHost", renderForHost);
       step("mountWorkspaceUi", mountWorkspaceUi);
 
+      // Initialize Microsoft authentication independently so auth failure
+      // never blocks the rest of Tantular from loading.
+      loadAuthModule()
+        .then(async ({ initializeAuth, getSignedInAccount }) => {
+          await initializeAuth();
+          const account = getSignedInAccount();
+          const authStatus = document.querySelector("#auth-status");
+
+          if (account) {
+            console.info("[Tantular] Microsoft account available:", account.username || account.name || "signed in");
+            if (authStatus) {
+              authStatus.textContent = `Microsoft 365: terhubung — ${account.username || account.name || "akun aktif"}`;
+            }
+          } else {
+            console.info("[Tantular] Microsoft auth initialized; no account token acquired yet.");
+            if (authStatus) {
+              authStatus.textContent = "Microsoft 365: siap — belum ada token pengguna.";
+            }
+          }
+        })
+        .catch((error) => {
+          console.warn("[Tantular] Microsoft auth initialization failed:", error);
+          const authStatus = document.querySelector("#auth-status");
+          if (authStatus) {
+            authStatus.textContent = `Microsoft 365: gagal inisialisasi — ${error?.message || error}`;
+          }
+        });
+
       // The host goes in the status line because it is the single fact that
       // explains a stripped-looking pane: "Office" means detectHost() found no
       // usable signal, and that hides chat AND Studio while everything
       // host-agnostic still renders normally.
-      if (state.host === "Office") {
-        setStatus(
-          `Host Office tidak terdeteksi (build ${TASKPANE_BUILD}). Chat dan Studio disembunyikan. `
-          + "Laporkan pesan ini ke fasilitator.",
-          "error"
-        );
-      } else {
+      const finishHostSetup = () => {
         setStatus(`Terhubung ke ${state.host}. (build ${TASKPANE_BUILD})`, "ok");
-      }
+        mountChatForHost();
+      };
 
-      if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
-        import("./chat/chatPane.js")
-          .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
-          // Without this the promise rejects silently and the chat card simply
-          // never appears — indistinguishable from "this host has no chat".
-          .catch((error) => {
-            console.error("[Tantular] chat pane failed to mount:", error);
-            setStatus(`Chat tidak dapat dimuat: ${error?.message || error}`, "error");
-          });
+      if (state.host === "Office") {
+        // Office.onReady can fire before Office.context is populated on a pane
+        // reload. Giving up here stripped the whole pane — chat card gone,
+        // lookup dead — while a click seconds later detected Excel fine
+        // (real-Excel acceptance, 2026-08-25). So keep asking for ten seconds
+        // before declaring the host truly unknown.
+        setStatus(`Mendeteksi host Office... (build ${TASKPANE_BUILD})`, "");
+        let attempts = 0;
+        const retry = setInterval(() => {
+          attempts += 1;
+          const detected = detectHost(undefined);
+          if (detected !== "Office") {
+            clearInterval(retry);
+            state.host = detected;
+            step("renderForHost", renderForHost);
+            finishHostSetup();
+            return;
+          }
+          if (attempts >= 20) {
+            clearInterval(retry);
+            setStatus(
+              `Host Office tidak terdeteksi (build ${TASKPANE_BUILD}). Chat dan Studio disembunyikan. `
+              + "Laporkan pesan ini ke fasilitator.",
+              "error"
+            );
+          }
+        }, 500);
+      } else {
+        finishHostSetup();
       }
       // Warm up the Studio model in the background: the first Studio call
       // otherwise pays the multi-GB cold load (slow disks/RAM on workshop
@@ -254,13 +332,16 @@ function bootstrap() {
     // Browser-only preview for UI development.
     const previewHost = new URLSearchParams(globalThis.location?.search || "").get("host");
     state.host = normalizeHostName(previewHost || "Word");
-    renderForHost();
+    step("renderForHost", renderForHost);
     setStatus("Mode pratinjau browser: Office.js belum tersedia.", "");
-    mountWorkspaceUi();
-    if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
-      import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
-    }
+    step("mountWorkspaceUi", mountWorkspaceUi);
+    mountChatForHost();
   }
+
+  step("bindStaticEvents", bindStaticEvents);
+  step("hydrateSettings", hydrateSettings);
+  step("renderDeckStyleOptions", renderDeckStyleOptions);
+  step("hydrateProjectInstructions", hydrateProjectInstructions);
 }
 
 // Run one startup step so that its failure is reported rather than silently
@@ -272,6 +353,24 @@ function step(name, fn) {
     console.error(`[Tantular] ${name} failed:`, error);
     setStatus(`Gagal pada ${name}: ${error?.message || error}`, "error");
   }
+}
+
+function mountChatForHost() {
+  if (!["Word", "Excel", "PowerPoint"].includes(state.host)) return null;
+  if (chatMountPromise) return chatMountPromise;
+  chatMountPromise = import("./chat/chatPane.js")
+    .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
+    // Without this the promise rejects silently and the chat card simply never
+    // appears — indistinguishable from "this host has no chat".
+    .catch((error) => {
+      console.error("[Tantular] chat pane failed to mount:", error);
+      setStatus(`Chat tidak dapat dimuat: ${error?.message || error}`, "error");
+      // A transient module/network failure should be retryable if Office later
+      // reaches onReady; a successful mount remains strictly single-shot.
+      chatMountPromise = null;
+      return null;
+    });
+  return chatMountPromise;
 }
 
 function mountWorkspaceUi() {
@@ -301,6 +400,63 @@ function adoptServerContext(context) {
 }
 
 function bindStaticEvents() {
+  els.microsoftSignin?.addEventListener("click", async () => {
+    if (els.microsoftSignin) {
+      els.microsoftSignin.disabled = true;
+      els.microsoftSignin.textContent = "Menghubungkan...";
+    }
+    if (els.authStatus) {
+      els.authStatus.textContent = "Microsoft 365: meminta akses pengguna...";
+    }
+
+    try {
+      const { signIn } = await loadAuthModule();
+      const account = await signIn();
+
+      if (account) {
+        const label = account.username || account.name || "akun Microsoft";
+        if (els.authStatus) {
+          els.authStatus.textContent = `Microsoft 365: terhubung — ${label}`;
+        }
+        if (els.microsoftSignin) {
+          els.microsoftSignin.textContent = "✓ Terhubung ke Microsoft 365";
+        }
+      } else {
+        if (els.authStatus) {
+          els.authStatus.textContent = "Microsoft 365: autentikasi selesai, tetapi akun tidak ditemukan.";
+        }
+        if (els.microsoftSignin) {
+          els.microsoftSignin.textContent = "Masuk dengan Microsoft 365";
+        }
+      }
+    } catch (error) {
+      console.error("[Tantular] Microsoft sign-in failed:", error);
+      console.error("[Tantular] auth error details:", {
+        name: error?.name,
+        message: error?.message,
+        errorCode: error?.errorCode,
+        subError: error?.subError,
+        correlationId: error?.correlationId,
+        stack: error?.stack
+      });
+
+      if (els.authStatus) {
+        const code = error?.errorCode || error?.name || "unknown";
+        const message = error?.message || String(error);
+        els.authStatus.textContent =
+          `Microsoft 365: gagal — ${code}: ${message}`;
+      }
+
+      if (els.microsoftSignin) {
+        els.microsoftSignin.textContent = "Coba masuk lagi";
+      }
+    } finally {
+      if (els.microsoftSignin) {
+        els.microsoftSignin.disabled = false;
+      }
+    }
+  });
+
   els.settingsToggle.addEventListener("click", () => {
     const hidden = els.settingsBody.classList.toggle("hidden");
     els.settingsToggle.setAttribute("aria-expanded", String(!hidden));
@@ -379,6 +535,12 @@ function renderMode() {
   if (!known) {
     if (els.modeSelect) els.modeSelect.disabled = true;
     if (els.modeHint) els.modeHint.textContent = "";
+
+    // Do not expose either local or cloud configuration until Office mode
+    // has been resolved.
+    document.querySelector("#cloud-model-summary")?.classList.add("hidden");
+    document.querySelector("#local-model-settings")?.classList.add("hidden");
+
     return null;
   }
   const mode = loadMode();
@@ -401,6 +563,21 @@ function renderMode() {
       ? "Mode Cloud memakai model di server Tantular — tidak perlu instalasi apa pun, tetapi teks dokumen Anda dikirim ke server."
       : "Mode Lokal memakai model di komputer Anda melalui Tantular Companion. Teks dokumen tidak dikirim ke mana pun.";
   }
+
+  // Keep Cloud Mode visually simple. Ollama, local model names, endpoint,
+  // API-key and model-test controls are relevant only when processing locally.
+  const cloudSummary = document.querySelector("#cloud-model-summary");
+  const localSettings = document.querySelector("#local-model-settings");
+
+  cloudSummary?.classList.toggle("hidden", !cloud);
+  localSettings?.classList.toggle("hidden", cloud);
+
+  if (els.settingsTitle) {
+    els.settingsTitle.textContent = cloud
+      ? "Pengaturan Tantular Cloud"
+      : "Pengaturan model lokal";
+  }
+
   return mode;
 }
 
@@ -417,13 +594,20 @@ function hideModeConfirm() {
 function setUpLookup() {
   if (!els.lookupModeToggle || !els.lookupModeRow) return;
 
+  const lookupPost = createLocalCompanionPost({
+    fetchImpl: (...args) => fetch(...args), isCloudSession, companionUrl
+  });
   const runLookup = createLookupController({
-    postLocal: createLocalCompanionPost({
-      fetchImpl: (...args) => fetch(...args), isCloudSession, companionUrl
-    }),
+    postLocal: lookupPost,
     confirm: confirmLookupDisclosure,
     container: els.lookupResult,
-    getHost: () => state.host,
+    getHost: () => resolveLookupHost(state.host, () => {
+      // Re-detect against the live Office.context; heal the snapshot too so
+      // the rest of the pane benefits from the recovered host.
+      const detected = detectHost(undefined);
+      if (detected !== "Office") state.host = detected;
+      return detected;
+    }),
     onEdit: (answer) => { insertResultText(state.host, answer).catch(() => {}); }
   });
 
@@ -433,12 +617,79 @@ function setUpLookup() {
     input: els.lookupQuery,
     button: els.lookupRun,
     result: els.lookupResult,
-    run: runLookup
+    // The picker's choice joins here so every path — button, Enter key,
+    // state.runLookup — carries the same host into the same approval flow.
+    run: (args) => runLookup({
+      ...args,
+      ...(state.lookupDiscovery?.enabled
+        ? { provider: state.lookupDiscovery.provider }
+        : { host: els.lookupHost?.value || undefined })
+    })
   });
 
   // The visible button and Enter key use this same runner; exposing it also
   // keeps the path available to future commands without creating a second flow.
   state.runLookup = entry.run;
+
+  // Agentic assist: the model proposes queries LOCALLY; picking one only
+  // fills the input. The single egress door — Tinjau → approval — is
+  // untouched, so a model-proposed query is approved exactly like a typed one.
+  els.lookupRefine?.addEventListener("click", async () => {
+    const area = els.lookupRefineArea;
+    const intent = String(els.lookupQuery?.value || "").trim();
+    if (!area) return;
+    area.hidden = false;
+    if (!intent) {
+      area.innerHTML = `<p class="hint">Tulis dulu maksud pencarian di kolom query,
+        lalu klik "Bantu susun query".</p>`;
+      return;
+    }
+    area.innerHTML = `<p class="hint">Menyusun usulan query...</p>`;
+    els.lookupRefine.disabled = true;
+    try {
+      // The document grounds the suggestions AND powers the leak screening.
+      // Reading it stays local; a failed read still refines, just unscreened
+      // against nothing — with no document there is nothing to leak.
+      const doc = await readLookupDocument(resolveLookupHost(state.host, () => {
+        const detected = detectHost(undefined);
+        if (detected !== "Office") state.host = detected;
+        return detected;
+      }));
+      const refined = await lookupPost("/api/lookup/refine",
+        { intent, document: doc?.ok ? doc.text : "" },
+        { timeoutMs: 5_000 });
+      if (!refined?.ok) {
+        area.innerHTML = `<p class="hint">${escapeHtml(refined?.message
+          || "Model tidak menghasilkan usulan query.")}</p>`;
+        return;
+      }
+      const question = refined.question
+        ? `<p class="lookup-refine-question"><strong>${escapeHtml(refined.question)}</strong></p>`
+        : "";
+      area.innerHTML = question + refined.candidates.map((c, i) =>
+        `<button type="button" class="secondary full-width-button lookup-candidate"
+                 data-index="${i}">
+           ${escapeHtml(c.query)}${c.containsDocumentData
+             ? ` <span class="lookup-leak-warning">⚠ memuat data dokumen</span>` : ""}
+         </button>
+         <p class="hint">${escapeHtml(c.why || "")}</p>`).join("");
+      area.querySelectorAll(".lookup-candidate").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const chosen = refined.candidates[Number(btn.dataset.index)];
+          if (!chosen || !els.lookupQuery) return;
+          // Fill only. The user reads it, can edit it, and the approval
+          // dialog will show these exact bytes before anything leaves.
+          els.lookupQuery.value = chosen.query;
+          els.lookupQuery.focus();
+        });
+      });
+    } catch (error) {
+      area.innerHTML = `<p class="hint">Gagal menyusun usulan: ${escapeHtml(
+        String(error?.message || error))}</p>`;
+    } finally {
+      els.lookupRefine.disabled = false;
+    }
+  });
 
   // Ask the companion whether the feature exists at all. A cloud session has no
   // local companion, so the toggle stays hidden there too.
@@ -446,26 +697,78 @@ function setUpLookup() {
   fetch(companionUrl("/api/lookup/status"))
     .then((r) => r.json())
     .then((status) => {
-      if (status?.enabled === true) els.lookupModeRow.hidden = false;
+      if (status?.enabled !== true) return;
+      els.lookupModeRow.hidden = false;
+      state.lookupDiscovery = status?.discovery?.enabled === true
+        ? status.discovery : null;
+      const hostRow = els.lookupHostRow || els.lookupHost?.closest?.("label");
+      if (hostRow) {
+        const hidePicker = Boolean(state.lookupDiscovery);
+        hostRow.hidden = hidePicker;
+        hostRow.classList?.toggle?.("hidden", hidePicker);
+        // Office's embedded WebView has shown stale author CSS overriding the
+        // hidden attribute. Inline display is the final compatibility belt.
+        if (hostRow.style) hostRow.style.display = hidePicker ? "none" : "";
+        hostRow.setAttribute?.("aria-hidden", String(hidePicker));
+      }
+      if (els.lookupHost) els.lookupHost.disabled = Boolean(state.lookupDiscovery);
+      if (els.lookupRun && state.lookupDiscovery) {
+        els.lookupRun.textContent = "Tinjau query dan cari sumber resmi";
+      }
+      // The picker lists exactly what the companion's allowlist allows. The
+      // pane never invents a host: enforcement stays server-side, this is a
+      // menu of what will be accepted.
+      if (els.lookupHost) {
+        const described = Array.isArray(status.described) && status.described.length
+          ? status.described
+          : (status.hosts || []).map((host) => ({ host, label: host }));
+        els.lookupHost.innerHTML = described.map((d) =>
+          `<option value="${escapeHtml(d.host)}">${escapeHtml(d.label)}</option>`
+        ).join("");
+      }
     })
     .catch(() => { /* no companion, no toggle */ });
 }
 
-// The dialog. Uses the pane's own confirm surface so the host and query are
-// shown verbatim — the user approves these exact bytes.
-async function confirmLookupDisclosure(dialog) {
-  const lines = [
-    dialog.warning,
-    "",
-    `Host  : ${dialog.host}`,
-    `Query : ${dialog.query}`,
-    `Panjang query: ${dialog.chars} karakter`,
-    "",
-    dialog.documentNote
-  ];
-  if (dialog.documentSource) lines.push(`Dokumen diperiksa: ${dialog.documentSource}`);
-  if (dialog.truncatedNote) lines.push(dialog.truncatedNote);
-  return Boolean(globalThis.confirm?.(lines.join("\n")));
+// The dialog, rendered IN the pane. Real Excel's webview fails
+// window.confirm() silently — the promise rejected with nothing shown, which
+// read as "the button does nothing" (acceptance, 2026-08-25). The user must
+// approve the exact host and query, so both are set as textContent here and
+// nothing else can restyle or reword them.
+function confirmLookupDisclosure(dialog) {
+  const panel = document.querySelector("#lookup-approval");
+  const approve = panel?.querySelector("#lookup-approve");
+  const cancel = panel?.querySelector("#lookup-cancel");
+  if (!panel || !approve || !cancel) {
+    // No dialog surface means no way to obtain consent: refuse, never assume.
+    return Promise.resolve(false);
+  }
+  const set = (id, text) => {
+    const el = panel.querySelector(id);
+    if (el) el.textContent = text || "";
+  };
+  set("#lookup-approval-warning", dialog.warning);
+  set("#lookup-approval-source-label", dialog.provider ? "Provider:" : "Host:");
+  set("#lookup-approval-host", dialog.host);
+  set("#lookup-approval-query", dialog.query);
+  set("#lookup-approval-chars", `Panjang query: ${dialog.chars} karakter`);
+  set("#lookup-approval-doc",
+      dialog.documentSource ? `Dokumen diperiksa: ${dialog.documentSource}` : "");
+  set("#lookup-approval-note", dialog.documentNote);
+  set("#lookup-approval-trunc", dialog.truncatedNote);
+  panel.hidden = false;
+  return new Promise((resolve) => {
+    const done = (verdict) => {
+      panel.hidden = true;
+      approve.removeEventListener("click", onApprove);
+      cancel.removeEventListener("click", onCancel);
+      resolve(verdict);
+    };
+    const onApprove = () => done(true);
+    const onCancel = () => done(false);
+    approve.addEventListener("click", onApprove);
+    cancel.addEventListener("click", onCancel);
+  });
 }
 
 function onModeSelectChange() {

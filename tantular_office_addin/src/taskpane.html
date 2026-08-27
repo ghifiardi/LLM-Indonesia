@@ -32,7 +32,7 @@
     <header class="hero">
       <div class="mark" aria-hidden="true">T</div>
       <div>
-        <h1>Tantular <small class="build-tag" style="font-size:11px;color:#98a2b3;font-weight:400">host05</small></h1>
+        <h1>Tantular <small class="build-tag" style="font-size:11px;color:#98a2b3;font-weight:400">host10</small></h1>
         <p id="host-subtitle">Asisten privat Bahasa Indonesia untuk Microsoft 365.</p>
       </div>
     </header>
@@ -47,9 +47,21 @@
       <span id="mode-banner-text">🔒 Mode Lokal — teks dokumen Anda tidak keluar dari komputer ini.</span>
     </div>
 
+    <div id="auth-section" style="margin:8px 0 16px;">
+      <div id="auth-status" class="hint">
+        Microsoft 365: memeriksa sesi...
+      </div>
+      <button id="microsoft-signin"
+              class="secondary"
+              type="button"
+              style="margin-top:8px;">
+        Masuk dengan Microsoft 365
+      </button>
+    </div>
+
     <section class="card chat hidden" id="chat-card" aria-labelledby="chat-title">
       <div class="section-title-row">
-        <h2 id="chat-title">💬 Tantular Chat <small class="build-tag" style="font-size:10px;color:#98a2b3;font-weight:400">host05</small></h2>
+        <h2 id="chat-title">💬 Tantular Chat <small class="build-tag" style="font-size:10px;color:#98a2b3;font-weight:400">host10</small></h2>
         <button id="chat-context-pill" class="pill pill-button" type="button"
                 title="Konteks yang akan dibaca Tantular">Konteks: —</button>
       </div>
@@ -93,6 +105,10 @@
             dikirim keluar, dan jawaban diperiksa terhadap dokumen Anda.
           </p>
           <div id="lookup-search-controls" class="lookup-search-controls" hidden>
+            <label for="lookup-host" id="lookup-host-row">
+              Sumber pencarian
+              <select id="lookup-host"></select>
+            </label>
             <label for="lookup-query">
               Query pencarian
               <input id="lookup-query" type="search" autocomplete="off"
@@ -101,6 +117,33 @@
             <button id="lookup-run" class="secondary full-width-button" type="button">
               Tinjau query dan cari
             </button>
+            <!-- Agentic assist, LOCAL ONLY: the model asks a clarifying
+                 question and proposes candidate queries. Nothing leaves the
+                 machine until a candidate goes through the approval dialog
+                 like any typed query. -->
+            <button id="lookup-refine" class="secondary full-width-button" type="button">
+              Bantu susun query
+            </button>
+            <div id="lookup-refine-area" class="lookup-refine-area" hidden></div>
+          </div>
+          <!-- The approval dialog, in the pane. window.confirm() cannot be
+               used here: real Excel's webview fails it silently (found during
+               acceptance 2026-08-25 — the click died with no dialog, no
+               request, no render). The user must read the EXACT host and
+               query, so the dialog is ours, not the host's. -->
+          <div id="lookup-approval" class="lookup-approval" hidden>
+            <p class="hint model-warning" id="lookup-approval-warning"></p>
+            <p><strong id="lookup-approval-source-label">Provider:</strong>
+              <span id="lookup-approval-host"></span></p>
+            <p><strong>Query:</strong> <span id="lookup-approval-query"></span></p>
+            <p class="hint" id="lookup-approval-chars"></p>
+            <p class="hint" id="lookup-approval-doc"></p>
+            <p class="hint" id="lookup-approval-note"></p>
+            <p class="hint" id="lookup-approval-trunc"></p>
+            <div class="button-row compact-row">
+              <button id="lookup-approve" class="secondary" type="button">Setujui</button>
+              <button id="lookup-cancel" class="secondary" type="button">Batal</button>
+            </div>
           </div>
           <!-- Empty until a lookup returns. A blocked response never carries an
                answer or edit control; see chat/lookupResultView.js. -->
@@ -113,42 +156,67 @@
             <button id="mode-confirm-no" class="secondary" type="button">Batal, tetap Mode Lokal</button>
           </div>
         </div>
-        <label>
-          Pilih model yang terpasang di Ollama
-          <select id="installed-model-select">
-            <option value="">Memuat daftar model...</option>
-          </select>
-        </label>
-        <div class="button-row compact-row model-picker-actions">
-          <button id="use-model-general" class="secondary" type="button">Pakai untuk chat</button>
-          <button id="use-model-deck" class="secondary" type="button">Pakai untuk Studio</button>
-          <button id="refresh-models" class="secondary" type="button">Refresh</button>
+        <!-- Cloud Mode intentionally hides all Ollama/local-runtime controls.
+             The cloud backend, model and credential are managed server-side. -->
+        <div id="cloud-model-summary" class="hidden" role="status" aria-live="polite">
+          <div style="margin:14px 0;padding:16px;border:1px solid #ead8bd;border-radius:16px;background:#fffaf2;">
+            <div style="font-weight:700;font-size:18px;margin-bottom:10px;">
+              ☁️ Tantular Cloud
+            </div>
+            <div style="margin-bottom:7px;">
+              <strong>Model:</strong> Tantular Cloud
+            </div>
+            <div style="margin-bottom:7px;">
+              <strong>Status:</strong> <span style="color:#18794e;">● Terhubung</span>
+            </div>
+            <div style="margin-bottom:10px;">
+              <strong>Endpoint:</strong> dikelola oleh Tantular
+            </div>
+            <p class="hint" style="margin:0;">
+              Tidak memerlukan Ollama, Tantular Companion, API key pengguna,
+              atau instalasi model lokal.
+            </p>
+          </div>
         </div>
-        <button id="use-tantular-both" class="secondary full-width-button" type="button">Gunakan Tantular Office untuk chat + semua Studio</button>
-        <button id="test-selected-model" class="secondary full-width-button" type="button">Tes model terpilih</button>
-        <label>
-          Endpoint
-          <input id="endpoint-input" type="text" spellcheck="false" />
-        </label>
-        <label>
-          Model umum / chat
-          <input id="model-input" type="text" spellcheck="false" />
-        </label>
-        <label>
-          Model Studio: deck / DOCX / XLSX (9B+)
-          <input id="deck-model-input" type="text" spellcheck="false" placeholder="tantular-office:0.5-9b" />
-        </label>
-        <label>
-          Model vision (untuk Extract from image)
-          <input id="vision-model-input" type="text" spellcheck="false" placeholder="mis. llama3.2-vision / qwen2.5vl:7b" />
-        </label>
-        <label>
-          API key (kosongkan untuk Ollama lokal)
-          <input id="api-key-input" type="password" spellcheck="false" autocomplete="off" placeholder="mis. sk-… untuk gateway LiteLLM/vLLM" />
-        </label>
-        <button id="save-settings" class="secondary" type="button">Simpan</button>
-        <p id="model-capability" class="hint">Default: Ollama/OpenAI-compatible endpoint di komputer lokal.</p>
-        <p id="model-selection-status" class="status model-selection-status" role="status" aria-live="polite"></p>
+
+        <div id="local-model-settings">
+          <label>
+            Pilih model yang terpasang di Ollama
+            <select id="installed-model-select">
+              <option value="">Memuat daftar model...</option>
+            </select>
+          </label>
+          <div class="button-row compact-row model-picker-actions">
+            <button id="use-model-general" class="secondary" type="button">Pakai untuk chat</button>
+            <button id="use-model-deck" class="secondary" type="button">Pakai untuk Studio</button>
+            <button id="refresh-models" class="secondary" type="button">Refresh</button>
+          </div>
+          <button id="use-tantular-both" class="secondary full-width-button" type="button">Gunakan Tantular Office untuk chat + semua Studio</button>
+          <button id="test-selected-model" class="secondary full-width-button" type="button">Tes model terpilih</button>
+          <label>
+            Endpoint
+            <input id="endpoint-input" type="text" spellcheck="false" />
+          </label>
+          <label>
+            Model umum / chat
+            <input id="model-input" type="text" spellcheck="false" />
+          </label>
+          <label>
+            Model Studio: deck / DOCX / XLSX (9B+)
+            <input id="deck-model-input" type="text" spellcheck="false" placeholder="tantular-office:0.5-9b" />
+          </label>
+          <label>
+            Model vision (untuk Extract from image)
+            <input id="vision-model-input" type="text" spellcheck="false" placeholder="mis. llama3.2-vision / qwen2.5vl:7b" />
+          </label>
+          <label>
+            API key (kosongkan untuk Ollama lokal)
+            <input id="api-key-input" type="password" spellcheck="false" autocomplete="off" placeholder="mis. sk-… untuk gateway LiteLLM/vLLM" />
+          </label>
+          <button id="save-settings" class="secondary" type="button">Simpan</button>
+          <p id="model-capability" class="hint">Default: Ollama/OpenAI-compatible endpoint di komputer lokal.</p>
+          <p id="model-selection-status" class="status model-selection-status" role="status" aria-live="polite"></p>
+        </div>
       </div>
     </section>
 
@@ -383,6 +451,17 @@
     </section>
   </main>
 
-  <script type="module" src="./taskpane.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "@azure/msal-common/browser": "./vendor/msal-common-browser/index-browser.mjs"
+    }
+  }
+  </script>
+
+  <!-- entry=host10 is an intentional top-level cache generation. Even when a
+       long-running dev server still has its previous module-cache token, this
+       URL has never existed in Office's WebView cache. -->
+  <script type="module" src="./taskpane.js?entry=host10"></script>
 </body>
 </html>

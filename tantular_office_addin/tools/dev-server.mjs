@@ -10,14 +10,35 @@ import {
   parseOllamaResponse
 } from "../src/chat/ollamaBridge.js";
 import {
-  lookupEnabled, allowedHosts, prepareLookup, authorizeExecution,
-  auditRecord, wrapUntrusted, resolveUrl, auditKey
+  lookupEnabled, allowedHosts, describedHosts, prepareLookup, authorizeExecution,
+  auditRecord, wrapUntrusted, resolveUrl, auditKey,
+  discoveryAlphaEnabled, configuredSearchProvider
 } from "../src/chat/lookupPolicy.js";
 import { answerWithLookup } from "../src/chat/lookupAnswer.js";
+import { discoverAndRetrieve, sourcesAsUntrusted } from "../src/chat/discovery.js";
+import {
+  buildRefinePrompt,
+  deterministicRefineResult,
+  refineResult
+} from "../src/chat/lookupRefine.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const LOOKUP_MODEL = process.env.TANTULAR_LOOKUP_MODEL || "tantular-office:0.5-9b";
+
+// Opt-in, local-only diagnosis. The verifier's findings deliberately never
+// quote hostile literals, which also means a false positive on a REAL page
+// cannot be diagnosed. TANTULAR_LOOKUP_DEBUG=true (the acceptance companion,
+// never the default one) appends the matched literal and the blocked answer
+// to a local file. Same policy as plaintext audit: debugging is explicit.
+if (process.env.TANTULAR_LOOKUP_DEBUG === "true") {
+  const debugPath = path.join(process.env.HOME || ".", ".tantular-lookup-debug.log");
+  globalThis.__lookupDebug = (line) => {
+    try { fs.appendFileSync(debugPath, `${new Date().toISOString()} ${line}\n`); }
+    catch { /* diagnosis must never break the request */ }
+  };
+  console.log(`[debug] lookup diagnosis on: ${debugPath}`);
+}
 
 async function completeLocally(prompt) {
   const response = await fetch("http://127.0.0.1:11434/api/chat", {
@@ -208,13 +229,79 @@ function handler(req, res) {
   // Enforced in the companion rather than the pane. A pane-side check protects
   // nothing: a bug or a later code path could call fetch directly. Here there
   // is one door, and it is shut unless TANTULAR_LOOKUP_ENABLED=true.
+  // Query refinement: the local model proposes candidate queries from the
+  // user's intent and document. NO EGRESS HAPPENS HERE — the only fetch is to
+  // the local model, and the output is suggestions the pane displays. It is
+  // still gated by the lookup flag: with lookup off this feature has no
+  // purpose, and an always-on model endpoint would be surface for nothing.
+  if (url.pathname === "/api/lookup/refine") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json", ...corsHeaders(req) });
+      res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+      return;
+    }
+    readJsonBody(req, async (bodyError, body) => {
+      const reply = (status, payload) => {
+        res.writeHead(status, { "Content-Type": "application/json; charset=utf-8",
+                                ...corsHeaders(req), "Cache-Control": "no-store" });
+        res.end(JSON.stringify(payload));
+      };
+      if (bodyError) return reply(400, { ok: false, error: bodyError.message });
+      if (!lookupEnabled()) {
+        return reply(403, { ok: false, reason: "disabled",
+                            message: "Pencarian web dimatikan." });
+      }
+      const intent = String(body?.intent || "").trim();
+      if (!intent) {
+        return reply(400, { ok: false, reason: "empty_intent",
+                            message: "Tulis dulu maksud pencarian Anda." });
+      }
+      const document = String(body?.document || "");
+
+      // Fast, bounded default. A 9B cold start is inappropriate for turning a
+      // sentence into three search-query variants, and previously left the
+      // pane waiting indefinitely. Model refinement remains an explicit
+      // experiment only; normal users get deterministic local suggestions.
+      if (String(process.env.TANTULAR_LOOKUP_REFINE_MODEL || "").toLowerCase() !== "true") {
+        return reply(200, {
+          ...deterministicRefineResult(intent, document),
+          mode: "deterministic"
+        });
+      }
+      try {
+        const raw = await completeLocally(buildRefinePrompt({
+          intent, document }));
+        const result = refineResult(raw, document);
+        if (!result.ok) {
+          return reply(200, {
+            ...deterministicRefineResult(intent, document),
+            mode: "deterministic_fallback"
+          });
+        }
+        return reply(200, { ...result, mode: "model" });
+      } catch (error) {
+        return reply(200, {
+          ...deterministicRefineResult(intent, document),
+          mode: "deterministic_fallback"
+        });
+      }
+    });
+    return;
+  }
+
   // Read-only: lets the pane hide the toggle entirely when the feature is off,
   // rather than offering a control that always refuses. No side effects and no
   // token, so it cannot be a step toward egress.
   if (url.pathname === "/api/lookup/status") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8",
                          ...corsHeaders(req), "Cache-Control": "no-store" });
-    res.end(JSON.stringify({ enabled: lookupEnabled(), hosts: allowedHosts() }));
+    res.end(JSON.stringify({ enabled: lookupEnabled(), hosts: allowedHosts(),
+                             described: describedHosts(),
+                             discovery: {
+                               enabled: discoveryAlphaEnabled(),
+                               provider: configuredSearchProvider(),
+                               policy: "default-deny-official-and-trusted-reference"
+                             } }));
     return;
   }
 
@@ -236,10 +323,12 @@ function handler(req, res) {
 
       if (url.pathname === "/api/lookup/prepare") {
         const prepared = prepareLookup({ query: body?.query, host: body?.host,
+                                         provider: body?.provider,
                                          document: body?.document });
         if (!prepared.ok) {
           appendLookupAudit(auditRecord({ key: lookupAuditKey,
             query: String(body?.query || ""), host: String(body?.host || ""),
+            provider: String(body?.provider || "") || null,
             approved: false, outcome: `refused:${prepared.reason}`
           }));
           return reply(403, prepared);
@@ -255,14 +344,68 @@ function handler(req, res) {
 
       const authorized = authorizeExecution({
         pending: pendingLookups, token: body?.token,
-        query: body?.query, host: body?.host, document: body?.document
+        query: body?.query, host: body?.host, provider: body?.provider,
+        document: body?.document
       });
       if (!authorized.ok) {
         appendLookupAudit(auditRecord({ key: lookupAuditKey,
           query: String(body?.query || ""), host: String(body?.host || ""),
+          provider: String(body?.provider || "") || null,
           approved: false, outcome: `refused:${authorized.reason}`
         }));
         return reply(403, authorized);
+      }
+
+      if (authorized.entry.provider) {
+        const provider = authorized.entry.provider;
+        const query = authorized.entry.query;
+        const auditDiscovery = (event) => appendLookupAudit(auditRecord({
+          key: lookupAuditKey,
+          query,
+          provider,
+          host: event.domain || null,
+          approved: true,
+          outcome: event.outcome || "discovery",
+          reason: event.reason || null,
+          requestedUrl: event.requestedUrl || null,
+          finalUrl: event.finalUrl || null,
+          domainTier: event.domainTier || null,
+          policyReason: event.policyReason || null,
+          contentHash: event.contentHash || null,
+          responseBytes: event.bytes ?? null,
+          status: event.status ?? null,
+          stage: event.stage || null
+        }));
+        const discovered = await discoverAndRetrieve({
+          query,
+          providerId: provider,
+          audit: auditDiscovery
+        });
+        if (!discovered.ok) {
+          return reply(502, {
+            ok: false,
+            reason: discovered.reason,
+            message: discovered.reason === "provider_error"
+              ? "Provider pencarian alpha tidak dapat dihubungi."
+              : "Tidak ada sumber resmi/tepercaya yang dapat diambil."
+          });
+        }
+        const composed = await answerWithLookup({
+          document: String(body?.document || ""),
+          question: query,
+          untrusted: sourcesAsUntrusted(discovered.sources),
+          sources: discovered.sources,
+          complete: (prompt) => completeLocally(prompt)
+        });
+        appendLookupAudit(auditRecord({
+          key: lookupAuditKey, query, provider, approved: true,
+          outcome: composed.ok ? "verified" : `blocked_by_verifier:${composed.reason}`,
+          stage: "verify"
+        }));
+        if (!composed.ok) {
+          return reply(200, { ...composed, provider });
+        }
+        return reply(200, { ...composed, provider });
       }
 
       const target = resolveUrl(authorized.entry.host, authorized.entry.query);
@@ -319,6 +462,11 @@ function handler(req, res) {
           approved: true,
           outcome: composed.ok ? "verified" : `blocked_by_verifier:${composed.reason}`
         }));
+        if (!composed.ok && process.env.TANTULAR_LOOKUP_DEBUG === "true") {
+          globalThis.__lookupDebug?.(`blocked reason=${composed.reason} `
+            + `findings=${JSON.stringify(composed.findings)} `
+            + `answer=${JSON.stringify(String(composed.answerForDebug || ""))}`);
+        }
         if (!composed.ok) {
           // 200, not an error status: the lookup ran correctly and the answer
           // was refused. The pane must render this as "not trusted", which is

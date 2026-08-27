@@ -35,6 +35,74 @@ export function isPaneBlocker(result) {
   return !String(result.name).includes("(opsional)");
 }
 
+// Read only the task-pane navigation URLs that Office can actually use. This
+// deliberately ignores icon/support URLs: a missing icon is ugly, but a stale
+// SourceLocation makes the whole pane look dead.
+export function taskpaneUrlsFromManifest(xml) {
+  const text = String(xml || "");
+  const urls = [];
+  const patterns = [
+    /<SourceLocation\b[^>]*\bDefaultValue="([^"]+)"/gi,
+    /<bt:Url\b[^>]*\bid="Taskpane\.Url\.[^"]+"[^>]*\bDefaultValue="([^"]+)"/gi
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const decoded = match[1]
+        .replaceAll("&amp;", "&")
+        .replaceAll("&quot;", '"')
+        .replaceAll("&#39;", "'");
+      if (!urls.includes(decoded)) urls.push(decoded);
+    }
+  }
+  return urls;
+}
+
+// Pure inspection seam for unit tests. The most common deceptive state is a
+// valid sideload file that still points at yesterday's temporary port. Office
+// then says it cannot load the add-in, while the old doctor reported the
+// manifest as healthy merely because the XML file existed.
+export function inspectSideloadManifest(xml, { expectedPort = 3000 } = {}) {
+  const urls = taskpaneUrlsFromManifest(xml);
+  if (!urls.length) {
+    return { ok: false, urls, detail: "tidak memiliki URL SourceLocation task pane" };
+  }
+
+  const invalid = [];
+  const wrongPorts = [];
+  for (const value of urls) {
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      invalid.push(value);
+      continue;
+    }
+    const isLocal = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+    if (!isLocal) continue; // hosted production/workshop pane is legitimate
+    const actualPort = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+    if (actualPort !== Number(expectedPort)) {
+      wrongPorts.push(`${url.hostname}:${actualPort}`);
+    }
+  }
+
+  if (invalid.length) {
+    return {
+      ok: false,
+      urls,
+      detail: `URL task pane tidak valid: ${invalid.join(", ")}`
+    };
+  }
+  if (wrongPorts.length) {
+    return {
+      ok: false,
+      urls,
+      detail: `menunjuk ke ${[...new Set(wrongPorts)].join(", ")}, `
+        + `tetapi Companion memakai port ${expectedPort}`
+    };
+  }
+  return { ok: true, urls, detail: urls.join(", ") };
+}
+
 const results = [];
 function record(ok, name, detail, fix) {
   results.push({ ok, name, detail, fix });
@@ -204,10 +272,17 @@ async function checkOllama() {
 function checkSideload() {
   const apps = { Word: "com.microsoft.Word", Excel: "com.microsoft.Excel",
                  PowerPoint: "com.microsoft.Powerpoint" };
-  const found = Object.entries(apps).filter(([, bundle]) =>
-    ["manifest.xml", "tantular-workshop-manifest.xml"].some((name) =>
-      fs.existsSync(path.join(home, "Library", "Containers", bundle,
-                              "Data", "Documents", "wef", name))));
+  const found = [];
+  for (const [app, bundle] of Object.entries(apps)) {
+    for (const name of ["manifest.xml", "tantular-workshop-manifest.xml"]) {
+      const manifestPath = path.join(home, "Library", "Containers", bundle,
+        "Data", "Documents", "wef", name);
+      if (fs.existsSync(manifestPath)) {
+        found.push({ app, name, manifestPath });
+        break;
+      }
+    }
+  }
   if (!found.length) {
     const workshopInstaller = fs.existsSync(path.join(root, "install-tantular-workshop.command"))
       || fs.existsSync(path.join(root, "install-tantular-workshop.bat"));
@@ -216,7 +291,27 @@ function checkSideload() {
         ? "jalankan ulang installer workshop, lalu pilih pemasangan manifest lokal"
         : "npm run sideload:word   (atau :excel / :powerpoint)");
   }
-  record(true, "Manifest tersideload", found.map(([name]) => name).join(", "));
+
+  const expectedPort = Number(process.env.PORT || 3000);
+  const inspected = found.map(({ app, manifestPath }) => {
+    try {
+      return {
+        app,
+        ...inspectSideloadManifest(fs.readFileSync(manifestPath, "utf8"), { expectedPort })
+      };
+    } catch (error) {
+      return { app, ok: false, detail: `tidak dapat dibaca: ${error.message}`, urls: [] };
+    }
+  });
+  const broken = inspected.filter((item) => !item.ok);
+  if (broken.length) {
+    return record(false, "Manifest tersideload",
+      broken.map((item) => `${item.app}: ${item.detail}`).join("; "),
+      "jalankan npm run sideload:word / :excel / :powerpoint untuk host yang salah, "
+        + "lalu npm start");
+  }
+  record(true, "Manifest tersideload",
+    inspected.map((item) => `${item.app}: ${item.urls[0]}`).join("; "));
 }
 
 const heading = (text) => `\n${text}\n${"-".repeat(text.length)}`;

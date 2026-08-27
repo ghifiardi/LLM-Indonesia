@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const baseUrl = valueFor("--base-url").replace(/\/+$/, "");
+const release = valueFor("--release", "20260825-1");
 const output = path.resolve(valueFor("--out", path.join(root, "dist", "workshop-package", "tantular-workshop-manifest.xml")));
 
 if (!/^https:\/\/[^/]+/i.test(baseUrl)) {
@@ -13,7 +14,7 @@ if (!/^https:\/\/[^/]+/i.test(baseUrl)) {
 
 let xml = fs.readFileSync(path.join(root, "manifest.xml"), "utf8");
 xml = xml
-  .replace("<Version>0.9.0.0</Version>", "<Version>1.0.0.0</Version>")
+  .replace("<Version>0.9.0.0</Version>", "<Version>1.0.0.1</Version>")
   .replaceAll("https://localhost:3000/assets/", `${baseUrl}/assets/`)
   // Extensionless, not /src/taskpane.html: the production host serves this
   // behind Vercel's cleanUrls, which 308-redirects .html to the bare path.
@@ -27,7 +28,28 @@ xml = xml
   .replace('https://localhost:3000/docs/MVP_PLAN.md', `${baseUrl}/support.html`)
   .replace(
     `<AppDomain>https://localhost:3000</AppDomain>`,
-    `<AppDomain>${baseUrl}</AppDomain>\n    <AppDomain>https://localhost:3000</AppDomain>`
+    `<AppDomain>${baseUrl}</AppDomain>`
+  );
+
+// Office desktop WebViews can preserve a previously loaded task-pane
+// navigation even when the server returns Cache-Control: no-store.
+// Version the navigation URL so every production release is unambiguous.
+xml = xml
+  .replaceAll(
+    `${baseUrl}/src/taskpane?host=Word`,
+    `${baseUrl}/src/taskpane?host=Word&amp;v=${release}`
+  )
+  .replaceAll(
+    `${baseUrl}/src/taskpane?host=Excel`,
+    `${baseUrl}/src/taskpane?host=Excel&amp;v=${release}`
+  )
+  .replaceAll(
+    `${baseUrl}/src/taskpane?host=PowerPoint`,
+    `${baseUrl}/src/taskpane?host=PowerPoint&amp;v=${release}`
+  )
+  .replace(
+    `<SourceLocation DefaultValue="${baseUrl}/src/taskpane" />`,
+    `<SourceLocation DefaultValue="${baseUrl}/src/taskpane?v=${release}" />`
   );
 
 fs.mkdirSync(path.dirname(output), { recursive: true });

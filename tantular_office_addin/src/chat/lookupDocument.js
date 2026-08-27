@@ -21,6 +21,20 @@
 
 export const MAX_DOCUMENT_CHARS = 200_000;
 
+// Which host to read. Office.onReady can deliver an EMPTY host on a pane
+// reload (seen in real Excel, 2026-08-25: the cached snapshot stayed "Office"
+// and every lookup died with unsupported_host). By the time the user clicks,
+// Office.context is populated — so a stale snapshot is re-detected rather
+// than trusted.
+const LOOKUP_HOSTS = ["Word", "Excel", "PowerPoint"];
+
+export function resolveLookupHost(cachedHost, redetect) {
+  const cached = String(cachedHost || "").trim();
+  if (LOOKUP_HOSTS.includes(cached)) return cached;
+  const detected = typeof redetect === "function" ? String(redetect() || "").trim() : "";
+  return LOOKUP_HOSTS.includes(detected) ? detected : cached;
+}
+
 function truncate(text) {
   const value = String(text || "");
   // Truncation changes the hash and the protected strings, so it is reported
