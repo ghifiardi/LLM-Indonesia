@@ -1490,7 +1490,11 @@ def test_audit_module_does_not_import_promotion_code() -> None:
     assert "from .promote" not in source
     assert "import promote" not in source
     auditor = (here / "auditor_worker.py").read_text(encoding="utf-8")
-    assert "promote" not in auditor
+    # Call and import syntax, not the bare name: these modules discuss
+    # promotion in their docstrings, and matching prose tests the
+    # documentation rather than the code.
+    assert "from .promote" not in auditor
+    assert "promote(" not in auditor
 
 
 def test_auditor_refuses_a_policy_that_does_not_match_its_artifact_hash() -> None:
@@ -2223,15 +2227,19 @@ def test_environments_without_a_holdout_mark_vetoes_inapplicable_not_passed_blin
 
 
 def test_gate_module_does_not_import_or_trigger_promotion() -> None:
-    source = (Path(__file__).resolve().parent / "gate.py").read_text(encoding="utf-8")
+    here = Path(__file__).resolve().parent
+    source = (here / "gate.py").read_text(encoding="utf-8")
     assert "from .promote" not in source
     assert "import promote" not in source
-    assert "write_champion" not in source
-    # No scheduler or automatic path anywhere in the package.
-    for name in ("gate.py", "reflect.py", "audit.py"):
-        body = (Path(__file__).resolve().parent / name).read_text(encoding="utf-8")
-        assert "auto_promote" not in body
-        assert "automatic" not in body.lower().replace("automatic promotion", "")
+    assert "write_champion(" not in source
+    # No automatic promotion path anywhere. Checked as call and import syntax:
+    # the previous form searched for the bare word "automatic" after stripping
+    # one phrase, which passed by luck rather than by testing anything.
+    for name in ("gate.py", "reflect.py", "audit.py", "canary.py", "budget.py"):
+        body = (here / name).read_text(encoding="utf-8")
+        assert "auto_promote" not in body, name
+        assert "from .promote import promote" not in body, name
+        assert "write_champion(" not in body, name
 
 
 def test_gate_evaluation_alone_never_moves_the_champion() -> None:
@@ -2706,7 +2714,7 @@ def test_serve_cannot_write_to_the_database_or_reach_a_mutation_api() -> None:
         "from .budget", "from .audit", "from .freeze",
     ):
         assert forbidden not in source, forbidden
-    assert "write_champion" not in source
+    assert "write_champion(" not in source
     assert "ResidentStore.open_readonly" in source
 
 
@@ -2867,7 +2875,10 @@ def test_socket_rejects_oversized_and_malformed_frames() -> None:
                     client.connect(str(path))
                     try:
                         client.sendall(payload)
-                    except (BrokenPipeError, ConnectionResetError):
+                    except OSError:
+                        # BrokenPipeError, ConnectionResetError and bare EPIPE
+                        # all mean the same thing here: the server stopped
+                        # reading rather than draining an oversized frame.
                         return {"ok": False, "error": "refused mid-send"}
                     chunks = []
                     while True:
@@ -2884,9 +2895,12 @@ def test_socket_rejects_oversized_and_malformed_frames() -> None:
             assert raw(b"not json at all\n")["ok"] is False
             assert raw(json.dumps({"query": ""}).encode() + b"\n")["ok"] is False
             oversized = json.dumps({"query": "x" * 60000}).encode() + b"\n"
-            assert raw(oversized)["ok"] is False
+            # One call, reused: sending 60KB the server refuses mid-stream is
+            # racy by nature, and doing it twice doubled the exposure.
+            refusal = raw(oversized)
+            assert refusal["ok"] is False
             # A rejection must not echo the offending input back.
-            assert "x" * 100 not in json.dumps(raw(oversized))
+            assert "x" * 100 not in json.dumps(refusal)
         finally:
             stop.set()
             thread.join(timeout=15)
