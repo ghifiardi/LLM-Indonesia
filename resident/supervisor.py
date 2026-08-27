@@ -44,6 +44,7 @@ from typing import Any
 from . import canary as canary_module
 from . import freeze as freeze_module
 from .anchors import (
+    ANCHORS_DIR_ENV_VAR,
     ThresholdError,
     ThresholdIdentity,
     load_all_anchors,
@@ -454,9 +455,21 @@ class Supervisor:
             "--state-dir", str(self.state_dir),
             *command,
         ]
-        if self.anchors_dir and command[0] in ("reflect-once", "audit", "serve"):
+        if self.anchors_dir and command[0] == "audit":
             argv.extend(["--anchors-dir", str(self.anchors_dir)])
         return argv
+
+    def _child_environment(self) -> dict[str, str]:
+        """Minimal trusted-child environment, plus the chosen anchor source."""
+
+        environment = _minimal_environment()
+        if self.anchors_dir:
+            # reflect-once has no --anchors-dir flag; its budget guard resolves
+            # the same human-owned anchors through the documented environment
+            # variable. Candidate workers still receive the stricter minimal
+            # environment from their own runner.
+            environment[ANCHORS_DIR_ENV_VAR] = str(self.anchors_dir)
+        return environment
 
     def _contain(
         self,
@@ -526,7 +539,7 @@ class Supervisor:
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=str(self.state_dir),
-                env=_minimal_environment(),
+                env=self._child_environment(),
                 close_fds=True,
                 start_new_session=True,
             )

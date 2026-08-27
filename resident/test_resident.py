@@ -3867,7 +3867,11 @@ def test_supervisor_children_can_import_the_package() -> None:
         assert outcome["returncode"] == 0
         assert outcome["stderr_bytes"] == 0
 
-        # And a real one-shot clock command, not just a read.
+        # And both real one-shot clock commands, not just a read. Reflection
+        # used to receive an argparse flag it does not support, so this exact
+        # public child path returned 2 while mocked clock tests stayed green.
+        reflection = supervisor._spawn("reflect-once")
+        assert reflection["ok"] is True, reflection
         audit = supervisor._spawn("audit", "--all-unaudited")
         assert audit["ok"] is True, audit
 
@@ -4358,6 +4362,8 @@ def test_the_supervisor_starts_serve_through_its_own_entry_point() -> None:
         # Other children still go through the CLI.
         reflect_argv = supervisor._child_argv("reflect-once")
         assert "godel_agent_prototype.resident" in reflect_argv
+        assert "--anchors-dir" not in reflect_argv
+        assert supervisor._child_environment()["GODEL_RESIDENT_ANCHORS_DIR"] == str(anchors)
 
 
 def test_the_package_barrel_is_lazy() -> None:

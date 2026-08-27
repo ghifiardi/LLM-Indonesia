@@ -131,7 +131,10 @@ Only two processes are long-lived: the supervisor and `serve`. Reflection and
 auditing are **one-shot children**, so nothing capable of proposing a
 self-modification stays resident between cycles — that keeps self-modification
 off the serving path by construction rather than by care, and a child that
-cannot even start is recorded rather than killing the supervisor.
+cannot even start is recorded rather than killing the supervisor. Trusted
+one-shot children receive the selected human-owned anchor directory through the
+documented environment variable; candidate workers still receive their stricter
+credential-free environment.
 
 Ownership is real but bounded. While a supervisor holds the advisory `flock` on
 a state directory, pointer-changing CLI commands delegate to it over a
