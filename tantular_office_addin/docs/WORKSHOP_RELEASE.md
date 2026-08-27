@@ -1,6 +1,34 @@
 # Workshop release — build order and the one-behind build id
 
-## Build order is not interchangeable
+## Use the release command
+
+```bash
+npm run release:workshop -- --base-url https://office.tantular.ai            # build + smoke check
+npm run release:workshop -- --base-url https://office.tantular.ai --deploy   # ...and publish
+```
+
+It owns the order, refuses a dirty tree (so the artifact names a commit), and
+fails if any file the support page links to is missing or zero-length.
+
+On 2026-08-27 `/support` served a 200 while every download link on it returned
+404: the web build ran, the package build did not follow, and the empty output
+was deployed. `downloads/` is gitignored by design, so git had nothing to
+report and the site looked healthy until someone clicked a button. The smoke
+check exists to make that failure impossible to deploy.
+
+To release without disturbing in-flight work, build from a clean worktree:
+
+```bash
+git worktree add --detach /tmp/rel <commit>
+cd /tmp/rel/tantular_office_addin
+npm run release:workshop -- --base-url https://office.tantular.ai
+cp -R <old-dist>/.vercel dist/workshop-web/.vercel   # same project
+cd dist/workshop-web && vercel deploy --prod --yes
+```
+
+Always verify the **live URLs** afterwards, not the local files.
+
+## The underlying order, if you run the builds by hand
 
 ```bash
 node tools/build-workshop-web.mjs     --base-url https://office.tantular.ai
