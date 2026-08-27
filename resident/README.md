@@ -30,9 +30,69 @@ python3 -m godel_agent_prototype.resident audit --all-unaudited [--limit N]
 python3 -m godel_agent_prototype.resident canary set <id> --percent 10 --reason "..."
 python3 -m godel_agent_prototype.resident canary status
 python3 -m godel_agent_prototype.resident canary clear --reason "..."
+python3 -m godel_agent_prototype.resident readiness drill [--only NAME]
+python3 -m godel_agent_prototype.resident readiness report
+python3 -m godel_agent_prototype.resident readiness label <request-id> --false-veto
+python3 -m godel_agent_prototype.resident readiness reproduce <request-id>
 ```
 
 Exit code `3` means an action was blocked by a freeze.
+
+## Readiness evidence
+
+Phase 5A. The evidence package that must be recorded as passing before limited
+automatic promotion is *designed*. It contains no promotion logic, and nothing
+reads its output to authorise anything.
+
+Two kinds of evidence, never presented as each other:
+
+| | **drills** | **observations** |
+|---|---|---|
+| what | deliberately induced | passively accumulated |
+| proves | the mechanism works on this build and machine | the deployment actually behaved |
+| where | isolated state directories | production |
+
+A report that only drilled says "the code works". One that only observed says
+"nothing broke, that we noticed".
+
+### Three outcomes, never two
+
+`PASS`, `FAIL`, and `INSUFFICIENT_EVIDENCE`. A short window, a missing drill, an
+under-sampled veto rate and an event that never happened naturally are all
+*absence of evidence* — neither a demonstration nor a defect. Collapsing them
+into either is what turns a readiness review into a formality. Overall: any
+FAIL is FAIL, all PASS is PASS, otherwise INSUFFICIENT.
+
+### The qualifying window
+
+`min_duration_hours` measures **continuous operation under one unchanged anchor
+and dataset identity, with frozen spans excluded** — not elapsed time since the
+first event. A system that ran a week, was reconfigured on day three and spent
+day five frozen has not observed a week of anything. Anchor changes, dataset
+changes, freezes and schema migrations all segment the window; the report shows
+the contributing segments and uses the longest.
+
+### The false-veto rate
+
+A veto discards the output, so there is nothing retained to review. The rate is
+therefore human-entered, over a sample reproduced on demand: `readiness
+reproduce` re-runs the stored artifact against the stored query in the isolated
+runner, and `readiness label` records the judgement. Labels are immutable and
+scoped to the exact artifact and veto observed — a label for a different
+artifact is invalidated rather than counted. Below `min_labelled_vetoes` the
+report states no rate at all.
+
+### What a drill is worth
+
+A drill proves the mechanism on this build, machine and anchor set. It does not
+prove production used it. For supervisor restart and canary auto-revert the
+report requires *production observations*, and marks them INSUFFICIENT_EVIDENCE
+when none occurred naturally — deliberately breaking production to certify it
+would prove something about a broken system.
+
+Worth knowing when reading a wall of green drills: the catalogue is itself code
+that can be wrong. Two of the eight were wrong on their first run, for their own
+reasons rather than the system's.
 
 ## The supervisor and the three clocks
 

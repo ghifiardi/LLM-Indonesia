@@ -34,6 +34,7 @@ from . import canary as canary_module
 from .gate import GateError, evaluate_gate
 from .rollback import RollbackError, assess_ancestors, rollback
 from . import serve as serve_module
+from . import readiness as readiness_module
 from . import spool as spool_module
 from . import supervisor as supervisor_module
 from .audit import (
@@ -63,8 +64,10 @@ from .reflect import (
     resolve_environment_spec,
     reflect_once,
 )
+from .runner import SubprocessCandidateRunner
 from .store import (
     CONFIG_DATASET_IDENTITY,
+    new_id,
     CONFIG_ENVIRONMENT,
     EnvironmentMismatchError,
     ResidentError,
@@ -306,6 +309,40 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not start or own a serve child; drive the clocks only.",
     )
+
+    readiness_parser = subparsers.add_parser(
+        "readiness",
+        help="Evidence for a human decision. Advisory; nothing reads it to authorise anything.",
+    )
+    readiness_sub = readiness_parser.add_subparsers(dest="readiness_command", required=True)
+
+    drill_parser = readiness_sub.add_parser(
+        "drill", help="Run drills in isolated state directories."
+    )
+    drill_parser.add_argument("--only", action="append", default=None, dest="only")
+    drill_parser.add_argument("--anchors-dir", default=None)
+
+    report_parser = readiness_sub.add_parser("report", help="Render the readiness report.")
+    report_parser.add_argument("--anchors-dir", default=None)
+    report_parser.add_argument(
+        "--no-record", action="store_true", help="Render without storing the report."
+    )
+
+    label_parser = readiness_sub.add_parser(
+        "label", help="Record a human judgement on one suppressed answer."
+    )
+    label_parser.add_argument("request_id")
+    group = label_parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--false-veto", action="store_true", dest="false_veto")
+    group.add_argument("--true-veto", action="store_true", dest="true_veto")
+    label_parser.add_argument("--actor", default="")
+    label_parser.add_argument("--note", default="")
+
+    reproduce_parser = readiness_sub.add_parser(
+        "reproduce",
+        help="Re-run the served artifact against the stored query, in the isolated runner.",
+    )
+    reproduce_parser.add_argument("request_id")
 
     return parser
 
@@ -1081,6 +1118,116 @@ def _cmd_ingest(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
     return EXIT_OK
 
 
+def _cmd_readiness(store: ResidentStore, args: argparse.Namespace, emit: Any) -> int:
+    if args.readiness_command == "drill":
+        try:
+            runs = readiness_module.run_drills(
+                store, resolve_anchors_dir(args.anchors_dir), only=args.only
+            )
+        except (ValueError, ResidentError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        lines = [f"ran {len(runs)} drill(s) in isolated state directories"]
+        for run in runs:
+            lines.append(f"  [{run.result.outcome:>19}]  {run.result.name}")
+            if run.result.detail:
+                lines.append(f"                         {run.result.detail[:80]}")
+        lines.append("")
+        lines.append("A drill proves the mechanism works here. It does not prove")
+        lines.append("production used it — that is what the observations are for.")
+        emit({"drills": [run.to_dict() for run in runs]}, lines)
+        return EXIT_OK if all(r.result.outcome == readiness_module.PASS for r in runs) else EXIT_ERROR
+
+    if args.readiness_command == "report":
+        report = readiness_module.generate(
+            store, anchors_dir=args.anchors_dir, record=not args.no_record
+        )
+        emit(report.to_dict(), readiness_module.render(report).splitlines())
+        return EXIT_OK if report.verdict == readiness_module.PASS else EXIT_ERROR
+
+    if args.readiness_command == "label":
+        rows = [
+            row for row in store.list_serving_vetoes()
+            if row.get("request_id") == args.request_id
+        ]
+        if not rows:
+            print(f"error: no veto observation for request {args.request_id!r}",
+                  file=sys.stderr)
+            return EXIT_ERROR
+        row = rows[0]
+        inserted = store.insert_veto_label(
+            {
+                "label_id": new_id(),
+                "request_id": args.request_id,
+                # Scoped to what was actually served: a judgement about one
+                # artifact's output says nothing about a different one.
+                "artifact_hash": row["artifact_hash"],
+                "veto": row["veto"],
+                "label": "false_veto" if args.false_veto else "true_veto",
+                "actor": args.actor,
+                "note": args.note,
+            }
+        )
+        if not inserted:
+            print("error: this request is already labelled; labels are immutable",
+                  file=sys.stderr)
+            return EXIT_ERROR
+        emit(
+            {"request_id": args.request_id, "label": "false_veto" if args.false_veto else "true_veto"},
+            [f"labelled {args.request_id} as "
+             + ("a false veto" if args.false_veto else "a true veto")],
+        )
+        return EXIT_OK
+
+    # reproduce
+    requests = [
+        row for row in store.list_served_requests() if row["request_id"] == args.request_id
+    ]
+    if not requests:
+        print(f"error: no served request {args.request_id!r}", file=sys.stderr)
+        return EXIT_ERROR
+    request = requests[0]
+    experiences = [
+        experience for experience in store.list_experiences()
+        if experience.experience_id == args.request_id
+    ]
+    if not experiences:
+        print("error: the query for that request was not retained", file=sys.stderr)
+        return EXIT_ERROR
+
+    vetoes = [row for row in store.list_serving_vetoes()
+              if row.get("request_id") == args.request_id]
+    artifact_hash = vetoes[0]["artifact_hash"] if vetoes else request["served_artifact_hash"]
+    if not artifact_hash:
+        print("error: no artifact is associated with that request", file=sys.stderr)
+        return EXIT_ERROR
+
+    from ..dataset_env import DEFAULT_KB
+
+    runner = SubprocessCandidateRunner()
+    outcome = runner.execute_one(
+        policy_source=store.read_artifact(artifact_hash),
+        artifact_hash=artifact_hash,
+        query=experiences[0].query,
+        kb=DEFAULT_KB,
+    )
+    emit(
+        {"request_id": args.request_id, "artifact_hash": artifact_hash,
+         "output": outcome.output, "status": outcome.status},
+        [
+            f"reproduced {args.request_id} against artifact {artifact_hash[:12]}",
+            f"  query   {experiences[0].query[:100]}",
+            f"  status  {outcome.status or 'ok'}",
+            "",
+            outcome.output or "(no output)",
+            "",
+            "Reproduced in the isolated runner, never on the serving path.",
+            "Nothing was retained: this is the artifact re-run on demand.",
+        ],
+    )
+    return EXIT_OK
+
+
 HANDLERS = {
     "init": _cmd_init,
     "record": _cmd_record,
@@ -1099,6 +1246,7 @@ HANDLERS = {
     "ingest": _cmd_ingest,
     "supervise": _cmd_supervise,
     "canary": _cmd_canary,
+    "readiness": _cmd_readiness,
 }
 
 

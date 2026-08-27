@@ -84,6 +84,7 @@ CONTROL_COMMANDS = frozenset(
 
 CLOCK_EVENT = "clock_fired"
 SERVE_EVENT = "serve_lifecycle"
+SUPERVISOR_EVENT = "supervisor_lifecycle"
 
 #: Restart backoff for the owned serve child: 1s doubling, capped. A serving
 #: process that cannot start should not be respawned in a tight loop.
@@ -750,6 +751,9 @@ class Supervisor:
                 os.chmod(socket_path, 0o600)
                 server.listen(8)
                 server.settimeout(self.poll_interval)
+                self.store.append_event(
+                    SUPERVISOR_EVENT, payload={"event": "started", "pid": os.getpid()}
+                )
                 if ready is not None:
                     ready.set()
                 ticks = 0
@@ -762,5 +766,8 @@ class Supervisor:
                         break
             finally:
                 self.stop_serve()
+                self.store.append_event(
+                    SUPERVISOR_EVENT, payload={"event": "stopped", "pid": os.getpid()}
+                )
                 server.close()
                 socket_path.unlink(missing_ok=True)

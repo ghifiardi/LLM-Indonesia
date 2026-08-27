@@ -171,6 +171,7 @@ def load_anchor_split(
 GATE_THRESHOLDS_FILENAME = "gate.toml"
 BUDGET_LIMITS_FILENAME = "budget.toml"
 SERVING_CONFIG_FILENAME = "serving.toml"
+READINESS_CONFIG_FILENAME = "readiness.toml"
 
 
 class ThresholdError(ValueError):
@@ -189,12 +190,14 @@ class ThresholdIdentity:
     budget_hash: str
     values: dict[str, Any]
     serving_hash: str = ""
+    readiness_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "gate_hash": self.gate_hash,
             "budget_hash": self.budget_hash,
             "serving_hash": self.serving_hash,
+            "readiness_hash": self.readiness_hash,
             "values": dict(self.values),
         }
 
@@ -204,6 +207,7 @@ class ThresholdIdentity:
             gate_hash=payload["gate_hash"],
             budget_hash=payload["budget_hash"],
             serving_hash=payload.get("serving_hash", ""),
+            readiness_hash=payload.get("readiness_hash", ""),
             values=dict(payload.get("values") or {}),
         )
 
@@ -214,6 +218,8 @@ class ThresholdIdentity:
             return "budget_hash"
         if self.serving_hash != other.serving_hash:
             return "serving_hash"
+        if self.readiness_hash != other.readiness_hash:
+            return "readiness_hash"
         if self.values != other.values:
             return "values"
         return None
@@ -277,6 +283,33 @@ class ServingConfig:
         }
 
 
+@dataclass(frozen=True)
+class ReadinessCriteria:
+    """What the resident must demonstrate before automatic promotion is designed.
+
+    Human-owned. The resident cannot edit its own graduation criteria.
+    """
+
+    min_duration_hours: int
+    min_served_requests: int
+    min_reflect_cycles: int
+    min_audits: int
+    min_labelled_vetoes: int
+    max_false_veto_rate: float
+    max_unexplained_freezes: int
+
+    def to_values(self) -> dict[str, Any]:
+        return {
+            "min_duration_hours": self.min_duration_hours,
+            "min_served_requests": self.min_served_requests,
+            "min_reflect_cycles": self.min_reflect_cycles,
+            "min_audits": self.min_audits,
+            "min_labelled_vetoes": self.min_labelled_vetoes,
+            "max_false_veto_rate": self.max_false_veto_rate,
+            "max_unexplained_freezes": self.max_unexplained_freezes,
+        }
+
+
 #: (key, type, low, high) for each threshold. Ranges are inclusive.
 _GATE_SPEC = (
     ("min_public_delta", float, 0.0, 1.0),
@@ -293,6 +326,16 @@ _CANARY_SPEC = (
     ("max_percent", int, 1, 50),
     ("breach_count", int, 1, 1000),
     ("observation_window_seconds", int, 30, 86400),
+)
+
+_READINESS_SPEC = (
+    ("min_duration_hours", int, 1, 8760),
+    ("min_served_requests", int, 1, 10_000_000),
+    ("min_reflect_cycles", int, 1, 100_000),
+    ("min_audits", int, 1, 10_000),
+    ("min_labelled_vetoes", int, 1, 10_000),
+    ("max_false_veto_rate", float, 0.0, 1.0),
+    ("max_unexplained_freezes", int, 0, 1000),
 )
 
 _BUDGET_SPEC = (
@@ -418,14 +461,23 @@ def load_thresholds(
 ) -> tuple[ThresholdIdentity, GateThresholds, BudgetLimits]:
     """Load and validate the gate and budget anchors. Raises ThresholdError."""
 
-    identity, gate, budget, _serving = load_all_anchors(anchors_dir)
+    identity, gate, budget, _serving, _readiness = load_every_anchor(anchors_dir)
     return identity, gate, budget
 
 
 def load_all_anchors(
     anchors_dir: Path,
 ) -> tuple[ThresholdIdentity, GateThresholds, BudgetLimits, ServingConfig]:
-    """Load and validate every anchor file, including serving guards."""
+    """Load and validate the operational anchors."""
+
+    identity, gate, budget, serving, _readiness = load_every_anchor(anchors_dir)
+    return identity, gate, budget, serving
+
+
+def load_every_anchor(
+    anchors_dir: Path,
+) -> tuple[ThresholdIdentity, GateThresholds, BudgetLimits, ServingConfig, ReadinessCriteria]:
+    """Load and validate every anchor file, readiness criteria included."""
 
     anchors_dir = Path(anchors_dir)
     gate_path = anchors_dir / GATE_THRESHOLDS_FILENAME
@@ -436,16 +488,30 @@ def load_all_anchors(
     gate_values = _coerce(gate_body, _GATE_SPEC, gate_path)
     budget_values = _coerce(budget_body, _BUDGET_SPEC, budget_path)
     serving_hash, serving = _load_serving(anchors_dir)
+    readiness_hash, readiness_body = _read_toml_section(
+        anchors_dir / READINESS_CONFIG_FILENAME, "observation"
+    )
+    readiness_values = _coerce(
+        readiness_body, _READINESS_SPEC, anchors_dir / READINESS_CONFIG_FILENAME
+    )
+    readiness = ReadinessCriteria(**readiness_values)
 
     identity = ThresholdIdentity(
         gate_hash=gate_hash,
         budget_hash=budget_hash,
         serving_hash=serving_hash,
-        values={**gate_values, **budget_values, **serving.to_values()},
+        readiness_hash=readiness_hash,
+        values={
+            **gate_values,
+            **budget_values,
+            **serving.to_values(),
+            **readiness.to_values(),
+        },
     )
     return (
         identity,
         GateThresholds(**gate_values),
         BudgetLimits(**budget_values),
         serving,
+        readiness,
     )

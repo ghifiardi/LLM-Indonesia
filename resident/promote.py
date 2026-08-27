@@ -54,6 +54,7 @@ from .anchors import resolve_anchors_dir
 from .runner import CandidateRunner, RunnerLimits
 from .store import (
     CONFIG_DATASET_IDENTITY,
+    IDENTITY_CHANGED_EVENT,
     CONFIG_ENVIRONMENT,
     CONFIG_THRESHOLD_IDENTITY,
     EnvironmentMismatchError,
@@ -384,6 +385,16 @@ def initialize(
     threshold_identity, _gate_thresholds, _budget_limits = load_thresholds(resolved_anchors)
     store.set_config(
         CONFIG_THRESHOLD_IDENTITY, json.dumps(threshold_identity.to_dict(), sort_keys=True)
+    )
+    # Recorded as an event, not only as config: a readiness window must break
+    # where the configuration it was observing changed.
+    store.append_event(
+        IDENTITY_CHANGED_EVENT,
+        payload={
+            "dataset_manifest": (identity.manifest_hash if identity is not None else None),
+            "threshold_gate_hash": threshold_identity.gate_hash,
+            "threshold_readiness_hash": threshold_identity.readiness_hash,
+        },
     )
     outcome = evaluate_policy_source(store, spec, code, runner=runner, limits=limits)
     if outcome.scores is None:

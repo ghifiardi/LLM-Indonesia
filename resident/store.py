@@ -52,6 +52,12 @@ STATE_DIR_ENV_VAR = "GODEL_RESIDENT_DIR"
 #: path is writable. Set ``--state-dir`` or ``$GODEL_RESIDENT_DIR`` otherwise.
 DEFAULT_STATE_DIR_NAME = ".resident"
 
+#: Emitted when an existing state directory is upgraded, and when the recorded
+#: identities change. Both break a readiness observation window: evidence
+#: gathered under one configuration says nothing about another.
+SCHEMA_MIGRATED_EVENT = "schema_migrated"
+IDENTITY_CHANGED_EVENT = "identity_changed"
+
 PROMOTION_INTENDED = "intended"
 PROMOTION_FINALIZED = "finalized"
 PROMOTION_ABANDONED = "abandoned"
@@ -323,6 +329,54 @@ _MIGRATION_9 = (
     "CREATE INDEX IF NOT EXISTS idx_vetoes_activation ON serving_vetoes(activation_id)",
 )
 
+_MIGRATION_10 = (
+    """
+    CREATE TABLE IF NOT EXISTS readiness_checks (
+        seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+        check_id      TEXT NOT NULL UNIQUE,
+        created_at    TEXT NOT NULL,
+        name          TEXT NOT NULL,
+        outcome       TEXT NOT NULL,
+        detail        TEXT NOT NULL DEFAULT '',
+        state_dir     TEXT NOT NULL DEFAULT '',
+        is_drill      INTEGER NOT NULL DEFAULT 1,
+        evidence_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_readiness_name ON readiness_checks(name)",
+    """
+    CREATE TABLE IF NOT EXISTS readiness_reports (
+        seq                     INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_id               TEXT NOT NULL UNIQUE,
+        created_at              TEXT NOT NULL,
+        schema_version          INTEGER NOT NULL,
+        verdict                 TEXT NOT NULL,
+        dataset_identity_json   TEXT NOT NULL DEFAULT '{}',
+        threshold_identity_json TEXT NOT NULL DEFAULT '{}',
+        champion_candidate_id   TEXT,
+        champion_artifact_hash  TEXT,
+        window_start            TEXT,
+        window_end              TEXT,
+        build_fingerprint       TEXT NOT NULL DEFAULT '',
+        items_json              TEXT NOT NULL DEFAULT '[]',
+        summary_json            TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS veto_labels (
+        seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+        label_id      TEXT NOT NULL UNIQUE,
+        created_at    TEXT NOT NULL,
+        request_id    TEXT NOT NULL UNIQUE,
+        artifact_hash TEXT NOT NULL,
+        veto          TEXT NOT NULL,
+        label         TEXT NOT NULL,
+        actor         TEXT NOT NULL DEFAULT '',
+        note          TEXT NOT NULL DEFAULT ''
+    )
+    """,
+)
+
 #: Sequential schema migrations, applied in order for any version gap.
 #:
 #: Append a new ``(version, statements)`` entry; never edit a shipped one. Each
@@ -339,6 +393,7 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (7, _MIGRATION_7),
     (8, _MIGRATION_8),
     (9, _MIGRATION_9),
+    (10, _MIGRATION_10),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -518,6 +573,7 @@ class ResidentStore:
                 f"State directory {self.state_dir} has schema version {current}, "
                 f"newer than this build's {SCHEMA_VERSION}. Refusing to downgrade."
             )
+        upgraded_from = current
         for version, statements in MIGRATIONS:
             if version <= current:
                 continue
@@ -531,6 +587,13 @@ class ResidentStore:
                     """,
                     (str(version),),
                 )
+        if upgraded_from and upgraded_from < SCHEMA_VERSION:
+            # Only for an *existing* directory. A fresh one runs every migration
+            # at creation, which is not a change to anything that was observed.
+            self.append_event(
+                SCHEMA_MIGRATED_EVENT,
+                payload={"from_version": upgraded_from, "to_version": SCHEMA_VERSION},
+            )
 
     def schema_version(self) -> int:
         """Recorded schema version; 0 for a directory that has never migrated."""
@@ -1305,6 +1368,115 @@ class ResidentStore:
             sql += " LIMIT ?"
             params.append(int(limit))
         return [dict(row) for row in self.conn.execute(sql, tuple(params))]
+
+    # --- readiness evidence -------------------------------------------------
+    #
+    # All append-only. A drill result is evidence about a moment, a report is a
+    # document about a window, and a label is a human's judgement — none of the
+    # three is something to revise later.
+
+    def insert_readiness_check(self, record: dict[str, Any]) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO readiness_checks
+                    (check_id, created_at, name, outcome, detail, state_dir,
+                     is_drill, evidence_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["check_id"],
+                    record.get("created_at") or utcnow(),
+                    record["name"],
+                    record["outcome"],
+                    record.get("detail", "")[:2000],
+                    record.get("state_dir", ""),
+                    1 if record.get("is_drill", True) else 0,
+                    json.dumps(dict(record.get("evidence") or {}), ensure_ascii=False),
+                ),
+            )
+
+    def list_readiness_checks(
+        self, name: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM readiness_checks"
+        params: list[Any] = []
+        if name is not None:
+            sql += " WHERE name = ?"
+            params.append(name)
+        sql += " ORDER BY seq DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return [dict(row) for row in self.conn.execute(sql, tuple(params))]
+
+    def insert_readiness_report(self, record: dict[str, Any]) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO readiness_reports
+                    (report_id, created_at, schema_version, verdict,
+                     dataset_identity_json, threshold_identity_json,
+                     champion_candidate_id, champion_artifact_hash,
+                     window_start, window_end, build_fingerprint,
+                     items_json, summary_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["report_id"],
+                    record.get("created_at") or utcnow(),
+                    int(record["schema_version"]),
+                    record["verdict"],
+                    json.dumps(dict(record.get("dataset_identity") or {}), ensure_ascii=False),
+                    json.dumps(dict(record.get("threshold_identity") or {}), ensure_ascii=False),
+                    record.get("champion_candidate_id"),
+                    record.get("champion_artifact_hash"),
+                    record.get("window_start"),
+                    record.get("window_end"),
+                    record.get("build_fingerprint", ""),
+                    json.dumps(list(record.get("items") or []), ensure_ascii=False),
+                    json.dumps(dict(record.get("summary") or {}), ensure_ascii=False),
+                ),
+            )
+
+    def list_readiness_reports(self, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM readiness_reports ORDER BY seq DESC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        return [dict(row) for row in self.conn.execute(sql, params)]
+
+    def insert_veto_label(self, record: dict[str, Any]) -> bool:
+        """One label per request, immutable. Returns False if already labelled."""
+
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO veto_labels
+                    (label_id, created_at, request_id, artifact_hash, veto, label, actor, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["label_id"],
+                    utcnow(),
+                    record["request_id"],
+                    record["artifact_hash"],
+                    record["veto"],
+                    record["label"],
+                    record.get("actor", ""),
+                    record.get("note", "")[:1000],
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def list_veto_labels(self, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM veto_labels ORDER BY seq DESC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        return [dict(row) for row in self.conn.execute(sql, params)]
 
     # --- events ------------------------------------------------------------
 

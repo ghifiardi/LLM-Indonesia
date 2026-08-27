@@ -33,8 +33,16 @@ from . import serve as serve_module
 from . import spool as spool_module
 from . import supervisor as supervisor_module
 from . import freeze as freeze_module
+from . import readiness as readiness_module
+from .readiness import observe as observe_module
+from .readiness import report as readiness_report_module
 from . import states
-from .anchors import ServingConfig, load_all_anchors, load_thresholds
+from .anchors import (
+    ServingConfig,
+    load_all_anchors,
+    load_every_anchor,
+    load_thresholds,
+)
 from .freeze import (
     FrozenError,
     UnfreezeError,
@@ -124,6 +132,7 @@ from .reflect import (
 )
 from .store import (
     ArtifactIntegrityError,
+    new_id,
     utcnow,
     CONFIG_DATASET_IDENTITY,
     CONFIG_ENVIRONMENT,
@@ -1212,6 +1221,24 @@ def _write_threshold_anchors(directory: Path, **gate_overrides: Any) -> None:
         encoding="utf-8",
     )
     _write_serving_anchor(directory)
+    _write_readiness_anchor(directory)
+
+
+def _write_readiness_anchor(directory: Path, **overrides: Any) -> None:
+    values = {
+        "min_duration_hours": 1,
+        "min_served_requests": 5,
+        "min_reflect_cycles": 1,
+        "min_audits": 1,
+        "min_labelled_vetoes": 2,
+        "max_false_veto_rate": 0.5,
+        "max_unexplained_freezes": 0,
+    }
+    values.update(overrides)
+    (directory / "readiness.toml").write_text(
+        "[observation]\n" + "\n".join(f"{k} = {v!r}" for k, v in values.items()) + "\n",
+        encoding="utf-8",
+    )
 
 
 SAFE_FALLBACK = "Maaf, permintaan ini tidak dapat diproses saat ini."
@@ -4065,6 +4092,381 @@ def test_serving_fails_safe_when_an_artifact_cannot_be_read() -> None:
             assert vetoes[0]["veto"] == serve_module.VETO_ARTIFACT_UNREADABLE
 
 
+# --- Phase 5A: evidence readiness --------------------------------------------
+
+
+def _short_readiness_anchor(directory: Path, **overrides: Any) -> None:
+    _write_readiness_anchor(directory, **overrides)
+
+
+@contextmanager
+def readiness_state(seed: str = SERVING_SAFE_POLICY, **criteria: Any):
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        _short_readiness_anchor(anchors, **criteria)
+        state_dir = root / "state"
+        with opened(state_dir) as store:
+            initialize(store, env_name="id_support", seed_policy=seed,
+                       anchors_dir=str(anchors))
+            yield root, anchors, store
+
+
+def test_verdict_combination_is_three_way() -> None:
+    assert readiness_module.combine([readiness_module.PASS]) == readiness_module.PASS
+    assert readiness_module.combine(
+        [readiness_module.PASS, readiness_module.PASS]
+    ) == readiness_module.PASS
+    # Any failure dominates.
+    assert readiness_module.combine(
+        [readiness_module.PASS, readiness_module.FAIL, readiness_module.INSUFFICIENT]
+    ) == readiness_module.FAIL
+    # Absence of evidence is neither a demonstration nor a defect.
+    assert readiness_module.combine(
+        [readiness_module.PASS, readiness_module.INSUFFICIENT]
+    ) == readiness_module.INSUFFICIENT
+    assert readiness_module.combine([]) == readiness_module.INSUFFICIENT
+
+
+def test_a_fresh_deployment_reports_insufficient_evidence_per_cause() -> None:
+    with readiness_state() as (root, anchors, store):
+        report = readiness_module.generate(store, anchors_dir=str(anchors))
+        assert report.verdict == readiness_module.INSUFFICIENT
+
+        by_name = {item.name: item for item in report.items}
+        # Each distinct cause of insufficiency is reported as its own item,
+        # rather than collapsed into one verdict a reader cannot act on.
+        assert by_name["continuous_window_hours"].verdict == readiness_module.INSUFFICIENT
+        assert by_name["served_requests"].verdict == readiness_module.INSUFFICIENT
+        assert by_name["supervisor_restart"].verdict == readiness_module.INSUFFICIENT
+        assert "no restart occurred" in by_name["supervisor_restart"].detail
+        assert by_name["canary_auto_revert"].verdict == readiness_module.INSUFFICIENT
+        assert "no canary was activated" in by_name["canary_auto_revert"].detail
+        assert by_name["false_veto_rate"].verdict == readiness_module.INSUFFICIENT
+        # Drills that were never run are missing evidence, not failures.
+        drills = [item for item in report.items if item.kind == "drill"]
+        assert drills and all(
+            item.verdict == readiness_module.INSUFFICIENT for item in drills
+        )
+        assert all(item.detail == "never run" for item in drills)
+
+
+def test_each_drill_records_its_directory_and_result_immutably() -> None:
+    with readiness_state() as (root, anchors, store):
+        runs = readiness_module.run_drills(
+            store, anchors, only=["freeze_and_unfreeze", "budget_breach_freezes"]
+        )
+        assert len(runs) == 2
+        assert all(run.result.outcome == readiness_module.PASS for run in runs), [
+            (r.result.name, r.result.detail) for r in runs
+        ]
+
+        rows = store.list_readiness_checks()
+        assert len(rows) == 2
+        for row in rows:
+            assert row["is_drill"] == 1
+            assert row["state_dir"], "a drill must record where it ran"
+            assert str(store.state_dir) not in row["state_dir"]
+        # Append-only: no way to revise a result.
+        assert not hasattr(store, "update_readiness_check")
+        assert not hasattr(store, "delete_readiness_check")
+
+
+def test_drills_leave_production_state_untouched() -> None:
+    with readiness_state() as (root, anchors, store):
+        champion_before = store.champion_path.read_bytes()
+        candidates_before = store.count_candidates()
+        audits_before = store.count_audits()
+        events_before = store.count_events()
+        frozen_before = is_frozen(store)
+        counters_before = store.budget_snapshot(budget_module.current_window())
+
+        readiness_module.run_drills(
+            store, anchors,
+            only=["freeze_and_unfreeze", "rollback_safe_and_refusal",
+                  "budget_breach_freezes"],
+        )
+
+        # A certification that breaks what it certifies has proved something
+        # about a broken system.
+        assert store.champion_path.read_bytes() == champion_before
+        assert store.count_candidates() == candidates_before
+        assert store.count_audits() == audits_before
+        assert is_frozen(store) == frozen_before is False
+        assert store.budget_snapshot(budget_module.current_window()) == counters_before
+        # Only the drill records and one summary event were added.
+        assert store.count_events() == events_before + 1
+        assert len(store.list_readiness_checks()) == 3
+
+
+def test_the_window_breaks_on_identity_change_and_on_a_freeze() -> None:
+    """Built on an explicit timeline.
+
+    Letting real events supply the timestamps meant every one of them landed in
+    the same millisecond, so counting segments measured the clock's resolution
+    rather than the segmentation logic.
+    """
+
+    from datetime import datetime, timedelta, timezone
+
+    with readiness_state() as (root, anchors, store):
+        base = datetime.now(timezone.utc) - timedelta(hours=10)
+
+        def stamp(hours: float) -> str:
+            return observe_module.format_stamp(base + timedelta(hours=hours))
+
+        # Wipe the timeline the fixture created and lay down a known one.
+        store.conn.execute("DELETE FROM events")
+        store.conn.execute("DELETE FROM freezes")
+        for hours, kind in ((0.0, "seeded"), (9.0, "seeded")):
+            store.conn.execute(
+                "INSERT INTO events (event_id, created_at, kind, payload_json) "
+                "VALUES (?, ?, ?, '{}')",
+                (new_id(), stamp(hours), kind),
+            )
+
+        # The window runs to *now*, not to the last recorded event: a window
+        # that stopped at the last event would under-report a system that is
+        # healthy and simply quiet.
+        only_one = readiness_module.window_segments(store)
+        assert len(only_one) == 1
+        assert abs(only_one[0].seconds - 10 * 3600) < 5
+
+        # A freeze from +2h to +4h excludes that span and splits the window.
+        store.conn.execute(
+            "INSERT INTO freezes (freeze_id, created_at, reason, actor, trigger_json,"
+            " state, resolved_at) VALUES (?, ?, 'drill', 'ops', '{}', 'resolved', ?)",
+            (new_id(), stamp(2.0), stamp(4.0)),
+        )
+        after_freeze = readiness_module.window_segments(store)
+        assert len(after_freeze) == 2
+        assert abs(after_freeze[0].seconds - 2 * 3600) < 5   # 0h -> 2h
+        assert abs(after_freeze[1].seconds - 6 * 3600) < 5   # 4h -> now
+
+        # An identity change at +6h cuts the second span again.
+        store.conn.execute(
+            "INSERT INTO events (event_id, created_at, kind, payload_json) "
+            "VALUES (?, ?, ?, '{}')",
+            (new_id(), stamp(6.0), observe_module.IDENTITY_CHANGED_EVENT),
+        )
+        after_identity = readiness_module.window_segments(store)
+        assert len(after_identity) == 3
+        assert abs(after_identity[1].seconds - 2 * 3600) < 5  # 4h -> 6h
+        assert abs(after_identity[2].seconds - 4 * 3600) < 5  # 6h -> now
+
+        # The reported duration is the longest qualifying span, not the elapsed
+        # time since the first event.
+        data = readiness_module.gather(store)
+        assert data.segment is not None
+        assert abs(data.segment.seconds - 4 * 3600) < 5
+        # Not the 10 hours of elapsed time: a freeze and an identity change
+        # both happened inside it.
+        assert data.duration_hours < 10.0
+
+
+def test_a_frozen_span_does_not_count_as_healthy_serving() -> None:
+    with readiness_state() as (root, anchors, store):
+        freeze(store, reason="unresolved", actor="ops")
+        data = readiness_module.gather(store)
+        # An unresolved freeze runs to now, so nothing after it accumulates.
+        assert data.segment is None or data.segment.end <= observe_module.parse_stamp(
+            store.list_freezes()[0]["created_at"]
+        )
+
+
+def test_report_is_deterministic_across_a_store_reopen() -> None:
+    with readiness_state() as (root, anchors, store):
+        readiness_module.run_drills(store, anchors, only=["freeze_and_unfreeze"])
+        first = readiness_module.generate(store, anchors_dir=str(anchors), record=False)
+        state_dir = store.state_dir
+        store.close()
+
+        # Reopened inside the fixture: closing over a directory the context has
+        # already removed would compare a real report against an empty one.
+        with opened(state_dir) as reopened:
+            second = readiness_module.generate(
+                reopened, anchors_dir=str(anchors), record=False
+            )
+        assert second.threshold_identity, "the reopened store saw no anchors"
+
+    def comparable(report: Any) -> Any:
+        payload = report.to_dict()
+        # Identifiers and timestamps of the report itself necessarily differ.
+        for key in ("report_id", "created_at", "window_end"):
+            payload.pop(key, None)
+        payload["summary"].pop("window", None)
+        payload["summary"].pop("segments", None)
+        payload["summary"]["duration_hours"] = 0
+        for item in payload["items"]:
+            if item["name"] == "continuous_window_hours":
+                item["observed"] = 0
+        return payload
+
+    # Nothing depends on in-memory supervisor state, so which process rendered
+    # the document does not change what it says.
+    assert comparable(first) == comparable(second)
+
+
+def test_a_report_records_the_identities_and_window_it_observed() -> None:
+    with readiness_state() as (root, anchors, store):
+        report = readiness_module.generate(store, anchors_dir=str(anchors))
+        assert report.dataset_identity.get("manifest_hash")
+        assert report.threshold_identity.get("gate_hash")
+        assert report.threshold_identity.get("readiness_hash")
+        assert report.threshold_identity.get("serving_hash")
+        assert report.champion_candidate_id == store.require_champion().candidate_id
+        assert report.champion_artifact_hash == store.require_champion().artifact_hash
+
+        rows = store.list_readiness_reports()
+        assert len(rows) == 1
+        assert rows[0]["schema_version"] == readiness_report_module.REPORT_SCHEMA_VERSION
+        assert json.loads(rows[0]["threshold_identity_json"])["readiness_hash"]
+
+
+def test_changed_anchors_downgrade_the_observation_items() -> None:
+    with readiness_state() as (root, anchors, store):
+        _short_readiness_anchor(anchors, min_served_requests=7)
+        report = readiness_module.generate(store, anchors_dir=str(anchors))
+
+        by_name = {item.name: item for item in report.items}
+        assert by_name["anchor_identity"].verdict == readiness_module.INSUFFICIENT
+        # Observations gathered under a configuration that no longer holds
+        # describe something else.
+        assert by_name["served_requests"].verdict == readiness_module.INSUFFICIENT
+        assert "anchor identity changed" in by_name["served_requests"].detail
+        assert report.verdict == readiness_module.INSUFFICIENT
+
+
+def test_readiness_anchor_changes_are_visible_in_the_threshold_identity() -> None:
+    with readiness_state() as (root, anchors, store):
+        before = load_every_anchor(anchors)[0]
+        _short_readiness_anchor(anchors, max_false_veto_rate=0.9)
+        after = load_every_anchor(anchors)[0]
+        assert before.readiness_hash != after.readiness_hash
+        assert before.mismatch_field(after) in ("readiness_hash", "values")
+
+
+def test_unexplained_freeze_classification_catches_malformed_triggers() -> None:
+    classify = readiness_module.classify_freeze
+    assert classify({"trigger_json": json.dumps({"counters": {}}), "reason": "", "actor": ""}) \
+        == observe_module.CAUSE_BUDGET
+    assert classify({"trigger_json": json.dumps({"mismatch_field": "gate_hash"}),
+                     "reason": "", "actor": ""}) == observe_module.CAUSE_ANCHOR_DRIFT
+    assert classify({"trigger_json": json.dumps({"anchor_error": "ThresholdError"}),
+                     "reason": "", "actor": ""}) == observe_module.CAUSE_ANCHOR_UNUSABLE
+    assert classify({"trigger_json": json.dumps({"veto": "unsafe_output",
+                                                 "candidate_id": "c"}),
+                     "reason": "", "actor": ""}) == observe_module.CAUSE_CHAMPION_VETO
+    assert classify({"trigger_json": json.dumps({"activation_id": "a", "breaches": 3}),
+                     "reason": "", "actor": ""}) == observe_module.CAUSE_CANARY_REVERT
+    assert classify({"trigger_json": "{}", "reason": "reviewed drift", "actor": "ops"}) \
+        == observe_module.CAUSE_OPERATOR
+
+    # The cases the criterion exists to catch.
+    assert classify({"trigger_json": "{}", "reason": "", "actor": ""}) \
+        == observe_module.CAUSE_UNEXPLAINED
+    assert classify({"trigger_json": "not json", "reason": "x", "actor": "y"}) \
+        == observe_module.CAUSE_UNEXPLAINED
+    assert classify({"trigger_json": json.dumps(["not", "an", "object"]),
+                     "reason": "x", "actor": "y"}) == observe_module.CAUSE_UNEXPLAINED
+    # A freeze with a reason but no actor is not an explained operator freeze.
+    assert classify({"trigger_json": "{}", "reason": "because", "actor": ""}) \
+        == observe_module.CAUSE_UNEXPLAINED
+
+
+def test_an_unexplained_freeze_fails_rather_than_reporting_no_evidence() -> None:
+    with readiness_state() as (root, anchors, store):
+        store.insert_freeze("bare-freeze", reason="", actor="", trigger={})
+        report = readiness_module.generate(store, anchors_dir=str(anchors))
+        item = {i.name: i for i in report.items}["unexplained_freezes"]
+        # A freeze that should not have happened is a defect, not missing data.
+        assert item.verdict == readiness_module.FAIL
+        assert report.verdict == readiness_module.FAIL
+
+
+def test_veto_labels_are_immutable_and_scoped_to_the_served_artifact() -> None:
+    with serving_state(SERVING_UNSAFE_POLICY) as (root, anchors, context):
+        response = serve_module.answer(context, "kartu hilang")
+        request_id = response["request_id"]
+        context.spool.close()
+        context.store.close()
+
+        with opened(root / "state") as store:
+            spool_module.ingest(store)
+            veto = store.list_serving_vetoes()[0]
+
+            assert store.insert_veto_label(
+                {"label_id": new_id(), "request_id": request_id,
+                 "artifact_hash": veto["artifact_hash"], "veto": veto["veto"],
+                 "label": "false_veto", "actor": "reviewer"}
+            )
+            # One label per request, and no way to revise it.
+            assert not store.insert_veto_label(
+                {"label_id": new_id(), "request_id": request_id,
+                 "artifact_hash": veto["artifact_hash"], "veto": veto["veto"],
+                 "label": "true_veto", "actor": "reviewer"}
+            )
+            assert store.list_veto_labels()[0]["label"] == "false_veto"
+
+
+def test_a_label_for_a_different_artifact_is_invalidated_not_counted() -> None:
+    with serving_state(SERVING_UNSAFE_POLICY) as (root, anchors, context):
+        response = serve_module.answer(context, "kartu hilang")
+        context.spool.close()
+        context.store.close()
+
+        with opened(root / "state") as store:
+            spool_module.ingest(store)
+            store.insert_veto_label(
+                {"label_id": new_id(), "request_id": response["request_id"],
+                 # A judgement about a different artifact's output says nothing
+                 # about what was actually served.
+                 "artifact_hash": "0" * 64, "veto": serve_module.VETO_UNSAFE_OUTPUT,
+                 "label": "false_veto", "actor": "reviewer"}
+            )
+            data = readiness_module.gather(store)
+            assert data.invalidated_labels == 1
+            assert data.labelled == 0
+            assert data.false_veto_rate is None
+
+
+def test_a_rate_is_refused_below_the_minimum_sample() -> None:
+    with readiness_state(min_labelled_vetoes=5) as (root, anchors, store):
+        report = readiness_module.generate(store, anchors_dir=str(anchors))
+        item = {i.name: i for i in report.items}["false_veto_rate"]
+        assert item.verdict == readiness_module.INSUFFICIENT
+        assert item.observed["labelled"] == 0
+        # No rate is stated at all.
+        assert "rate" not in item.observed
+
+
+def test_readiness_neither_imports_nor_authorises_promotion() -> None:
+    import ast as ast_module
+
+    package = Path(__file__).resolve().parent / "readiness"
+    # checks.py *is* the drills and runner.py seeds their directories; both
+    # necessarily drive the real machinery. The path that decides and reports
+    # is what must never reach the promoter.
+    decision_path = {"report.py", "observe.py", "verdicts.py", "__init__.py"}
+    for path in sorted(package.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast_module.parse(source)
+        if path.name in decision_path:
+            for node in ast_module.walk(tree):
+                if isinstance(node, ast_module.ImportFrom) and node.module:
+                    assert not node.module.endswith("promote"), f"{path.name} imports promote"
+        # Only the reporter touches the reports table, and only to write one.
+        assert "readiness_reports" not in source or path.name == "report.py"
+
+    # And no module outside readiness reads its output.
+    resident = Path(__file__).resolve().parent
+    for path in sorted(resident.glob("*.py")):
+        if path.name in ("store.py", "cli.py", "test_resident.py"):
+            continue
+        body = path.read_text(encoding="utf-8")
+        assert "list_readiness_reports" not in body, path.name
+        assert "readiness_reports" not in body, path.name
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -4218,6 +4620,22 @@ TESTS = [
     test_the_supervisor_starts_serve_through_its_own_entry_point,
     test_the_package_barrel_is_lazy,
     test_serving_fails_safe_when_an_artifact_cannot_be_read,
+    test_verdict_combination_is_three_way,
+    test_a_fresh_deployment_reports_insufficient_evidence_per_cause,
+    test_each_drill_records_its_directory_and_result_immutably,
+    test_drills_leave_production_state_untouched,
+    test_the_window_breaks_on_identity_change_and_on_a_freeze,
+    test_a_frozen_span_does_not_count_as_healthy_serving,
+    test_report_is_deterministic_across_a_store_reopen,
+    test_a_report_records_the_identities_and_window_it_observed,
+    test_changed_anchors_downgrade_the_observation_items,
+    test_readiness_anchor_changes_are_visible_in_the_threshold_identity,
+    test_unexplained_freeze_classification_catches_malformed_triggers,
+    test_an_unexplained_freeze_fails_rather_than_reporting_no_evidence,
+    test_veto_labels_are_immutable_and_scoped_to_the_served_artifact,
+    test_a_label_for_a_different_artifact_is_invalidated_not_counted,
+    test_a_rate_is_refused_below_the_minimum_sample,
+    test_readiness_neither_imports_nor_authorises_promotion,
     test_existing_smoke_suite_still_passes,
 ]
 
