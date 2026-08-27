@@ -704,6 +704,63 @@ The resident suite runs the existing smoke suite, so a regression there fails
 here too. It deliberately does not assert a test count — adding a legitimate
 smoke test must not break this.
 
+## Verification standard
+
+Every major capability claim in this package needs at least one **black-box**
+verification: through the public CLI or API, across a real subprocess boundary,
+against the shipped default configuration.
+
+This is a rule because the harness has twice been narrower than the system it
+certified, both times in the direction that keeps tests green:
+
+- the supervisor's clocks could not run a single real child — every test called
+  `_spawn` with something mocked or trivial;
+- the readiness drills could only pass against their own fixture — every drill
+  test ran an `only=[...]` subset, and four of eight failed against the shipped
+  anchors.
+
+Neither was caught by the suite. Both were caught by running the public path
+against real inputs.
+
+Concretely, for future work here:
+
+- no mocked-only lifecycle acceptance;
+- no subset-only catalogue acceptance — run the whole thing;
+- no substring assertion presented as a capability boundary; check call and
+  import syntax, or better, observe the behaviour;
+- import boundaries verified from a real process's `sys.modules`;
+- the full drill catalogue run against the shipped `eval_sets/` anchors;
+- defined-test count checked against registered-test count;
+- fixture tests supplemented by public-path tests.
+
+## Observation and the Phase 5B gate
+
+Automatic promotion is not designed, let alone implemented, and must not be
+until a **recorded** readiness report says PASS and a human reviews and
+approves it.
+
+During a qualifying window: do not change anchors or readiness criteria, do not
+run migrations, do not manufacture freezes, vetoes, or unsafe canaries, do not
+bypass the gate to obtain canary evidence, and do not record the final report
+early — a recorded report is immutable. Use `readiness report --no-record` for
+previews.
+
+Two criteria may legitimately never be met by the shipped configuration, and
+that is the system working rather than a gap to engineer around:
+
+- **canary auto-revert** needs a candidate that arises through reflection,
+  clears every gate veto, is audited, and is activated by a human. The shipped
+  policies do not clear the safety floor, so this may correctly remain NO
+  EVIDENCE.
+- **the false-veto sample** needs 20 naturally occurring suppressions, each
+  reproduced and judged by hand. Inducing unsafe outputs to reach the number
+  would defeat what the number measures.
+
+If the criteria prove operationally wrong, changing `readiness.toml` is a
+governance decision that changes the threshold identity and starts a **new**
+window. It must never be adjusted retroactively to make an existing window
+pass.
+
 ## Not in this phase
 
 Automatic promotion (Phase 5) — the gate
