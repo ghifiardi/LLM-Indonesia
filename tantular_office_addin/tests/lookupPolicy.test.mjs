@@ -8,7 +8,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   lookupEnabled, hostAllowed, prepareLookup, authorizeExecution,
-  auditRecord, wrapUntrusted, DEFAULT_ALLOWED_HOSTS, adapterFor, resolveUrl
+  auditRecord, wrapUntrusted, DEFAULT_ALLOWED_HOSTS, adapterFor, resolveUrl,
+  queryLeakWarnings
 } from "../src/chat/lookupPolicy.js";
 
 const ON = { TANTULAR_LOOKUP_ENABLED: "true" };
@@ -175,4 +176,34 @@ test("the test-only origin is separate from the feature flag", () => {
   // could be pointed at an arbitrary origin.
   const out = resolveUrl("attacker.test", "x", ON);
   assert.equal(out, null);
+});
+
+test("discovery alpha binds the approved query to the configured provider", () => {
+  const env = {
+    TANTULAR_LOOKUP_ENABLED: "true",
+    TANTULAR_LOOKUP_DISCOVERY_ALPHA: "true",
+    TANTULAR_SEARCH_PROVIDER: "duckduckgo-html"
+  };
+  const prepared = prepareLookup({
+    query: "perkembangan pasar modal indonesia",
+    provider: "duckduckgo-html",
+    document: DOC,
+    env
+  });
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.provider, "duckduckgo-html");
+  assert.match(prepared.disclosure.host, /DuckDuckGo/);
+  const pending = new Map([[prepared.token, prepared]]);
+  assert.equal(authorizeExecution({
+    pending, token: prepared.token,
+    query: prepared.query, provider: "duckduckgo-html", document: DOC
+  }).ok, true);
+});
+
+test("query disclosure warns about PII, secrets, and copied document data", () => {
+  const warnings = queryLeakWarnings(
+    "kirim ke user@example.com sk-abcdefghijklmnop PT Sinar Mas", DOC);
+  assert.ok(warnings.some((warning) => /email/.test(warning)));
+  assert.ok(warnings.some((warning) => /secret/.test(warning)));
+  assert.ok(warnings.some((warning) => /Sinar Mas/.test(warning)));
 });

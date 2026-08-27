@@ -214,3 +214,59 @@ test("an unreachable companion is reported, not treated as a refusal to search",
   });
   assert.equal((await post("/api/lookup/prepare", {})).reason, "companion_unreachable");
 });
+
+test("local companion calls can be bounded by a timeout", async () => {
+  const post = createLocalCompanionPost({
+    fetchImpl: (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    }),
+    isCloudSession: () => false,
+    companionUrl: (path) => path
+  });
+  const out = await post("/api/lookup/refine", {}, { timeoutMs: 5 });
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, "timeout");
+  assert.match(out.message, /terlalu lama/);
+});
+
+test("discovery mode carries provider, not a chosen source host", async () => {
+  const calls = [];
+  const run = createLookupController({
+    postLocal: async (path, body) => {
+      calls.push({ path, body });
+      return path.endsWith("prepare")
+        ? { ok: true, token: "p1", disclosure: {
+            host: "DuckDuckGo HTML (alpha)", provider: "duckduckgo-html",
+            query: body.query
+          } }
+        : { ok: false, reason: "provider_error" };
+    },
+    confirm: async () => true,
+    container: { innerHTML: "", hidden: true, querySelector: () => null },
+    readDocument: async () => ({ ok: true, text: DOC, source: "Excel" }),
+    getHost: () => "Excel"
+  });
+  await run({ mode: "local+search", query: "inflasi indonesia",
+              provider: "duckduckgo-html" });
+  assert.equal(calls[0].body.provider, "duckduckgo-html");
+  assert.equal(calls[0].body.host, undefined);
+  assert.equal(calls[1].body.provider, "duckduckgo-html");
+});
+
+test("a confirm that throws is a decline: no execute, blocked rendered", async () => {
+  // Found in real Excel, 2026-08-25: window.confirm() failed in the Office
+  // webview and the rejection killed the whole chain silently — buttons
+  // recovered, nothing rendered, no dialog. Consent that cannot be asked for
+  // is consent withheld.
+  const h = harness({ confirm: async () => { throw new Error("confirm unsupported"); } });
+  const out = await h.run({ mode: "local+search", query: "harga semen" });
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, "declined");
+  assert.deepEqual(h.calls.map((c) => c.path), ["/api/lookup/prepare"],
+    "a failed dialog must not fall through to execute");
+  assert.match(h.container.innerHTML, /data-state="blocked"/);
+});

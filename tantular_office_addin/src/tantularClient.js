@@ -16,7 +16,15 @@ import {
 function defaultEndpoint() {
   return companionUrl("/api/chat-completions");
 }
-const DEFAULT_MODEL = "qwen3.5:9b";
+// Chat defaults to the Tantular profile, like Studio does. This was
+// "qwen3.5:9b" — the raw base model, carrying none of the Tantular system
+// prompt — so every fresh install answered as stock Qwen while the product
+// said Tantular, and on a machine without that base model pulled it failed
+// outright with Ollama's "model 'qwen3.5:9b' not found".
+const DEFAULT_MODEL = "tantular-office:0.5-9b";
+// Used when the Tantular profile is not installed on this machine. Studio has
+// always had this; chat did not, so a missing model surfaced as a raw 404.
+const CHAT_MODEL_FALLBACK = "qwen3.5:9b";
 // Q8_0 profile, published as ghifidanukusumo/tantular:latest and installed
 // under this alias. The 0.4 alias was Q4_K_M, which scores 37/40 on the voice
 // gate against a 0.95 bar; Q8 scores 38/40 and matches bf16. Existing installs
@@ -33,6 +41,9 @@ const LOCAL_COMPANION_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost):3000\//i;
 const RETIRED_MODEL_DEFAULTS = new Map([
   ["tantular-office:0.3-8b", DEFAULT_DECK_MODEL],
   ["qwen3:8b", DEFAULT_MODEL],
+  // The previous chat default. Nobody picked stock Qwen for a Tantular
+  // product on purpose; it was simply what shipped.
+  ["qwen3.5:9b", DEFAULT_MODEL],
   // Old low-RAM quick-fix value: keep those machines on the lite alias, never
   // auto-upgrade them to a 9B they can't run.
   ["qwen3:4b", "tantular-office:lite"]
@@ -211,7 +222,9 @@ export async function runTantular({
     // 8 minutes accommodates slow CPU-only laptops (~5-8 tok/s) on compact plans.
     timeoutMs: usesOfficeModel ? 480_000 : 90_000,
     signal,
-    fallbackModel: usesOfficeModel && model === DEFAULT_DECK_MODEL ? DECK_MODEL_FALLBACK : "",
+    fallbackModel: model === (usesOfficeModel ? DEFAULT_DECK_MODEL : DEFAULT_MODEL)
+      ? (usesOfficeModel ? DECK_MODEL_FALLBACK : CHAT_MODEL_FALLBACK)
+      : "",
     jsonMode
   };
   try {

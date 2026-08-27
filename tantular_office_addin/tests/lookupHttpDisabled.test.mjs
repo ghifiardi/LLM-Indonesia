@@ -88,6 +88,13 @@ test("with the flag off, the endpoint refuses and issues no token", async (t) =>
   assert.equal(executed.status, 403);
   assert.equal(executed.body.ok, false);
 
+  // Refine belongs to the same feature: with the flag off it must refuse,
+  // not quietly run a model against the document.
+  const refined = await post(port, "/api/lookup/refine",
+    { intent: "anggaran", document: "Vendor PT Sinar Mas." });
+  assert.equal(refined.status, 403);
+  assert.equal(refined.body.reason, "disabled");
+
   assert.equal(contacted, false, "the flag is off; nothing may leave the machine");
 });
 
