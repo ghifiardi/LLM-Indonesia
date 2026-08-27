@@ -72,6 +72,14 @@ day five frozen has not observed a week of anything. Anchor changes, dataset
 changes, freezes and schema migrations all segment the window; the report shows
 the contributing segments and uses the longest.
 
+Operation is established by durable supervisor lifecycle evidence, not inferred
+from initialization time. The supervisor writes a sparse heartbeat once per
+minute. Adjacent lifecycle observations may be joined across at most three
+minutes (covering a slow tick or a quick launchd restart), and a report never
+extends the window beyond the last recorded heartbeat or graceful stop. A
+process that starts and then disappears therefore contributes no invented
+wall-clock time.
+
 ### The false-veto rate
 
 A veto discards the output, so there is nothing retained to review. The rate is

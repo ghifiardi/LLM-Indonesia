@@ -96,29 +96,94 @@ def freeze_spans(store: ResidentStore) -> list[tuple[datetime, datetime]]:
     return sorted(spans)
 
 
+def supervisor_spans(store: ResidentStore) -> list[Segment]:
+    """Intervals backed by durable supervisor lifecycle observations.
+
+    A lone ``started`` row is a point observation, not evidence that the
+    process stayed alive until the report was rendered. Starts, heartbeats,
+    and graceful stops form a chain only while adjacent observations remain
+    within the supervisor's heartbeat grace. The final span ends at the last
+    durable observation — never at ``now``.
+
+    A quick launchd restart stays in one chain, which is intentional: the
+    restart criterion exists to observe bounded recovery in production. A
+    long gap starts a new span and cannot be hidden inside elapsed wall time.
+    """
+
+    from ..supervisor import (
+        SUPERVISOR_EVENT,
+        SUPERVISOR_HEARTBEAT_MAX_GAP_SECONDS,
+    )
+
+    lifecycle: list[tuple[datetime, str]] = []
+    for event in store.list_events(kind=SUPERVISOR_EVENT):
+        moment = parse_stamp(event.created_at)
+        action = event.payload.get("event")
+        if moment is not None and action in {"started", "heartbeat", "stopped"}:
+            lifecycle.append((moment, action))
+    lifecycle.sort(key=lambda item: item[0])
+
+    spans: list[Segment] = []
+    start: datetime | None = None
+    last_seen: datetime | None = None
+    stopped = False
+    for moment, action in lifecycle:
+        if start is None:
+            if action == "stopped":
+                continue
+            start = last_seen = moment
+            stopped = False
+            continue
+
+        assert last_seen is not None
+        gap = (moment - last_seen).total_seconds()
+        continues = gap <= SUPERVISOR_HEARTBEAT_MAX_GAP_SECONDS
+        if action == "heartbeat" and stopped:
+            continues = False
+
+        if not continues:
+            if last_seen > start:
+                spans.append(Segment(start, last_seen))
+            if action == "stopped":
+                start = last_seen = None
+                stopped = False
+                continue
+            start = last_seen = moment
+            stopped = False
+            continue
+
+        last_seen = moment
+        stopped = action == "stopped"
+
+    if start is not None and last_seen is not None and last_seen > start:
+        spans.append(Segment(start, last_seen))
+    return spans
+
+
 def window_segments(store: ResidentStore) -> list[Segment]:
-    """Continuous same-identity, unfrozen spans, oldest first."""
+    """Supervisor-observed, same-identity, unfrozen spans, oldest first."""
 
     events = store.list_events()
     if not events:
         return []
-    stamps = [parse_stamp(event.created_at) for event in events]
-    stamps = [stamp for stamp in stamps if stamp is not None]
-    if not stamps:
+    live = supervisor_spans(store)
+    if not live:
         return []
 
-    start = min(stamps)
-    now = datetime.now(timezone.utc)
-
-    cuts = {start, now}
+    identity_cuts: set[datetime] = set()
     for event in events:
         if event.kind in (IDENTITY_CHANGED_EVENT, SCHEMA_MIGRATED_EVENT):
             moment = parse_stamp(event.created_at)
             if moment is not None:
-                cuts.add(moment)
+                identity_cuts.add(moment)
 
-    ordered = sorted(cuts)
-    raw = [Segment(a, b) for a, b in zip(ordered, ordered[1:]) if b > a]
+    raw: list[Segment] = []
+    for span in live:
+        cuts = sorted(
+            {span.start, span.end}
+            | {moment for moment in identity_cuts if span.start < moment < span.end}
+        )
+        raw.extend(Segment(a, b) for a, b in zip(cuts, cuts[1:]) if b > a)
 
     # Subtract frozen spans. A freeze does not merely pause the clock — it
     # segments the window, because the span either side of it was observed
@@ -266,6 +331,13 @@ def gather(store: ResidentStore) -> Observations:
     segments = window_segments(store)
     segment = max(segments, key=lambda item: item.seconds) if segments else None
     observations = Observations(segment=segment, segments=segments)
+    # A freeze is itself durable evidence. In particular, an unexplained freeze
+    # must not disappear merely because there was too little healthy liveness
+    # evidence to form a qualifying segment.
+    observations.freezes = freezes_in(store, segment)
+    observations.unexplained_freezes = sum(
+        1 for row in observations.freezes if row["cause"] == CAUSE_UNEXPLAINED
+    )
     if segment is None:
         return observations
     observations.duration_hours = segment.seconds / 3600.0
@@ -282,11 +354,6 @@ def gather(store: ResidentStore) -> Observations:
     # list_audits returns AuditRecord objects, not rows.
     observations.audits = sum(
         1 for record in store.list_audits() if _within(record.created_at, segment)
-    )
-
-    observations.freezes = freezes_in(store, segment)
-    observations.unexplained_freezes = sum(
-        1 for row in observations.freezes if row["cause"] == CAUSE_UNEXPLAINED
     )
 
     starts = [

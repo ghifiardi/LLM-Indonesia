@@ -3316,6 +3316,24 @@ def test_supervisor_lock_is_exclusive_and_released_on_exit() -> None:
         assert supervisor_module.active_supervisor(state_dir) is None
 
 
+def test_supervisor_records_durable_heartbeats_for_readiness() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        supervisor.store.set_config(supervisor_module.CONFIG_LAST_REFLECT, utcnow())
+        supervisor.store.set_config(supervisor_module.CONFIG_LAST_AUDIT, utcnow())
+        original = supervisor_module.SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS
+        supervisor_module.SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS = 0
+        try:
+            supervisor.poll_interval = 0.01
+            supervisor.run(max_ticks=1)
+        finally:
+            supervisor_module.SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS = original
+
+        lifecycle = supervisor.store.list_events(kind=supervisor_module.SUPERVISOR_EVENT)
+        actions = [event.payload.get("event") for event in lifecycle]
+        # list_events is newest-first.
+        assert actions[:3] == ["stopped", "heartbeat", "started"]
+
+
 def test_clocks_fire_when_due_and_not_before() -> None:
     with supervised_state() as (root, anchors, supervisor):
         first = supervisor.tick()
@@ -4434,16 +4452,22 @@ def test_the_window_breaks_on_identity_change_and_on_a_freeze() -> None:
         # Wipe the timeline the fixture created and lay down a known one.
         store.conn.execute("DELETE FROM events")
         store.conn.execute("DELETE FROM freezes")
-        for hours, kind in ((0.0, "seeded"), (9.0, "seeded")):
+        # Heartbeats every two minutes are within the three-minute liveness
+        # grace and prove the whole ten-hour interval. The window ends at the
+        # final durable heartbeat rather than being extended to report time.
+        for minute in range(0, 10 * 60 + 1, 2):
+            action = "started" if minute == 0 else "heartbeat"
             store.conn.execute(
                 "INSERT INTO events (event_id, created_at, kind, payload_json) "
-                "VALUES (?, ?, ?, '{}')",
-                (new_id(), stamp(hours), kind),
+                "VALUES (?, ?, ?, ?)",
+                (
+                    new_id(),
+                    observe_module.format_stamp(base + timedelta(minutes=minute)),
+                    supervisor_module.SUPERVISOR_EVENT,
+                    json.dumps({"event": action}),
+                ),
             )
 
-        # The window runs to *now*, not to the last recorded event: a window
-        # that stopped at the last event would under-report a system that is
-        # healthy and simply quiet.
         only_one = readiness_module.window_segments(store)
         assert len(only_one) == 1
         assert abs(only_one[0].seconds - 10 * 3600) < 5
@@ -4478,6 +4502,38 @@ def test_the_window_breaks_on_identity_change_and_on_a_freeze() -> None:
         # Not the 10 hours of elapsed time: a freeze and an identity change
         # both happened inside it.
         assert data.duration_hours < 10.0
+
+
+def test_supervisor_downtime_cannot_accumulate_as_readiness_time() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    with readiness_state() as (root, anchors, store):
+        base = datetime.now(timezone.utc) - timedelta(hours=10)
+
+        def add(hours: float, action: str) -> None:
+            store.conn.execute(
+                "INSERT INTO events (event_id, created_at, kind, payload_json) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    new_id(),
+                    observe_module.format_stamp(base + timedelta(hours=hours)),
+                    supervisor_module.SUPERVISOR_EVENT,
+                    json.dumps({"event": action}),
+                ),
+            )
+
+        store.conn.execute("DELETE FROM events")
+        # The first run was observed for one minute, then disappeared for
+        # nearly nine hours. A second start alone proves no duration.
+        add(0.0, "started")
+        add(1 / 60, "heartbeat")
+        add(9.0, "started")
+
+        segments = readiness_module.window_segments(store)
+        assert len(segments) == 1
+        assert abs(segments[0].seconds - 60) < 1
+        data = readiness_module.gather(store)
+        assert data.duration_hours < 0.02
 
 
 def test_a_frozen_span_does_not_count_as_healthy_serving() -> None:
@@ -4640,6 +4696,23 @@ def test_a_label_for_a_different_artifact_is_invalidated_not_counted() -> None:
                  "artifact_hash": "0" * 64, "veto": serve_module.VETO_UNSAFE_OUTPUT,
                  "label": "false_veto", "actor": "reviewer"}
             )
+            veto = store.list_serving_vetoes()[0]
+            veto_moment = observe_module.parse_stamp(veto["created_at"])
+            assert veto_moment is not None
+            from datetime import timedelta
+            for moment, action in (
+                (veto_moment - timedelta(seconds=1), "started"),
+                (veto_moment + timedelta(seconds=1), "heartbeat"),
+            ):
+                store.conn.execute(
+                    "INSERT INTO events (event_id, created_at, kind, payload_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        new_id(), observe_module.format_stamp(moment),
+                        supervisor_module.SUPERVISOR_EVENT,
+                        json.dumps({"event": action}),
+                    ),
+                )
             data = readiness_module.gather(store)
             assert data.invalidated_labels == 1
             assert data.labelled == 0
@@ -4982,6 +5055,7 @@ TESTS = [
     test_oversized_spool_record_is_bounded_and_does_not_block_the_next_record,
     test_spool_is_private_and_quarantine_records_no_content,
     test_supervisor_lock_is_exclusive_and_released_on_exit,
+    test_supervisor_records_durable_heartbeats_for_readiness,
     test_clocks_fire_when_due_and_not_before,
     test_audit_clock_runs_while_frozen_but_reflection_does_not,
     test_supervisor_control_channel_is_small_and_refuses_the_unknown,
@@ -5021,6 +5095,7 @@ TESTS = [
     test_each_drill_records_its_directory_and_result_immutably,
     test_drills_leave_production_state_untouched,
     test_the_window_breaks_on_identity_change_and_on_a_freeze,
+    test_supervisor_downtime_cannot_accumulate_as_readiness_time,
     test_a_frozen_span_does_not_count_as_healthy_serving,
     test_report_is_deterministic_across_a_store_reopen,
     test_a_report_records_the_identities_and_window_it_observed,

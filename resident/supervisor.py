@@ -86,6 +86,15 @@ CLOCK_EVENT = "clock_fired"
 SERVE_EVENT = "serve_lifecycle"
 SUPERVISOR_EVENT = "supervisor_lifecycle"
 
+#: Durable liveness evidence for the readiness window. A start event alone
+#: proves only that the process existed at one instant; it cannot justify
+#: counting wall-clock time after an unexpected exit. The supervisor therefore
+#: records a sparse heartbeat. Readiness accepts gaps up to three intervals so
+#: a slow tick or scheduler delay does not manufacture an outage, but it never
+#: extends a window past the last durable lifecycle observation.
+SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS = 60.0
+SUPERVISOR_HEARTBEAT_MAX_GAP_SECONDS = 180.0
+
 #: Restart backoff for the owned serve child: 1s doubling, capped. A serving
 #: process that cannot start should not be respawned in a tight loop.
 SERVE_RESTART_BASE_SECONDS = 1.0
@@ -754,6 +763,7 @@ class Supervisor:
                 self.store.append_event(
                     SUPERVISOR_EVENT, payload={"event": "started", "pid": os.getpid()}
                 )
+                last_heartbeat = time.monotonic()
                 if ready is not None:
                     ready.set()
                 ticks = 0
@@ -761,6 +771,13 @@ class Supervisor:
                     self.ensure_serve()
                     self._accept_one(server)
                     self.tick()
+                    now = time.monotonic()
+                    if now - last_heartbeat >= SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS:
+                        self.store.append_event(
+                            SUPERVISOR_EVENT,
+                            payload={"event": "heartbeat", "pid": os.getpid()},
+                        )
+                        last_heartbeat = now
                     ticks += 1
                     if max_ticks is not None and ticks >= max_ticks:
                         break
