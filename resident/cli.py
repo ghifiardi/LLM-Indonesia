@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+import threading
 from typing import Any, Sequence
 
 from ..code_agent_env import CodeTaskEnvironment
@@ -775,14 +777,18 @@ def _cmd_supervise(store: ResidentStore, args: argparse.Namespace, emit: Any) ->
     )
     if not args.no_serve:
         print("starting and supervising a serve child.", file=sys.stderr)
+    stop = threading.Event()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: stop.set())
     try:
-        supervisor.run(max_ticks=args.max_ticks)
+        supervisor.run(stop=stop, max_ticks=args.max_ticks)
     except KeyboardInterrupt:
-        pass
+        stop.set()
     except (supervisor_module.SupervisorError, ResidentError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
         supervisor.close()
     return EXIT_OK
 

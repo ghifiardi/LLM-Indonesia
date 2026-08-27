@@ -145,6 +145,12 @@ Under one OS account this is **coordination, not privilege separation** — any
 process running as this user could still write the pointer. Separate UIDs or
 read-only mounts remain deferred under AR-02.
 
+SIGTERM is a graceful supervisor shutdown, including the launchd path. It sets
+the run-loop stop event, interrupts only the one-shot child whose `Popen` handle
+the supervisor owns, then terminates and reaps its owned `serve` process before
+recording the lifecycle stop. A service unload must not leave an orphan serving
+an obsolete state directory.
+
 The control channel accepts four commands — `promote`, `rollback`, `status`,
 `ingest` — and nothing else. It exists so pointer changes have one writer, not
 to become a second CLI.

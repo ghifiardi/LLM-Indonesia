@@ -3917,6 +3917,115 @@ def test_supervisor_owns_starts_restarts_and_stops_the_serve_child() -> None:
         assert "started" in kinds and "stopped" in kinds
 
 
+def test_supervisor_shutdown_interrupts_an_owned_one_shot_child() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        original = supervisor._child_argv
+        supervisor._child_argv = lambda *_command: [
+            sys.executable, "-c", "import time; time.sleep(120)"
+        ]
+        stop = threading.Event()
+        supervisor._stop_event = stop
+        result: dict[str, Any] = {}
+        thread = threading.Thread(
+            target=lambda: result.update(supervisor._spawn("reflect-once")), daemon=True
+        )
+        thread.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and supervisor._active_child is None:
+            time.sleep(0.02)
+        assert supervisor._active_child is not None
+        stop.set()
+        thread.join(timeout=10)
+        supervisor._child_argv = original
+        supervisor._stop_event = None
+        assert not thread.is_alive(), "owned one-shot child ignored shutdown"
+        assert result.get("error") == "shutdown_requested"
+        assert supervisor._active_child is None
+
+
+def test_sigterm_to_public_supervisor_reaps_its_serve_child() -> None:
+    """The launchd shutdown path, through the public CLI and real processes."""
+
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        state_dir = root / "state"
+        with opened(state_dir) as store:
+            initialize(
+                store, env_name="id_support", seed_policy=SERVING_SAFE_POLICY,
+                anchors_dir=str(anchors),
+            )
+            store.set_config(supervisor_module.CONFIG_LAST_REFLECT, utcnow())
+            store.set_config(supervisor_module.CONFIG_LAST_AUDIT, utcnow())
+            # Runtime socket paths are keyed from the resolved state path.
+            state_dir = store.state_dir
+
+        package_parent = Path(__file__).resolve().parents[2]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(package_parent)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        process = subprocess.Popen(
+            [
+                sys.executable, "-m", "godel_agent_prototype.resident",
+                "--state-dir", str(state_dir), "supervise",
+                "--anchors-dir", str(anchors),
+            ],
+            cwd=str(package_parent), env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+        serve_pid = None
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    break
+                with opened(state_dir) as store:
+                    starts = [
+                        event for event in store.list_events(kind=supervisor_module.SERVE_EVENT)
+                        if event.payload.get("event") == "started"
+                    ]
+                if starts and supervisor_module.control_socket_path(state_dir).exists():
+                    serve_pid = starts[0].payload.get("pid")
+                    break
+                time.sleep(0.1)
+            if not serve_pid:
+                _stdout, stderr = process.communicate(timeout=5)
+                raise AssertionError(
+                    f"public supervisor never started serve: rc={process.returncode}; "
+                    f"stderr={stderr[-1000:]}"
+                )
+
+            process.terminate()
+            _stdout, stderr = process.communicate(timeout=15)
+            assert process.returncode == 0, stderr[-500:]
+
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(int(serve_pid), 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("serve child outlived SIGTERM to its supervisor")
+
+            with opened(state_dir) as store:
+                supervisor_actions = [
+                    event.payload.get("event")
+                    for event in store.list_events(kind=supervisor_module.SUPERVISOR_EVENT)
+                ]
+                serve_actions = [
+                    event.payload.get("event")
+                    for event in store.list_events(kind=supervisor_module.SERVE_EVENT)
+                ]
+            assert "stopped" in supervisor_actions
+            assert "stopped" in serve_actions
+            assert not supervisor_module.control_socket_path(state_dir).exists()
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+
+
 def test_serve_keeps_publishing_across_supervisor_ingestion_ticks() -> None:
     """Two ordinary asks, separated by real ingestion, must both persist.
 
@@ -5079,6 +5188,8 @@ TESTS = [
     test_routing_salt_never_leaves_the_pointer,
     test_supervisor_children_can_import_the_package,
     test_supervisor_owns_starts_restarts_and_stops_the_serve_child,
+    test_supervisor_shutdown_interrupts_an_owned_one_shot_child,
+    test_sigterm_to_public_supervisor_reaps_its_serve_child,
     test_a_failed_clock_run_does_not_count_as_a_completed_one,
     test_a_failed_clock_backs_off_then_succeeds_on_retry,
     test_canary_pointer_changes_delegate_to_the_supervisor,

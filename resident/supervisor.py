@@ -34,6 +34,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -237,6 +238,8 @@ class Supervisor:
     manage_serve: bool = False
     store: ResidentStore = field(init=False)
     serve_process: Any = field(default=None, init=False)
+    _active_child: Any = field(default=None, init=False)
+    _stop_event: Any = field(default=None, init=False)
     _serve_failures: int = field(default=0, init=False)
     _serve_retry_at: float = field(default=0.0, init=False)
 
@@ -407,6 +410,12 @@ class Supervisor:
                 "reflect", CONFIG_LAST_REFLECT, "reflect-once"
             )
 
+        # A shutdown requested while the reflection child was running must not
+        # launch a second one-shot child on the way out.
+        if self._stop_event is not None and self._stop_event.is_set():
+            result["stopping"] = True
+            return result
+
         # The audit clock runs regardless of the freeze.
         if self._due("audit", CONFIG_LAST_AUDIT, limits.audit_interval_seconds):
             result["audited"] = True
@@ -496,34 +505,73 @@ class Supervisor:
         return None
 
     def _spawn(self, *command: str, timeout: float = 900.0) -> dict[str, Any]:
-        """Run a one-shot child. Its failure is recorded, never raised.
+        """Run one owned child, interruptibly, and record only safe metadata.
 
         The child gets the same minimal environment the candidate runner uses,
         which is what makes the package importable: running with an empty
         environment from the state directory, ``python -m
         godel_agent_prototype.resident`` cannot find the package at all, and
         every clock tick would fail with an unexplained exit code 1.
+
+        ``subprocess.run`` cannot be interrupted cleanly by the supervisor's
+        shutdown event. Holding the ``Popen`` handle makes ownership explicit:
+        SIGTERM stops only this child, and launchd shutdown cannot orphan it.
         """
 
         argv = self._child_argv(*command)
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 argv,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
                 cwd=str(self.state_dir),
                 env=_minimal_environment(),
                 close_fds=True,
+                start_new_session=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return {"command": command[0], "ok": False, "error": type(exc).__name__}
+
+        self._active_child = process
+        deadline = time.monotonic() + timeout
+        stdout = ""
+        stderr = ""
+        try:
+            while True:
+                if self._stop_event is not None and self._stop_event.is_set():
+                    self._terminate_owned(process, grace=1.0)
+                    return {
+                        "command": command[0],
+                        "ok": False,
+                        "returncode": process.returncode,
+                        "error": "shutdown_requested",
+                        "stderr_bytes": 0,
+                    }
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._terminate_owned(process)
+                    return {
+                        "command": command[0],
+                        "ok": False,
+                        "returncode": process.returncode,
+                        "error": "TimeoutExpired",
+                        "stderr_bytes": 0,
+                    }
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            self._active_child = None
+
         return {
             "command": command[0],
-            "ok": completed.returncode == 0,
-            "returncode": completed.returncode,
-            # stderr can quote a query, so only its tail length is kept.
-            "stderr_bytes": len(completed.stderr or ""),
+            "ok": process.returncode == 0,
+            "returncode": process.returncode,
+            # stderr can quote a query, so only its length is kept.
+            "stderr_bytes": len(stderr or ""),
         }
 
     # --- the owned serve child ----------------------------------------------
@@ -752,6 +800,8 @@ class Supervisor:
         socket_path = control_socket_path(self.state_dir)
         prepare_socket_path(self.state_dir)  # validates ownership and permissions
         socket_path.unlink(missing_ok=True)
+        effective_stop = stop if stop is not None else threading.Event()
+        self._stop_event = effective_stop
 
         with SupervisorLock(self.state_dir, socket_path):
             server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -767,7 +817,7 @@ class Supervisor:
                 if ready is not None:
                     ready.set()
                 ticks = 0
-                while stop is None or not stop.is_set():
+                while not effective_stop.is_set():
                     self.ensure_serve()
                     self._accept_one(server)
                     self.tick()
@@ -788,3 +838,4 @@ class Supervisor:
                 )
                 server.close()
                 socket_path.unlink(missing_ok=True)
+                self._stop_event = None
