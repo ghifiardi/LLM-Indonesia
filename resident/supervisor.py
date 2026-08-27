@@ -30,12 +30,13 @@ import errno
 import fcntl
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -48,12 +49,26 @@ from .anchors import (
     resolve_anchors_dir,
 )
 from .freeze import is_frozen
+from .runner.subprocess_runner import _minimal_environment
 from .serve import prepare_socket_path, runtime_dir_for
 from .spool import ingest
 from .store import CONFIG_THRESHOLD_IDENTITY, ResidentError, ResidentStore, utcnow
 
 CONFIG_LAST_REFLECT = "last_reflect_at"
 CONFIG_LAST_AUDIT = "last_audit_at"
+
+#: Per-clock bookkeeping. Success and attempt are tracked separately so a
+#: failed run cannot masquerade as a completed one and suppress retries for a
+#: full interval — which for the weekly audit would mean a week of silence.
+CONFIG_LAST_ATTEMPT = "last_{clock}_attempt_at"
+CONFIG_FAILURES = "{clock}_failures"
+CONFIG_LAST_ERROR = "last_{clock}_error"
+
+#: Retry backoff after a failed clock run: 60s doubling, capped at the
+#: interval itself, so a broken clock retries promptly at first and then no
+#: more often than it would have run anyway.
+RETRY_BASE_SECONDS = 60
+MAX_RECORDED_FAILURES = 16
 
 SUPERVISOR_LOCK_NAME = "supervisor.lock"
 CONTROL_SOCKET_NAME = "control.sock"
@@ -63,9 +78,18 @@ CONTROL_TIMEOUT_SECONDS = 120.0
 
 #: Commands the control channel accepts. Deliberately small: the channel exists
 #: so pointer changes have one writer, not to become a second CLI.
-CONTROL_COMMANDS = frozenset({"promote", "rollback", "status", "ingest"})
+CONTROL_COMMANDS = frozenset(
+    {"promote", "rollback", "canary_set", "canary_clear", "status", "ingest"}
+)
 
 CLOCK_EVENT = "clock_fired"
+SERVE_EVENT = "serve_lifecycle"
+
+#: Restart backoff for the owned serve child: 1s doubling, capped. A serving
+#: process that cannot start should not be respawned in a tight loop.
+SERVE_RESTART_BASE_SECONDS = 1.0
+SERVE_RESTART_MAX_SECONDS = 60.0
+SERVE_READY_TIMEOUT_SECONDS = 20.0
 
 
 class SupervisorError(ResidentError):
@@ -198,11 +222,21 @@ class Supervisor:
     anchors_dir: str | None = None
     poll_interval: float = 0.5
     python_executable: str = field(default_factory=lambda: sys.executable)
+    #: Whether this supervisor owns a serve child. Off in unit tests that only
+    #: exercise the clocks; on in production and in the integration test.
+    manage_serve: bool = False
     store: ResidentStore = field(init=False)
+    serve_process: Any = field(default=None, init=False)
+    _serve_failures: int = field(default=0, init=False)
+    _serve_retry_at: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
-        self.state_dir = Path(self.state_dir)
         self.store = ResidentStore.open(self.state_dir)
+        # Use the store's *resolved* path. Children resolve it themselves, and
+        # the runtime directory is keyed by a hash of it — so an unresolved
+        # path here (on macOS /var/folders symlinks to /private/var/folders)
+        # makes the supervisor watch a socket the child never creates.
+        self.state_dir = self.store.state_dir
         # Promotion recovery runs inside ResidentStore.open; canary recovery
         # needs the pointer and the activation rows together, so it runs here.
         canary_module.recover(self.store)
@@ -230,17 +264,68 @@ class Supervisor:
             return "unreadable"
         return expected.mismatch_field(identity)
 
-    def _due(self, key: str, interval_seconds: int) -> bool:
-        last = self.store.get_config(key)
-        if not last:
-            return True
+    @staticmethod
+    def _elapsed(stamp: str | None) -> float | None:
+        if not stamp:
+            return None
         try:
-            when = datetime.strptime(last, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            when = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
                 tzinfo=timezone.utc
             )
         except ValueError:
-            return True
-        return (datetime.now(timezone.utc) - when).total_seconds() >= interval_seconds
+            return None
+        return (datetime.now(timezone.utc) - when).total_seconds()
+
+    def _due(self, clock: str, key: str, interval_seconds: int) -> bool:
+        """Whether this clock should fire, honouring the retry backoff."""
+
+        since_success = self._elapsed(self.store.get_config(key))
+        if since_success is not None and since_success < interval_seconds:
+            return False
+
+        failures = int(self.store.get_config(CONFIG_FAILURES.format(clock=clock)) or 0)
+        if failures:
+            backoff = min(interval_seconds, RETRY_BASE_SECONDS * (2 ** (failures - 1)))
+            since_attempt = self._elapsed(
+                self.store.get_config(CONFIG_LAST_ATTEMPT.format(clock=clock))
+            )
+            if since_attempt is not None and since_attempt < backoff:
+                return False
+        return True
+
+    def _run_clock(self, clock: str, success_key: str, *command: str) -> dict[str, Any]:
+        """Fire one clock and record the outcome honestly.
+
+        Only a child that actually succeeded advances the success timestamp.
+        A failure records the attempt and increments the failure count, so the
+        backoff applies and the work is retried rather than silently skipped
+        until the next interval.
+        """
+
+        self.store.set_config(CONFIG_LAST_ATTEMPT.format(clock=clock), utcnow())
+        outcome = self._spawn(*command)
+        if outcome.get("ok"):
+            self.store.set_config(success_key, utcnow())
+            self.store.set_config(CONFIG_FAILURES.format(clock=clock), "0")
+            self.store.set_config(CONFIG_LAST_ERROR.format(clock=clock), "")
+        else:
+            failures = int(self.store.get_config(CONFIG_FAILURES.format(clock=clock)) or 0)
+            self.store.set_config(
+                CONFIG_FAILURES.format(clock=clock),
+                str(min(failures + 1, MAX_RECORDED_FAILURES)),
+            )
+            self.store.set_config(
+                CONFIG_LAST_ERROR.format(clock=clock),
+                # Structured only: a child's stderr can quote a query.
+                json.dumps(
+                    {
+                        "returncode": outcome.get("returncode"),
+                        "error": outcome.get("error", ""),
+                        "at": utcnow(),
+                    }
+                ),
+            )
+        return outcome
 
     def tick(self) -> dict[str, Any]:
         """One supervisor iteration. Returns what it did, for tests and logs."""
@@ -255,13 +340,13 @@ class Supervisor:
             # Without anchors there are no intervals to honour and no gate to
             # enforce; the clocks stop rather than guessing.
             result["error"] = f"anchors unusable: {exc}"
-            # Anchors define the canary's own limits, so a canary cannot be
-            # supervised without them. Clearing it is the conservative move.
-            if canary_module.active_pointer(self.store) is not None:
-                canary_module.clear(
-                    self.store, reason="serving anchors unusable", actor="supervisor", auto=True
-                )
-                result["canary_cleared"] = True
+            # Anchors define the canary's own limits and the guard patterns a
+            # running canary is judged by, so it cannot be supervised without
+            # them. Unusable anchors are at least as dangerous as changed ones,
+            # and are handled identically: clear, freeze, stop reflecting —
+            # while audit and rollback stay available.
+            self._contain(f"serving anchors unusable: {exc}", result,
+                          trigger={"anchor_error": type(exc).__name__})
             return result
 
         # An anchor edited after init changes the canary's own limits and the
@@ -270,22 +355,27 @@ class Supervisor:
         drift = self._anchor_drift(identity)
         if drift is not None:
             result["anchor_drift"] = drift
-            if canary_module.active_pointer(self.store) is not None:
-                canary_module.clear(
-                    self.store,
-                    reason=f"anchor files changed since init ({drift})",
-                    actor="supervisor",
-                    auto=True,
-                )
-                result["canary_cleared"] = True
-            if not is_frozen(self.store):
-                freeze_module.freeze(
-                    self.store,
-                    reason=f"anchor files changed since init ({drift})",
-                    actor="supervisor",
-                    trigger={"mismatch_field": drift},
-                )
-            result["frozen"] = True
+            self._contain(
+                f"anchor files changed since init ({drift})",
+                result,
+                trigger={"mismatch_field": drift},
+            )
+            return result
+
+        # A champion hard veto observed while serving: the failing answer was
+        # already withheld, and this is what stops it recurring. The pointer is
+        # never moved automatically — choosing what to serve instead is a human
+        # decision, and rollback stays available.
+        champion_breach = self._champion_breach(serving)
+        if champion_breach is not None:
+            result["champion_veto"] = champion_breach
+            self._contain(
+                f"champion {champion_breach['candidate_id'][:12]} tripped a hard veto "
+                f"while serving ({champion_breach['veto']})",
+                result,
+                trigger=champion_breach,
+                clear_canary=False,
+            )
             return result
 
         # Acting on what serve spooled is the supervisor's job: the serving
@@ -299,16 +389,20 @@ class Supervisor:
         result["frozen"] = frozen
 
         # Reflection is forward motion, so a freeze stops it.
-        if not frozen and self._due(CONFIG_LAST_REFLECT, limits.reflect_interval_seconds):
+        if not frozen and self._due(
+            "reflect", CONFIG_LAST_REFLECT, limits.reflect_interval_seconds
+        ):
             result["reflected"] = True
-            result["reflect"] = self._spawn("reflect-once")
-            self.store.set_config(CONFIG_LAST_REFLECT, utcnow())
+            result["reflect"] = self._run_clock(
+                "reflect", CONFIG_LAST_REFLECT, "reflect-once"
+            )
 
         # The audit clock runs regardless of the freeze.
-        if self._due(CONFIG_LAST_AUDIT, limits.audit_interval_seconds):
+        if self._due("audit", CONFIG_LAST_AUDIT, limits.audit_interval_seconds):
             result["audited"] = True
-            result["audit"] = self._spawn("audit", "--all-unaudited")
-            self.store.set_config(CONFIG_LAST_AUDIT, utcnow())
+            result["audit"] = self._run_clock(
+                "audit", CONFIG_LAST_AUDIT, "audit", "--all-unaudited"
+            )
 
         if result["reflected"] or result["audited"]:
             self.store.append_event(
@@ -321,21 +415,96 @@ class Supervisor:
             )
         return result
 
-    def _spawn(self, *command: str, timeout: float = 900.0) -> dict[str, Any]:
-        """Run a one-shot child. Its failure is recorded, never raised."""
-
+    def _child_argv(self, *command: str) -> list[str]:
+        if command[0] == "serve":
+            # The serving child runs its own entry point rather than the CLI:
+            # cli.py imports the gate, the promoter and the auditor, and a
+            # process that holds none of them is a stronger statement than one
+            # that merely never calls them.
+            argv = [
+                self.python_executable, "-s", "-B", "-m",
+                "godel_agent_prototype.resident.serve",
+                "--state-dir", str(self.state_dir),
+            ]
+            if self.anchors_dir:
+                argv.extend(["--anchors-dir", str(self.anchors_dir)])
+            return argv
         argv = [
             self.python_executable, "-s", "-B", "-m",
             "godel_agent_prototype.resident",
             "--state-dir", str(self.state_dir),
             *command,
         ]
-        if self.anchors_dir and command[0] in ("reflect-once", "audit"):
+        if self.anchors_dir and command[0] in ("reflect-once", "audit", "serve"):
             argv.extend(["--anchors-dir", str(self.anchors_dir)])
+        return argv
+
+    def _contain(
+        self,
+        reason: str,
+        result: dict[str, Any],
+        trigger: dict[str, Any] | None = None,
+        clear_canary: bool = True,
+    ) -> None:
+        """Clear the canary if asked, then freeze. Never moves the champion."""
+
+        if clear_canary and canary_module.active_pointer(self.store) is not None:
+            canary_module.clear(self.store, reason=reason, actor="supervisor", auto=True)
+            result["canary_cleared"] = True
+        if not is_frozen(self.store):
+            freeze_module.freeze(
+                self.store, reason=reason, actor="supervisor", trigger=dict(trigger or {})
+            )
+        result["frozen"] = True
+
+    def _champion_breach(self, serving: Any) -> dict[str, Any] | None:
+        """An ingested champion veto that matches the champion serving now.
+
+        Matched against the current pointer on purpose: a veto recorded against
+        an artifact that is no longer champion describes a problem that has
+        already been replaced.
+        """
+
+        champion = self.store.read_champion()
+        if champion is None:
+            return None
+        since = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=serving.canary_observation_window_seconds)
+        ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        for row in self.store.list_serving_vetoes(kind="champion_veto", since=since):
+            if (
+                row["candidate_id"] == champion.candidate_id
+                and row["artifact_hash"] == champion.artifact_hash
+            ):
+                return {
+                    "candidate_id": row["candidate_id"],
+                    "artifact_hash": row["artifact_hash"],
+                    "veto": row["veto"],
+                    "observation_id": row["observation_id"],
+                }
+        return None
+
+    def _spawn(self, *command: str, timeout: float = 900.0) -> dict[str, Any]:
+        """Run a one-shot child. Its failure is recorded, never raised.
+
+        The child gets the same minimal environment the candidate runner uses,
+        which is what makes the package importable: running with an empty
+        environment from the state directory, ``python -m
+        godel_agent_prototype.resident`` cannot find the package at all, and
+        every clock tick would fail with an unexplained exit code 1.
+        """
+
+        argv = self._child_argv(*command)
         try:
             completed = subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout,
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
                 cwd=str(self.state_dir),
+                env=_minimal_environment(),
+                close_fds=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return {"command": command[0], "ok": False, "error": type(exc).__name__}
@@ -346,6 +515,130 @@ class Supervisor:
             # stderr can quote a query, so only its tail length is kept.
             "stderr_bytes": len(completed.stderr or ""),
         }
+
+    # --- the owned serve child ----------------------------------------------
+
+    def serve_socket_path(self) -> Path:
+        return runtime_dir_for(self.state_dir) / "serve.sock"
+
+    def _serve_alive(self) -> bool:
+        return self.serve_process is not None and self.serve_process.poll() is None
+
+    def ensure_serve(self) -> dict[str, Any] | None:
+        """Start the serve child if it is not running. Returns what happened.
+
+        Only ever touches the ``Popen`` handle this supervisor created — no PID
+        is read from a file and signalled, because a stale PID file can name a
+        process that is now something else entirely.
+        """
+
+        if not self.manage_serve or self._serve_alive():
+            return None
+
+        exited = None
+        if self.serve_process is not None:
+            exited = self.serve_process.poll()
+            self.serve_process = None
+            self._serve_failures = min(self._serve_failures + 1, 10)
+            self.store.append_event(
+                SERVE_EVENT,
+                payload={"event": "exited", "returncode": exited,
+                         "failures": self._serve_failures},
+            )
+
+        now = time.monotonic()
+        if now < self._serve_retry_at:
+            return {"event": "backoff", "retry_in": round(self._serve_retry_at - now, 2)}
+
+        try:
+            process = subprocess.Popen(
+                self._child_argv("serve"),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=str(self.state_dir),
+                env=_minimal_environment(),
+                close_fds=True,
+                start_new_session=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._serve_failures = min(self._serve_failures + 1, 10)
+            self._serve_retry_at = time.monotonic() + self._serve_backoff()
+            self.store.append_event(
+                SERVE_EVENT, payload={"event": "start_failed", "error": type(exc).__name__}
+            )
+            return {"event": "start_failed", "error": type(exc).__name__}
+
+        socket_path = self.serve_socket_path()
+        deadline = time.monotonic() + SERVE_READY_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if socket_path.exists():
+                self.serve_process = process
+                self._serve_failures = 0
+                self._serve_retry_at = 0.0
+                self.store.append_event(
+                    SERVE_EVENT, payload={"event": "started", "pid": process.pid}
+                )
+                return {"event": "started", "pid": process.pid}
+            if process.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        # Never became ready: reap it rather than leaving an orphan behind.
+        self._terminate_owned(process)
+        self._serve_failures = min(self._serve_failures + 1, 10)
+        self._serve_retry_at = time.monotonic() + self._serve_backoff()
+        self.store.append_event(
+            SERVE_EVENT,
+            payload={"event": "not_ready", "failures": self._serve_failures},
+        )
+        return {"event": "not_ready"}
+
+    def _serve_backoff(self) -> float:
+        return min(
+            SERVE_RESTART_MAX_SECONDS,
+            SERVE_RESTART_BASE_SECONDS * (2 ** max(0, self._serve_failures - 1)),
+        )
+
+    def _terminate_owned(self, process: Any, grace: float = 5.0) -> None:
+        """Stop a child this supervisor started, and only that child."""
+
+        if process is None or process.poll() is not None:
+            return
+        try:
+            pgid = os.getpgid(process.pid)
+        except (ProcessLookupError, OSError):
+            return
+        owns_group = pgid == process.pid
+        try:
+            if owns_group:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            process.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            if owns_group:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def stop_serve(self) -> None:
+        if self.serve_process is not None:
+            self._terminate_owned(self.serve_process)
+            self.store.append_event(SERVE_EVENT, payload={"event": "stopped"})
+            self.serve_process = None
 
     # --- control channel ---------------------------------------------------
 
@@ -363,6 +656,27 @@ class Supervisor:
                 }
             if command == "ingest":
                 return {"ok": True, "report": ingest(self.store).to_dict()}
+            if command == "canary_set":
+                from .canary import activate
+
+                pointer = activate(
+                    self.store,
+                    message["candidate_id"],
+                    percent=int(message["percent"]),
+                    reason=message.get("reason", ""),
+                    actor=message.get("actor", ""),
+                    anchors_dir=self.anchors_dir,
+                )
+                return {"ok": True, "canary": pointer.public_dict() if pointer else None}
+            if command == "canary_clear":
+                from .canary import clear
+
+                activation_id = clear(
+                    self.store,
+                    reason=message.get("reason", ""),
+                    actor=message.get("actor", ""),
+                )
+                return {"ok": True, "cleared": activation_id}
             if command == "promote":
                 from .promote import promote
 
@@ -440,11 +754,13 @@ class Supervisor:
                     ready.set()
                 ticks = 0
                 while stop is None or not stop.is_set():
+                    self.ensure_serve()
                     self._accept_one(server)
                     self.tick()
                     ticks += 1
                     if max_ticks is not None and ticks >= max_ticks:
                         break
             finally:
+                self.stop_serve()
                 server.close()
                 socket_path.unlink(missing_ok=True)

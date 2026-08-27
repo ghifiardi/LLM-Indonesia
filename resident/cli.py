@@ -301,6 +301,11 @@ def build_parser() -> argparse.ArgumentParser:
     supervise_parser.add_argument(
         "--max-ticks", type=int, default=None, help="Stop after this many ticks."
     )
+    supervise_parser.add_argument(
+        "--no-serve",
+        action="store_true",
+        help="Do not start or own a serve child; drive the clocks only.",
+    )
 
     return parser
 
@@ -634,7 +639,7 @@ def _cmd_canary(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
         if pointer is None:
             emit({"canary": None}, ["no active canary"])
             return EXIT_OK
-        breaches = canary_module.recent_breaches(store, pointer.candidate_id, 3600)
+        breaches = canary_module.recent_breaches(store, pointer, 3600)
         emit(
             {"canary": pointer.public_dict(), "recent_breaches": breaches},
             [
@@ -648,11 +653,46 @@ def _cmd_canary(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
         return EXIT_OK
 
     if args.canary_command == "clear":
+        try:
+            delegated = _delegate_if_supervised(
+                store,
+                {"command": "canary_clear", "reason": args.reason, "actor": args.actor},
+            )
+        except supervisor_module.SupervisorError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        if delegated is not None:
+            if not delegated.get("ok"):
+                print(f"error: {delegated.get('error')}", file=sys.stderr)
+                return EXIT_ERROR
+            emit(delegated, [f"cleared via the supervisor: {delegated.get('cleared')}"])
+            return EXIT_OK
         activation_id = canary_module.clear(store, reason=args.reason, actor=args.actor)
         if activation_id is None:
             emit({"cleared": None}, ["no active canary to clear"])
             return EXIT_OK
         emit({"cleared": activation_id}, [f"cleared canary activation {activation_id}"])
+        return EXIT_OK
+
+    try:
+        delegated = _delegate_if_supervised(
+            store,
+            {
+                "command": "canary_set",
+                "candidate_id": args.candidate_id,
+                "percent": args.percent,
+                "reason": args.reason,
+                "actor": args.actor,
+            },
+        )
+    except supervisor_module.SupervisorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if delegated is not None:
+        if not delegated.get("ok"):
+            print(f"error: {delegated.get('error')}", file=sys.stderr)
+            return EXIT_ERROR
+        emit(delegated, [f"canary set via the supervisor: {delegated.get('canary')}"])
         return EXIT_OK
 
     try:
@@ -686,13 +726,18 @@ def _cmd_supervise(store: ResidentStore, args: argparse.Namespace, emit: Any) ->
     state_dir = store.state_dir
     store.close()
     supervisor = supervisor_module.Supervisor(
-        state_dir, anchors_dir=args.anchors_dir, poll_interval=args.poll_interval
+        state_dir,
+        anchors_dir=args.anchors_dir,
+        poll_interval=args.poll_interval,
+        manage_serve=not args.no_serve,
     )
     print(f"supervising {state_dir}", file=sys.stderr)
     print(
         "owns the champion pointer; reflect and audit run as one-shot children.",
         file=sys.stderr,
     )
+    if not args.no_serve:
+        print("starting and supervising a serve child.", file=sys.stderr)
     try:
         supervisor.run(max_ticks=args.max_ticks)
     except KeyboardInterrupt:

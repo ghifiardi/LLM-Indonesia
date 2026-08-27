@@ -121,6 +121,14 @@ Only the bucket is recorded. The salt never reaches an event, a request row, or
 an activation row. With no conversation id the query is the routing key, which
 biases sampling toward repeated questions.
 
+### Observations are scoped to their activation
+
+A canary veto records the `activation_id` that produced it, and breaches are
+counted by activation *and* artifact. Counting by candidate alone would let a
+candidate that was canaried, cleared, fixed and canaried again be judged on the
+evidence from before the fix — reverting the new activation the moment it
+started.
+
 ### What happens when a canary misbehaves
 
 Its output is discarded and **the champion answers instead** — not the fixed
@@ -134,13 +142,20 @@ supervisor acts on it — clearing the canary through the same
 intent → atomic pointer → finalize protocol as promotion, and freezing.
 
 **The champion is never moved automatically.** When the champion itself trips a
-hard veto, the answer is withheld, the observation is recorded, and the resident
-freezes with the pointer unchanged. Choosing a rollback target stays a human
-decision, and `audit` and `rollback` remain available throughout.
+hard veto, the answer is withheld *first* — that is what contains the incident —
+and the supervisor then freezes with the pointer unchanged. Freezing alone would
+not contain anything while the failing answer still reached the user. Choosing a
+rollback target stays a human decision, and `audit` and `rollback` remain
+available throughout.
 
-An anchor edited after init changes the canary's own limits and the guard
-patterns it is judged by, so the supervisor clears a live canary and freezes
-when it notices the drift.
+Anchors that are **changed, missing, or unparseable** all take the same path:
+clear a live canary, freeze, stop reflecting, keep audit and rollback available.
+An unreadable anchor is at least as dangerous as an edited one.
+
+An artifact that cannot be read or fails its integrity check is a safety
+observation, not an internal error. An unreadable canary artifact falls through
+to the champion; an unreadable champion artifact returns the fixed fallback. The
+client never sees a generic failure that nobody investigates.
 
 ## Serving
 
@@ -152,10 +167,20 @@ construction rather than by configuration — and **modifies nothing**:
 - it reads the champion pointer and artifact as files, verified on read;
 - it appends anything that must be recorded to an append-only spool, which the
   supervisor ingests later;
-- it imports `store`'s read surface, `eval_records`, `runner`, `spool` and
-  `anchors` — and none of `reflect`, `gate`, `promote`, `rollback`, `budget`,
-  `audit`, or `freeze`. A test asserts the import set rather than trusting the
-  comment.
+- it **loads** none of `reflect`, `gate`, `promote`, `rollback`, `budget`,
+  `audit`, `canary`, or `supervisor` — measured by inspecting a real process's
+  `sys.modules`, not inferred from import statements.
+
+Two things were needed to make that last point true rather than aspirational.
+The package barrel used to import every submodule eagerly, so importing *any*
+one of them loaded the whole package; it is now lazy. And the serving process
+runs its own entry point, `python -m godel_agent_prototype.resident.serve`,
+because starting through `cli.py` imports the gate, the promoter and the
+auditor regardless of what serve can call. `canary_view` holds the pointer
+parsing and routing so serve never reaches `canary`'s mutation machinery.
+
+A process that holds none of those modules is a stronger statement than one
+that merely never calls them.
 
 Each request runs in its own isolated child, the same as an evaluation. That
 costs a process spawn — around 130ms, reported as `latency_ms` — and it is the

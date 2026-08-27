@@ -27,8 +27,6 @@ recovery converges from an interruption at any point.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -38,6 +36,13 @@ from typing import Any
 from . import states
 from .anchors import ServingConfig, ThresholdError, load_all_anchors, resolve_anchors_dir
 from .archive import CandidateArchive
+from .canary_view import (
+    ROUTE_CANARY,
+    CanaryPointer,
+    active_pointer,
+    routes_to_canary,
+    routing_bucket,
+)
 from .freeze import freeze, is_frozen
 from .gate import evaluate_gate
 from .store import ResidentError, ResidentStore, new_id, utcnow
@@ -52,79 +57,13 @@ CANARY_ACTIVATED_EVENT = "canary_activated"
 CANARY_CLEARED_EVENT = "canary_cleared"
 CANARY_RECOVERED_EVENT = "canary_recovered"
 
-ROUTE_CANARY = "canary"
-
-
 class CanaryError(ResidentError):
     """Raised when a canary cannot be activated or cleared."""
 
 
-@dataclass(frozen=True)
-class CanaryPointer:
-    activation_id: str
-    candidate_id: str
-    artifact_hash: str
-    percent: int
-    routing_salt: str
-    activated_at: str
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "CanaryPointer":
-        return cls(
-            activation_id=payload["activation_id"],
-            candidate_id=payload["candidate_id"],
-            artifact_hash=payload["artifact_hash"],
-            percent=int(payload["percent"]),
-            routing_salt=payload["routing_salt"],
-            activated_at=payload.get("activated_at", ""),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "activation_id": self.activation_id,
-            "candidate_id": self.candidate_id,
-            "artifact_hash": self.artifact_hash,
-            "percent": self.percent,
-            "routing_salt": self.routing_salt,
-            "activated_at": self.activated_at,
-        }
-
-    def public_dict(self) -> dict[str, Any]:
-        """Everything except the salt. What may be logged or returned."""
-
-        payload = self.to_dict()
-        payload.pop("routing_salt")
-        return payload
-
-
-def routing_bucket(salt: str, query: str, conversation_id: str = "") -> int:
-    """Stable bucket in [0, 100) for one routing key.
-
-    Keyed rather than plain: a plain digest of the query lets anyone compute
-    which side they land on and craft a query to reach the canary. The
-    conversation id is the routing key when there is one so a conversation does
-    not switch policies mid-way; without one the query is used, which biases
-    sampling toward repeated questions.
-    """
-
-    key = (conversation_id or query).encode("utf-8")
-    digest = hmac.new(salt.encode("utf-8"), key, hashlib.sha256).hexdigest()
-    return int(digest[:8], 16) % 100
-
-
-def routes_to_canary(pointer: CanaryPointer, query: str, conversation_id: str = "") -> tuple[bool, int]:
-    bucket = routing_bucket(pointer.routing_salt, query, conversation_id)
-    return bucket < pointer.percent, bucket
-
-
-def active_pointer(store: ResidentStore) -> CanaryPointer | None:
-    payload = store.read_canary()
-    if payload is None:
-        return None
-    try:
-        return CanaryPointer.from_dict(payload)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ResidentError(f"Canary pointer is malformed: {exc}") from exc
+# CanaryPointer, routing and pointer reads live in ``canary_view`` so the
+# serving process can use them without importing this module's mutation
+# machinery. Re-exported here so callers have one name to use.
 
 
 # --- activation -------------------------------------------------------------
@@ -356,12 +295,34 @@ def recover(store: ResidentStore) -> list[dict[str, str]]:
 # --- automatic revert -------------------------------------------------------
 
 
-def recent_breaches(store: ResidentStore, candidate_id: str, window_seconds: int) -> int:
+def recent_breaches(
+    store: ResidentStore,
+    pointer: "CanaryPointer",
+    window_seconds: int,
+) -> int:
+    """Breaches attributable to *this* activation, inside the window.
+
+    Counting by candidate id alone would let observations from a previous
+    activation of the same candidate revert a fresh one the moment it starts —
+    a candidate that was canaried, cleared, fixed and canaried again would be
+    judged on the evidence from before the fix.
+
+    The artifact is checked too: a candidate id can outlive a change to what it
+    points at.
+    """
+
     since = (
         datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
     ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    rows = store.list_serving_vetoes(kind="canary_veto", since=since)
-    return sum(1 for row in rows if row["candidate_id"] == candidate_id)
+    rows = store.list_serving_vetoes(
+        kind="canary_veto", since=since, activation_id=pointer.activation_id
+    )
+    return sum(
+        1
+        for row in rows
+        if row["candidate_id"] == pointer.candidate_id
+        and row["artifact_hash"] == pointer.artifact_hash
+    )
 
 
 def enforce(
@@ -380,7 +341,7 @@ def enforce(
     if pointer is None:
         return None
 
-    breaches = recent_breaches(store, pointer.candidate_id, serving.canary_observation_window_seconds)
+    breaches = recent_breaches(store, pointer, serving.canary_observation_window_seconds)
     if breaches < serving.canary_breach_count:
         return None
 

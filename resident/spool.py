@@ -247,6 +247,10 @@ def _apply(store: ResidentStore, record: dict[str, Any]) -> bool:
             "artifact_hash": payload.get("artifact_hash"),
             "request_id": payload.get("request_id"),
             "veto": str(payload.get("veto", ""))[:64],
+            # Scoped to the activation that produced it: a candidate can be
+            # canaried more than once, and observations from a previous
+            # activation must not count against a new one.
+            "activation_id": str(payload.get("activation_id", ""))[:64],
             "detail": payload.get("detail") or {},
         }
     )

@@ -30,6 +30,7 @@ import json
 import os
 import re
 import socket
+import sys
 import stat
 import threading
 from dataclasses import dataclass
@@ -44,11 +45,13 @@ from .anchors import (
     load_all_anchors,
     resolve_anchors_dir,
 )
-from . import canary as canary_module
+from . import canary_view as canary_module
 from .runner import RunnerLimits, ServeOutcome, SubprocessCandidateRunner
 from .spool import KIND_CANARY_VETO, KIND_CHAMPION_VETO, KIND_SERVED_REQUEST, SpoolWriter
 from .store import (
     CONFIG_ENVIRONMENT,
+    resolve_state_dir,
+    ResidentError,
     CONFIG_THRESHOLD_IDENTITY,
     ResidentStore,
     new_id,
@@ -63,6 +66,10 @@ VETO_RAISED = "raised"
 VETO_TIMEOUT = "timed_out"
 VETO_UNSAFE_OUTPUT = "unsafe_output"
 VETO_EXECUTION_FAILED = "execution_failed"
+#: The artifact a pointer names could not be read or failed its integrity
+#: check. Rare, and exactly the case where a generic "internal error" would
+#: hide a tampered store behind a shrug.
+VETO_ARTIFACT_UNREADABLE = "artifact_unreadable"
 
 MAX_REQUEST_LINE_BYTES = 32 * 1024
 MAX_QUERY_CHARS = 8000
@@ -182,6 +189,21 @@ def _classify(outcome: ServeOutcome, config: ServingConfig) -> str:
     return ""
 
 
+def _read_artifact(context: ServingContext, artifact_hash: str) -> str | None:
+    """Read a verified artifact, or None if it cannot be trusted.
+
+    A missing or corrupt artifact is a safety observation, not an internal
+    error: it means the immutable store was modified out of band, and that must
+    leave a record rather than a generic failure the client sees and nobody
+    investigates.
+    """
+
+    try:
+        return context.store.read_artifact(artifact_hash)
+    except ResidentError:
+        return None
+
+
 def _run(context: ServingContext, policy_source: str, artifact_hash: str,
          query: str) -> tuple[Any, str]:
     outcome = context.runner.execute_one(
@@ -222,10 +244,21 @@ def answer(
         selected, bucket = canary_module.routes_to_canary(pointer, query, conversation_id)
         if selected:
             requested_route = ROUTE_CANARY
-            outcome, canary_veto = _run(
-                context, context.store.read_artifact(pointer.artifact_hash),
-                pointer.artifact_hash, query,
-            )
+            canary_source = _read_artifact(context, pointer.artifact_hash)
+            if canary_source is None:
+                _spool_veto(
+                    context, KIND_CANARY_VETO, request_id, pointer.candidate_id,
+                    pointer.artifact_hash, VETO_ARTIFACT_UNREADABLE,
+                    activation_id=pointer.activation_id,
+                )
+                # Fall through to the champion rather than failing the request.
+                canary_veto = VETO_ARTIFACT_UNREADABLE
+                outcome = ServeOutcome(status=VETO_ARTIFACT_UNREADABLE)
+                canary_source = ""
+            else:
+                outcome, canary_veto = _run(
+                    context, canary_source, pointer.artifact_hash, query
+                )
             if not canary_veto:
                 return _success_response(
                     context, request_id, query, outcome, ROUTE_CANARY, ROUTE_CANARY,
@@ -234,34 +267,32 @@ def answer(
             # Discarded here. Serve cannot clear the canary itself — it holds a
             # read-only connection — so it records the observation and the
             # supervisor acts on it.
-            context.spool.write(
-                KIND_CANARY_VETO,
-                new_id(),
-                {
-                    "candidate_id": pointer.candidate_id,
-                    "artifact_hash": pointer.artifact_hash,
-                    "request_id": request_id,
-                    "veto": canary_veto,
-                    "detail": outcome.to_record(),
-                },
-                durable=True,
-            )
+            elif canary_veto != VETO_ARTIFACT_UNREADABLE:
+                _spool_veto(
+                    context, KIND_CANARY_VETO, request_id, pointer.candidate_id,
+                    pointer.artifact_hash, canary_veto,
+                    activation_id=pointer.activation_id, detail=outcome.to_record(),
+                )
 
-    policy_source = context.store.read_artifact(champion.artifact_hash)
+    policy_source = _read_artifact(context, champion.artifact_hash)
+    if policy_source is None:
+        # The champion's own artifact is unreadable. The client gets the fixed
+        # fallback, never a generic internal error, and the reason is recorded.
+        _spool_veto(
+            context, KIND_CHAMPION_VETO, request_id, champion.candidate_id,
+            champion.artifact_hash, VETO_ARTIFACT_UNREADABLE,
+        )
+        return _fallback_response(
+            context, request_id, requested_route, champion, VETO_ARTIFACT_UNREADABLE,
+            query=query, bucket=bucket, pointer=pointer,
+        )
+
     outcome, veto = _run(context, policy_source, champion.artifact_hash, query)
 
     if veto:
-        context.spool.write(
-            KIND_CHAMPION_VETO,
-            new_id(),
-            {
-                "candidate_id": champion.candidate_id,
-                "artifact_hash": champion.artifact_hash,
-                "request_id": request_id,
-                "veto": veto,
-                "detail": outcome.to_record(),
-            },
-            durable=True,
+        _spool_veto(
+            context, KIND_CHAMPION_VETO, request_id, champion.candidate_id,
+            champion.artifact_hash, veto, detail=outcome.to_record(),
         )
         return _fallback_response(
             context, request_id, requested_route, champion, veto,
@@ -272,6 +303,34 @@ def answer(
         context, request_id, query, outcome, requested_route, ROUTE_CHAMPION,
         champion, pointer, bucket,
     )
+
+
+def _spool_veto(
+    context: ServingContext,
+    kind: str,
+    request_id: str,
+    candidate_id: str,
+    artifact_hash: str,
+    veto: str,
+    activation_id: str = "",
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Record that a veto fired — never what the policy said.
+
+    Written durably: this is what drives a canary being cleared or the resident
+    freezing, and losing one would delay containment.
+    """
+
+    payload: dict[str, Any] = {
+        "candidate_id": candidate_id,
+        "artifact_hash": artifact_hash,
+        "request_id": request_id,
+        "veto": veto,
+        "detail": detail or {},
+    }
+    if activation_id:
+        payload["activation_id"] = activation_id
+    context.spool.write(kind, new_id(), payload, durable=True)
 
 
 def _canary_pointer(context: ServingContext) -> Any:
@@ -516,6 +575,46 @@ def serve_forever(
         context.spool.close()
 
 
+def main(argv: list[str] | None = None) -> int:
+    """Standalone entry point: ``python -m godel_agent_prototype.resident.serve``.
+
+    Deliberately separate from the CLI. Starting the serving process through
+    ``cli.py`` would import the gate, the promoter, the auditor and the
+    supervisor into it — not because it can call them, but because that module
+    imports them. Running from here, the process holds only what it needs, and
+    a test can check that by inspecting its loaded modules.
+    """
+
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python3 -m godel_agent_prototype.resident.serve",
+        description="Answer queries from the champion. Read-only; modifies nothing.",
+    )
+    parser.add_argument("--state-dir", default=None)
+    parser.add_argument("--anchors-dir", default=None)
+    args = parser.parse_args(argv)
+
+    state_dir = resolve_state_dir(args.state_dir)
+    try:
+        socket_path = prepare_socket_path(state_dir)
+        context = build_context(state_dir, anchors_dir=args.anchors_dir)
+    except (ServeError, ResidentError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"serving {state_dir} on {socket_path}", file=sys.stderr)
+    print("read-only: this process cannot promote, freeze, or modify state.", file=sys.stderr)
+    try:
+        serve_forever(context, socket_path)
+    except KeyboardInterrupt:
+        pass
+    except ServeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def ask(socket_path: Path, query: str, request_id: str | None = None,
         timeout: float = 60.0, conversation_id: str = "") -> dict[str, Any]:
     """Minimal client. Used by `resident ask` and by tests."""
@@ -544,3 +643,7 @@ def ask(socket_path: Path, query: str, request_id: str | None = None,
         return json.loads(b"".join(chunks).decode("utf-8").split("\n", 1)[0])
     finally:
         client.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

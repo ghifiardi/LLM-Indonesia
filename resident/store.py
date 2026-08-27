@@ -318,6 +318,11 @@ _MIGRATION_8 = (
     "CREATE INDEX IF NOT EXISTS idx_canary_state ON canary_activations(state)",
 )
 
+_MIGRATION_9 = (
+    "ALTER TABLE serving_vetoes ADD COLUMN activation_id TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_vetoes_activation ON serving_vetoes(activation_id)",
+)
+
 #: Sequential schema migrations, applied in order for any version gap.
 #:
 #: Append a new ``(version, statements)`` entry; never edit a shipped one. Each
@@ -333,6 +338,7 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (6, _MIGRATION_6),
     (7, _MIGRATION_7),
     (8, _MIGRATION_8),
+    (9, _MIGRATION_9),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -1244,8 +1250,8 @@ class ResidentStore:
                 """
                 INSERT OR IGNORE INTO serving_vetoes
                     (observation_id, created_at, ingested_at, kind, candidate_id,
-                     artifact_hash, request_id, veto, detail_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     artifact_hash, request_id, veto, detail_json, activation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["observation_id"],
@@ -1257,6 +1263,7 @@ class ResidentStore:
                     record.get("request_id"),
                     record.get("veto", ""),
                     json.dumps(dict(record.get("detail") or {}), ensure_ascii=False),
+                    record.get("activation_id", "") or "",
                 ),
             )
             return cursor.rowcount > 0
@@ -1273,7 +1280,11 @@ class ResidentStore:
         return int(self.conn.execute("SELECT COUNT(*) AS n FROM served_requests").fetchone()["n"])
 
     def list_serving_vetoes(
-        self, kind: str | None = None, since: str | None = None, limit: int | None = None
+        self,
+        kind: str | None = None,
+        since: str | None = None,
+        limit: int | None = None,
+        activation_id: str | None = None,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM serving_vetoes"
         clauses: list[str] = []
@@ -1284,6 +1295,9 @@ class ResidentStore:
         if since is not None:
             clauses.append("created_at >= ?")
             params.append(since)
+        if activation_id is not None:
+            clauses.append("activation_id = ?")
+            params.append(activation_id)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY seq DESC"

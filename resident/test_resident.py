@@ -32,8 +32,9 @@ from . import audit as audit_module
 from . import serve as serve_module
 from . import spool as spool_module
 from . import supervisor as supervisor_module
+from . import freeze as freeze_module
 from . import states
-from .anchors import ServingConfig, load_thresholds
+from .anchors import ServingConfig, load_all_anchors, load_thresholds
 from .freeze import (
     FrozenError,
     UnfreezeError,
@@ -3173,8 +3174,10 @@ def test_supervisor_control_channel_is_small_and_refuses_the_unknown() -> None:
             missing = supervisor_module.call_control(socket_path, {"command": "promote"})
             assert missing["ok"] is False and "missing field" in missing["error"]
 
+        # Small and closed: every pointer-changing operation, plus two reads.
+        # It exists so the pointer has one writer, not to become a second CLI.
         assert supervisor_module.CONTROL_COMMANDS == frozenset(
-            {"promote", "rollback", "status", "ingest"}
+            {"promote", "rollback", "canary_set", "canary_clear", "status", "ingest"}
         )
 
 
@@ -3649,6 +3652,419 @@ def test_routing_salt_never_leaves_the_pointer() -> None:
             )
 
 
+# --- Phase 4 hardening: supervisor ownership and clock retries ----------------
+
+
+def test_supervisor_children_can_import_the_package() -> None:
+    """A real child, really invoked — no mocked _spawn.
+
+    The child runs from the state directory with a stripped environment. Without
+    a trusted package path it cannot import the package at all, and every clock
+    tick fails with an unexplained exit code 1.
+    """
+
+    with supervised_state() as (root, anchors, supervisor):
+        outcome = supervisor._spawn("status")
+        assert outcome["ok"] is True, outcome
+        assert outcome["returncode"] == 0
+        assert outcome["stderr_bytes"] == 0
+
+        # And a real one-shot clock command, not just a read.
+        audit = supervisor._spawn("audit", "--all-unaudited")
+        assert audit["ok"] is True, audit
+
+
+def test_supervisor_owns_starts_restarts_and_stops_the_serve_child() -> None:
+    with supervised_state(seed=SERVING_SAFE_POLICY) as (root, anchors, supervisor):
+        supervisor.manage_serve = True
+        stop, ready = threading.Event(), threading.Event()
+        thread = threading.Thread(
+            target=supervisor.run, kwargs={"stop": stop, "ready": ready}, daemon=True
+        )
+        thread.start()
+        assert ready.wait(25), "supervisor did not start"
+        try:
+            socket_path = supervisor.serve_socket_path()
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                if socket_path.exists() and supervisor.serve_process is not None:
+                    break
+                time.sleep(0.2)
+            assert supervisor.serve_process is not None, "serve child was never started"
+            assert supervisor.serve_process.poll() is None
+            first_pid = supervisor.serve_process.pid
+
+            # It really answers.
+            response = serve_module.ask(socket_path, "kartu saya hilang")
+            assert SERVE_SENTINEL in response["answer"]
+
+            # An unexpected exit is noticed and restarted.
+            supervisor.serve_process.terminate()
+            supervisor.serve_process.wait(timeout=15)
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                process = supervisor.serve_process
+                if process is not None and process.poll() is None and process.pid != first_pid:
+                    break
+                time.sleep(0.2)
+            assert supervisor.serve_process.pid != first_pid, "serve was not restarted"
+        finally:
+            stop.set()
+            thread.join(timeout=40)
+
+        # Shutdown reaps the child this supervisor started, and only that one.
+        assert supervisor.serve_process is None
+        kinds = [e.payload.get("event") for e in supervisor.store.list_events()
+                 if e.kind == supervisor_module.SERVE_EVENT]
+        assert "started" in kinds and "stopped" in kinds
+
+
+def test_a_failed_clock_run_does_not_count_as_a_completed_one() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        # Consume the initial due-ness with a working interpreter.
+        supervisor.tick()
+        before_audit = supervisor.store.get_config(supervisor_module.CONFIG_LAST_AUDIT)
+        assert before_audit
+
+        # Force the next audit to fail.
+        supervisor.python_executable = "/nonexistent/interpreter"
+        supervisor.store.set_config(supervisor_module.CONFIG_LAST_AUDIT, "")
+        result = supervisor.tick()
+        assert result["audited"] is True
+        assert result["audit"]["ok"] is False
+
+        # The success timestamp must not have moved: a failed weekly audit that
+        # marked itself complete would suppress retries for a week.
+        assert not supervisor.store.get_config(supervisor_module.CONFIG_LAST_AUDIT)
+        failures = supervisor.store.get_config(
+            supervisor_module.CONFIG_FAILURES.format(clock="audit")
+        )
+        assert int(failures) == 1
+        attempt = supervisor.store.get_config(
+            supervisor_module.CONFIG_LAST_ATTEMPT.format(clock="audit")
+        )
+        assert attempt
+        error = json.loads(
+            supervisor.store.get_config(
+                supervisor_module.CONFIG_LAST_ERROR.format(clock="audit")
+            )
+        )
+        assert error["at"] and ("returncode" in error or error.get("error"))
+
+
+def test_a_failed_clock_backs_off_then_succeeds_on_retry() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        supervisor.python_executable = "/nonexistent/interpreter"
+        supervisor.tick()
+        assert int(
+            supervisor.store.get_config(
+                supervisor_module.CONFIG_FAILURES.format(clock="audit")
+            )
+        ) >= 1
+
+        # Immediately after a failure the clock is inside its backoff window.
+        assert not supervisor._due("audit", supervisor_module.CONFIG_LAST_AUDIT, 300)
+
+        # Pretend the backoff elapsed, and let the retry succeed.
+        supervisor.store.set_config(
+            supervisor_module.CONFIG_LAST_ATTEMPT.format(clock="audit"), ""
+        )
+        supervisor.python_executable = sys.executable
+        assert supervisor._due("audit", supervisor_module.CONFIG_LAST_AUDIT, 300)
+
+        result = supervisor.tick()
+        assert result["audited"] is True and result["audit"]["ok"] is True
+        assert supervisor.store.get_config(supervisor_module.CONFIG_LAST_AUDIT)
+        assert int(
+            supervisor.store.get_config(
+                supervisor_module.CONFIG_FAILURES.format(clock="audit")
+            )
+        ) == 0
+        # And a success restores the no-duplicate behaviour.
+        assert not supervisor._due("audit", supervisor_module.CONFIG_LAST_AUDIT, 300)
+
+
+def test_canary_pointer_changes_delegate_to_the_supervisor() -> None:
+    assert "canary_set" in supervisor_module.CONTROL_COMMANDS
+    assert "canary_clear" in supervisor_module.CONTROL_COMMANDS
+
+    with canary_state(activate=False) as (root, anchors, state_dir, candidate_id, _):
+        supervisor = supervisor_module.Supervisor(
+            state_dir, anchors_dir=str(anchors), poll_interval=0.2
+        )
+        try:
+            with running_supervisor(supervisor) as socket_path:
+                # The pointer has one writer while a supervisor owns the state.
+                response = supervisor_module.call_control(
+                    socket_path,
+                    {
+                        "command": "canary_set",
+                        "candidate_id": candidate_id,
+                        "percent": 10,
+                        "reason": "via the supervisor",
+                        "actor": "tester",
+                    },
+                )
+                assert response["ok"], response
+                assert response["canary"]["candidate_id"] == candidate_id
+                # The salt does not cross the control channel either.
+                assert "routing_salt" not in json.dumps(response)
+
+                cleared = supervisor_module.call_control(
+                    socket_path,
+                    {"command": "canary_clear", "reason": "done", "actor": "tester"},
+                )
+                assert cleared["ok"] and cleared["cleared"]
+        finally:
+            supervisor.close()
+
+        with opened(state_dir) as store:
+            assert canary_module.active_pointer(store) is None
+
+
+# --- Phase 4 hardening: scoping, containment, and the serving import graph ----
+
+
+def test_canary_breaches_are_scoped_to_their_activation() -> None:
+    with canary_state() as (root, anchors, state_dir, candidate_id, first):
+        with opened(state_dir) as store:
+            for index in range(5):
+                store.insert_serving_veto(
+                    {
+                        "observation_id": f"old-{index}",
+                        "created_at": utcnow(),
+                        "kind": spool_module.KIND_CANARY_VETO,
+                        "candidate_id": candidate_id,
+                        "artifact_hash": first.artifact_hash,
+                        "activation_id": first.activation_id,
+                        "veto": serve_module.VETO_UNSAFE_OUTPUT,
+                        "detail": {},
+                    }
+                )
+            assert canary_module.recent_breaches(store, first, 900) == 5
+
+            canary_module.clear(store, reason="manual", actor="ops")
+            second = canary_module.activate(
+                store, candidate_id, percent=10, reason="second try",
+                anchors_dir=str(anchors),
+            )
+            assert second.activation_id != first.activation_id
+
+            # The evidence from before belongs to the activation that produced
+            # it. A candidate that was canaried, cleared, fixed and canaried
+            # again must not be judged on the observations from before the fix.
+            assert canary_module.recent_breaches(store, second, 900) == 0
+
+            _identity, _gate, _budget, serving = load_all_anchors(anchors)
+            assert canary_module.enforce(store, serving) is None
+            assert canary_module.active_pointer(store) is not None
+            assert not is_frozen(store)
+
+
+def test_canary_veto_records_carry_their_activation() -> None:
+    with canary_state(CANARY_TWO_FACED_POLICY) as (root, anchors, state_dir, cid, pointer):
+        context = serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        try:
+            for index in range(40):
+                serve_module.answer(context, f"q{index}", conversation_id=f"u-{index}")
+        finally:
+            context.spool.close()
+            context.store.close()
+
+        with opened(state_dir) as store:
+            spool_module.ingest(store)
+            vetoes = store.list_serving_vetoes(kind=spool_module.KIND_CANARY_VETO)
+            assert vetoes
+            assert all(row["activation_id"] == pointer.activation_id for row in vetoes)
+            scoped = store.list_serving_vetoes(
+                kind=spool_module.KIND_CANARY_VETO, activation_id=pointer.activation_id
+            )
+            assert len(scoped) == len(vetoes)
+            assert store.list_serving_vetoes(
+                kind=spool_module.KIND_CANARY_VETO, activation_id="some-other-activation"
+            ) == []
+
+
+def test_a_champion_hard_veto_freezes_without_moving_the_pointer() -> None:
+    with serving_state(CANARY_TWO_FACED_POLICY) as (root, anchors, context):
+        state_dir = root / "state"
+        champion_before = context.store.require_champion().candidate_id
+        pointer_bytes = context.store.champion_path.read_bytes()
+
+        response = serve_module.answer(context, "kartu hilang")
+        # The failing answer is withheld first; freezing is what stops it
+        # recurring, not what contains it.
+        assert response["route"] == serve_module.ROUTE_FALLBACK
+        assert response["answer"] == context.config.safe_fallback
+        context.spool.close()
+        context.store.close()
+
+        supervisor = supervisor_module.Supervisor(state_dir, anchors_dir=str(anchors))
+        try:
+            result = supervisor.tick()
+            assert result.get("champion_veto"), result
+            assert result["champion_veto"]["candidate_id"] == champion_before
+            assert is_frozen(supervisor.store)
+            # The pointer is untouched and nothing rolled back: choosing what to
+            # serve instead is a human decision.
+            assert supervisor.store.champion_path.read_bytes() == pointer_bytes
+            assert supervisor.store.require_champion().candidate_id == champion_before
+            assert not [
+                event for event in supervisor.store.list_events()
+                if event.kind == "champion_rolled_back"
+            ]
+            # Reflection stops; audit and rollback remain available.
+            assert result.get("reflected") is not True
+        finally:
+            supervisor.close()
+
+
+def test_unusable_anchors_contain_exactly_as_changed_anchors_do() -> None:
+    for corrupt in ("this is not toml {{{", None):
+        with canary_state() as (root, anchors, state_dir, cid, pointer):
+            path = anchors / "serving.toml"
+            if corrupt is None:
+                path.unlink()
+            else:
+                path.write_text(corrupt, encoding="utf-8")
+
+            supervisor = supervisor_module.Supervisor(state_dir, anchors_dir=str(anchors))
+            try:
+                result = supervisor.tick()
+                # Missing or unparseable anchors are at least as dangerous as
+                # changed ones, and take the identical path.
+                assert result.get("canary_cleared") is True, corrupt
+                assert canary_module.active_pointer(supervisor.store) is None
+                assert is_frozen(supervisor.store)
+                assert result.get("reflected") is not True
+                # Audit and rollback stay available while frozen.
+                assert "reflect-once" in freeze_module.BLOCKED_WHILE_FROZEN
+                assert "audit" not in freeze_module.BLOCKED_WHILE_FROZEN
+                assert "rollback" not in freeze_module.BLOCKED_WHILE_FROZEN
+            finally:
+                supervisor.close()
+
+
+def test_serving_process_loads_no_mutation_capable_module() -> None:
+    """Measured in a real interpreter, not inferred from import statements.
+
+    A deferred import inside a function is reachable but never loaded, and the
+    package barrel used to drag in everything regardless — so the only honest
+    check is what a process actually holds.
+    """
+
+    code = (
+        "import godel_agent_prototype.resident.serve, sys, json; "
+        "print(json.dumps(sorted({m.rsplit('.', 1)[-1] for m in sys.modules "
+        "if m.startswith('godel_agent_prototype.resident')})))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-s", "-B", "-c", code],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert completed.returncode == 0, completed.stderr[-500:]
+    loaded = set(json.loads(completed.stdout))
+
+    mutation_capable = {
+        "gate", "freeze", "promote", "rollback", "budget", "audit",
+        "auditor_worker", "audit_protocol", "canary", "reflect", "archive",
+        "supervisor", "cli", "mutators", "experience",
+    }
+    assert not (loaded & mutation_capable), sorted(loaded & mutation_capable)
+    # It does hold what it needs.
+    assert {"serve", "store", "canary_view", "anchors", "spool"} <= loaded
+
+
+def test_the_supervisor_starts_serve_through_its_own_entry_point() -> None:
+    with supervised_state() as (root, anchors, supervisor):
+        argv = supervisor._child_argv("serve")
+        assert "godel_agent_prototype.resident.serve" in argv
+        # Not the CLI, which imports the gate, the promoter and the auditor.
+        assert "godel_agent_prototype.resident" not in argv
+        assert "--state-dir" in argv
+
+        # Other children still go through the CLI.
+        reflect_argv = supervisor._child_argv("reflect-once")
+        assert "godel_agent_prototype.resident" in reflect_argv
+
+
+def test_the_package_barrel_is_lazy() -> None:
+    import importlib
+
+    code = (
+        "import godel_agent_prototype.resident, sys, json; "
+        "print(json.dumps(sorted({m.rsplit('.', 1)[-1] for m in sys.modules "
+        "if m.startswith('godel_agent_prototype.resident')})))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-s", "-B", "-c", code],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert completed.returncode == 0, completed.stderr[-500:]
+    loaded = set(json.loads(completed.stdout))
+    # Importing the package must not drag in every submodule.
+    assert "gate" not in loaded and "promote" not in loaded
+
+    # But every exported name still resolves.
+    package = importlib.import_module("godel_agent_prototype.resident")
+    for name in package.__all__:
+        assert getattr(package, name) is not None, name
+
+
+def test_serving_fails_safe_when_an_artifact_cannot_be_read() -> None:
+    # A canary artifact that cannot be trusted falls through to the champion.
+    with canary_state() as (root, anchors, state_dir, cid, pointer):
+        with opened(state_dir) as store:
+            (store.artifact_dir(pointer.artifact_hash) / "policy.py").write_text(
+                "tampered", encoding="utf-8"
+            )
+        context = serve_module.build_context(state_dir, anchors_dir=str(anchors))
+        try:
+            served = 0
+            for index in range(40):
+                response = serve_module.answer(
+                    context, f"q{index}", conversation_id=f"u-{index}"
+                )
+                if response.get("requested_route") == canary_module.ROUTE_CANARY:
+                    served += 1
+                    assert response["route"] == serve_module.ROUTE_CHAMPION
+                    assert CHAMPION_MARK in response["answer"]
+            assert served > 0
+        finally:
+            context.spool.close()
+            context.store.close()
+
+        with opened(state_dir) as store:
+            spool_module.ingest(store)
+            vetoes = store.list_serving_vetoes(kind=spool_module.KIND_CANARY_VETO)
+            assert vetoes and all(
+                row["veto"] == serve_module.VETO_ARTIFACT_UNREADABLE for row in vetoes
+            )
+
+    # A champion artifact that cannot be trusted yields the fixed fallback —
+    # never a generic internal error with no safety observation behind it.
+    with serving_state() as (root, anchors, context):
+        state_dir = root / "state"
+        champion = context.store.require_champion()
+        (context.store.artifact_dir(champion.artifact_hash) / "policy.py").write_text(
+            "tampered", encoding="utf-8"
+        )
+        response = serve_module.answer(context, "kartu hilang")
+        assert response["ok"] is True
+        assert response["route"] == serve_module.ROUTE_FALLBACK
+        assert response["answer"] == context.config.safe_fallback
+        context.spool.close()
+        context.store.close()
+
+        with opened(state_dir) as store:
+            spool_module.ingest(store)
+            vetoes = store.list_serving_vetoes(kind=spool_module.KIND_CHAMPION_VETO)
+            assert vetoes
+            assert vetoes[0]["veto"] == serve_module.VETO_ARTIFACT_UNREADABLE
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -3789,6 +4205,19 @@ TESTS = [
     test_freeze_blocks_canary_activation,
     test_canary_activation_requires_a_passing_gate_and_bounded_percent,
     test_routing_salt_never_leaves_the_pointer,
+    test_supervisor_children_can_import_the_package,
+    test_supervisor_owns_starts_restarts_and_stops_the_serve_child,
+    test_a_failed_clock_run_does_not_count_as_a_completed_one,
+    test_a_failed_clock_backs_off_then_succeeds_on_retry,
+    test_canary_pointer_changes_delegate_to_the_supervisor,
+    test_canary_breaches_are_scoped_to_their_activation,
+    test_canary_veto_records_carry_their_activation,
+    test_a_champion_hard_veto_freezes_without_moving_the_pointer,
+    test_unusable_anchors_contain_exactly_as_changed_anchors_do,
+    test_serving_process_loads_no_mutation_capable_module,
+    test_the_supervisor_starts_serve_through_its_own_entry_point,
+    test_the_package_barrel_is_lazy,
+    test_serving_fails_safe_when_an_artifact_cannot_be_read,
     test_existing_smoke_suite_still_passes,
 ]
 
