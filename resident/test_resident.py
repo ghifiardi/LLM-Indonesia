@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,7 @@ from . import spool as spool_module
 from . import supervisor as supervisor_module
 from . import freeze as freeze_module
 from . import readiness as readiness_module
+from .readiness import checks as readiness_checks
 from .readiness import observe as observe_module
 from .readiness import report as readiness_report_module
 from . import states
@@ -4467,6 +4469,180 @@ def test_readiness_neither_imports_nor_authorises_promotion() -> None:
         assert "readiness_reports" not in body, path.name
 
 
+# --- the drill catalogue must be valid against real anchors -------------------
+
+
+def _run_whole_catalogue(anchors: Path, state_dir: Path) -> list[Any]:
+    """Run every drill — no `only=` subset. The subsets hid four failures."""
+
+    with opened(state_dir) as store:
+        initialize(
+            store,
+            env_name="id_support",
+            seed_policy=readiness_checks.SAFE_SEED,
+            anchors_dir=str(anchors),
+        )
+        return readiness_module.run_drills(store, anchors)
+
+
+def test_the_whole_drill_catalogue_passes_against_the_shipped_anchors() -> None:
+    """The anchors `resident readiness drill` actually uses by default.
+
+    Every drill test before this one ran a subset against a bespoke fixture, so
+    "all eight pass" was true of the fixture and false of the shipped
+    configuration — this phase's own thesis, violated by its own drills.
+    """
+
+    shipped = Path(__file__).resolve().parents[1] / "eval_sets"
+    assert (shipped / "gate.toml").is_file(), "expected the shipped anchors"
+
+    with temp_state_dir() as root:
+        anchors = root / "anchors"
+        anchors.mkdir()
+        for path in sorted(shipped.iterdir()):
+            if path.is_file():
+                shutil.copy2(path, anchors / path.name)
+
+        runs = _run_whole_catalogue(anchors, root / "state")
+        assert len(runs) == len(readiness_checks.CATALOGUE)
+        failures = [
+            (run.result.name, run.result.detail)
+            for run in runs
+            if run.result.outcome != readiness_module.PASS
+        ]
+        assert not failures, failures
+
+
+def test_the_whole_drill_catalogue_passes_against_the_fixture_anchors() -> None:
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        runs = _run_whole_catalogue(anchors, root / "state")
+        failures = [
+            (run.result.name, run.result.detail)
+            for run in runs
+            if run.result.outcome != readiness_module.PASS
+        ]
+        assert not failures, failures
+
+
+def test_gate_dependent_drills_own_their_dataset() -> None:
+    catalogue = readiness_checks.CATALOGUE
+    # These call promote or activate, so they need a candidate that genuinely
+    # clears the gate. The shipped policy set cannot produce one — the known
+    # Phase 3 safety-floor finding — so on the shipped dataset they would fail
+    # at the gate and demonstrate nothing about promotion or canaries.
+    for name in (
+        "rollback_safe_and_refusal",
+        "promotion_crash_recovery",
+        "canary_crash_recovery",
+        "canary_auto_revert_mechanism",
+        "holdout_sentinel_isolation",
+    ):
+        assert catalogue[name].owns_dataset, name
+    # These do not touch the gate and must exercise the operator's own dataset.
+    for name in ("freeze_and_unfreeze", "budget_breach_freezes", "failed_clock_recovery"):
+        assert not catalogue[name].owns_dataset, name
+
+
+def test_a_drill_owned_dataset_is_declared_in_the_report() -> None:
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        state_dir = root / "state"
+        with opened(state_dir) as store:
+            initialize(store, env_name="id_support",
+                       seed_policy=readiness_checks.SAFE_SEED, anchors_dir=str(anchors))
+            readiness_module.run_drills(
+                store, anchors,
+                only=["holdout_sentinel_isolation", "freeze_and_unfreeze"],
+            )
+            report = readiness_module.generate(store, anchors_dir=str(anchors))
+
+        by_name = {item.name: item for item in report.items}
+        # A reader must be able to see that a drill supplied its own cases.
+        assert "drill-owned dataset" in by_name["holdout_sentinel_isolation"].detail
+        assert "drill-owned dataset" not in by_name["freeze_and_unfreeze"].detail
+
+
+def test_the_sentinel_drill_detects_a_planted_leak_and_not_real_vocabulary() -> None:
+    """Exercises the detector both ways rather than inspecting its source.
+
+    The previous version of this drill matched the real holdout vocabulary, so
+    the required term "status" collided with the literal `status` column in the
+    audit rows it searched — a drill that could only ever fail. Checking the
+    source text for a token name proves nothing about either behaviour.
+    """
+
+    from .anchors import load_anchor_split
+
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        readiness_checks.write_drill_dataset(anchors)
+
+        # The dataset is built from tokens that exist for no other reason.
+        for case in load_cases_from_dir(anchors):
+            assert case.query.startswith(readiness_checks.QUERY_SENTINEL)
+            assert any(
+                term.startswith(readiness_checks.TERM_SENTINEL)
+                for term in case.required_terms
+            )
+            assert case.reference_answer.startswith(readiness_checks.ANSWER_SENTINEL)
+
+        _identity, _public, holdout = load_anchor_split(anchors)
+        planted = holdout[0].query.split()[0]
+
+        # Clean run: no planted token persists, and the real vocabulary the old
+        # drill tripped over ("status", "resmi", "otp") is present throughout.
+        with opened(root / "clean") as store:
+            initialize(store, env_name="id_support",
+                       seed_policy=readiness_checks.DRILL_STRONG_POLICY,
+                       anchors_dir=str(anchors))
+            clean = readiness_checks.drill_holdout_sentinel_isolation(store, anchors)
+            assert clean.outcome == readiness_module.PASS, clean.detail
+            # The collision the old drill hit is still present in the surface it
+            # searches: an audit record has a literal "status" key, and the
+            # real holdout vocabulary includes "status" as a required term.
+            audits = json.dumps([record.to_dict() for record in store.list_audits()])
+            assert '"status"' in audits
+
+        # Positive control: plant a holdout token in a persisted surface and the
+        # drill must catch it.
+        with opened(root / "leaky") as store:
+            initialize(store, env_name="id_support",
+                       seed_policy=readiness_checks.DRILL_STRONG_POLICY,
+                       anchors_dir=str(anchors))
+            store.append_event("leak", payload={"note": f"holdout was {planted}"})
+            leaky = readiness_checks.drill_holdout_sentinel_isolation(store, anchors)
+            assert leaky.outcome == readiness_module.FAIL, leaky.to_dict()
+            assert planted in leaky.evidence.get("leaked", [])
+
+
+def test_a_drill_dataset_yields_a_candidate_that_clears_the_gate() -> None:
+    """The premise the gate-dependent drills rest on, asserted directly."""
+
+    with temp_state_dir() as root:
+        anchors = _write_sentinel_anchors(root / "anchors")
+        readiness_checks.write_drill_dataset(anchors)
+        state_dir = root / "state"
+
+        with opened(state_dir) as store:
+            initialize(store, env_name="id_support",
+                       seed_policy=readiness_checks.DRILL_WEAK_SEED,
+                       anchors_dir=str(anchors))
+            run_audit(store, store.require_champion().candidate_id,
+                      anchors_dir=str(anchors))
+            outcome = reflect_once(
+                store, mutator=AlwaysMutator(readiness_checks.DRILL_STRONG_POLICY)
+            )
+            record = run_audit(store, outcome.candidate_id,
+                               anchors_dir=str(anchors)).record
+            # Zero holdout safety failures is what the shipped policies cannot
+            # manage, and what makes a promotion drill possible at all.
+            assert record.safety_failure_count == 0, record.to_dict()
+
+            verdict = evaluate_gate(store, outcome.candidate_id, anchors_dir=str(anchors))
+            assert verdict.passed, verdict.failure_summary()
+
+
 TESTS = [
     test_store_opens_in_wal_mode_and_stamps_schema,
     test_migrations_apply_in_order_and_are_not_reapplied,
@@ -4636,6 +4812,12 @@ TESTS = [
     test_a_label_for_a_different_artifact_is_invalidated_not_counted,
     test_a_rate_is_refused_below_the_minimum_sample,
     test_readiness_neither_imports_nor_authorises_promotion,
+    test_the_whole_drill_catalogue_passes_against_the_shipped_anchors,
+    test_the_whole_drill_catalogue_passes_against_the_fixture_anchors,
+    test_gate_dependent_drills_own_their_dataset,
+    test_a_drill_owned_dataset_is_declared_in_the_report,
+    test_the_sentinel_drill_detects_a_planted_leak_and_not_real_vocabulary,
+    test_a_drill_dataset_yields_a_candidate_that_clears_the_gate,
     test_existing_smoke_suite_still_passes,
 ]
 

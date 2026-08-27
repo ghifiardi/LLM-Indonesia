@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..store import ResidentStore, new_id, utcnow
-from .checks import CATALOGUE, SAFE_SEED, DrillResult
+from .checks import CATALOGUE, SAFE_SEED, DrillResult, write_drill_dataset
 from .verdicts import FAIL
 
 DRILL_EVENT = "readiness_drill_run"
@@ -67,6 +67,11 @@ def run_drill(
     workspace = Path(drill_root) / f"{name}-{new_id()[:8]}"
     state_dir = workspace / "state"
     anchors = _seed_anchors(Path(anchors_dir), workspace / "anchors")
+    if drill.owns_dataset:
+        # The drill supplies its own cases, so the mechanism is exercised rather
+        # than blocked by whether the shipped policy set happens to be
+        # promotable. The anchor *thresholds* are still the operator's.
+        write_drill_dataset(anchors)
 
     store: ResidentStore | None = None
     try:
@@ -94,6 +99,13 @@ def run_drill(
             except Exception:
                 pass
 
+    if drill.owns_dataset and result.evidence is not None:
+        result = DrillResult(
+            name=result.name,
+            outcome=result.outcome,
+            detail=result.detail,
+            evidence={**(result.evidence or {}), "drill_owned_dataset": True},
+        )
     return DrillRun(result=result, state_dir=str(state_dir), check_id=new_id())
 
 

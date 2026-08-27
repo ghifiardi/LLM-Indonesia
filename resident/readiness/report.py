@@ -132,7 +132,19 @@ def _drill_items(store: ResidentStore) -> list[Item]:
                 verdict=row["outcome"],
                 observed=row["created_at"],
                 required=drill.description,
-                detail=(row["detail"] or f"isolated: .../{Path(row['state_dir']).parent.name}"),
+                detail=(
+                    row["detail"]
+                    or (
+                        "isolated"
+                        + (
+                            ", drill-owned dataset"
+                            if json.loads(row["evidence_json"] or "{}").get(
+                                "drill_owned_dataset"
+                            )
+                            else ""
+                        )
+                    )
+                ),
             )
         )
     return items

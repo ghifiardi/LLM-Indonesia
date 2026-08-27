@@ -90,9 +90,25 @@ report requires *production observations*, and marks them INSUFFICIENT_EVIDENCE
 when none occurred naturally — deliberately breaking production to certify it
 would prove something about a broken system.
 
+Five of the eight drills **own their dataset**: they replace the anchor cases
+with their own before running, and the report says so on each line. Anything
+that calls `promote` or `canary set` needs a candidate that genuinely clears
+the gate, and the shipped policy set cannot produce one — the known Phase 3
+safety-floor finding. Without an owned dataset those drills fail at the gate
+and demonstrate nothing about promotion or canaries. The anchor *thresholds*
+are still the operator's; only the cases are the drill's.
+
+The isolation drill plants unique tokens (`DRILLQ`/`DRILLT`/`DRILLA`) rather
+than matching the real holdout vocabulary. Matching real words collides with
+the literal keys of the JSON being searched — the required term `status`
+against the `status` column of an audit row — which reports a leak that is
+structurally guaranteed in any correct system.
+
 Worth knowing when reading a wall of green drills: the catalogue is itself code
-that can be wrong. Two of the eight were wrong on their first run, for their own
-reasons rather than the system's.
+that can be wrong. Four of the eight were wrong at some point, for their own
+reasons rather than the system's, and three of those were invisible until the
+catalogue was run end-to-end against the shipped anchors instead of a subset
+against a fixture.
 
 ## The supervisor and the three clocks
 
