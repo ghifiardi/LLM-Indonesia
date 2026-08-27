@@ -63,6 +63,17 @@ test("the dialog shows the exact host and query before anything is sent", async 
   assert.equal(dialog.cancelLabel, "Batal");
 });
 
+test("server-side PII warning is preserved in the approval dialog", () => {
+  const dialog = approvalDialogModel({
+    host: "DuckDuckGo HTML (alpha)",
+    provider: "duckduckgo-html",
+    query: "user@example.com",
+    warning: "Query tampak memuat alamat email."
+  });
+  assert.equal(dialog.provider, "duckduckgo-html");
+  assert.match(dialog.warning, /alamat email/);
+});
+
 test("Batal means NO request is made, not a request that fails", async () => {
   const { flow, calls } = harness({ confirmAnswer: false });
   const out = await flow({ mode: MODE_LOCAL_SEARCH, query: "rahasia internal",

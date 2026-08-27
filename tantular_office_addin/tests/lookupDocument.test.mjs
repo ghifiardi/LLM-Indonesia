@@ -155,3 +155,26 @@ test("truncation is reported, never silent", async () => {
   assert.equal(out.truncated, true);
   assert.equal(out.text.length, MAX_DOCUMENT_CHARS);
 });
+
+// --- host re-detection ---------------------------------------------------
+// Office.onReady delivered an empty host on a real-Excel pane reload
+// (2026-08-25); every lookup then failed unsupported_host from the stale
+// snapshot. At click time Office.context is populated, so re-detect.
+
+import { resolveLookupHost } from "../src/chat/lookupDocument.js";
+
+test("a known cached host is trusted without re-detection", () => {
+  assert.equal(resolveLookupHost("Excel", () => { throw new Error("must not run"); }),
+               "Excel");
+});
+
+test("a stale 'Office' snapshot is re-detected at call time", () => {
+  assert.equal(resolveLookupHost("Office", () => "Excel"), "Excel");
+});
+
+test("a re-detection that also fails keeps the refusal, not a guess", () => {
+  // Guessing a host would read the wrong document API and could return the
+  // wrong text; unsupported_host is the honest outcome.
+  assert.equal(resolveLookupHost("Office", () => "Office"), "Office");
+  assert.equal(resolveLookupHost("Office", undefined), "Office");
+});

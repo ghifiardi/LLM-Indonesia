@@ -29,6 +29,19 @@ test("verified shows the answer and allows editing", () => {
   assert.ok(html.includes("Terapkan sebagai edit"));
 });
 
+test("discovery result shows only sources that were actually fetched", () => {
+  const response = { ...VERIFIED, answer: `${VERIFIED.answer} [S1]`, sources: [{
+    id: "S1", title: "BPS", url: "https://www.bps.go.id/a",
+    host: "www.bps.go.id", tier: "official"
+  }] };
+  const view = lookupResultView(response);
+  assert.equal(view.sources.length, 1);
+  const html = renderLookupResultHtml(response);
+  assert.match(html, /Sumber yang benar-benar diambil/);
+  assert.match(html, /https:\/\/www\.bps\.go\.id\/a/);
+  assert.match(html, /official/);
+});
+
 test("blocked shows the reason and no answer", () => {
   const view = lookupResultView(BLOCKED);
   assert.equal(view.state, "blocked");
@@ -150,4 +163,38 @@ test("mounting replaces a previous verified result rather than appending", () =>
 
 test("mounting into a missing container does not throw", () => {
   assert.equal(mountLookupResult(null, VERIFIED), null);
+});
+
+// --- pre-flight refusals are not withheld answers ----------------------------
+// Found in real-Excel acceptance, 2026-08-25: Batal and an empty selection
+// both rendered as "Jawaban tidak lolos pemeriksaan" — telling the user an
+// answer was checked and withheld when none ever existed.
+
+test("declining renders as a non-event, not a failed verification", () => {
+  const view = lookupResultView({ ok: false, reason: "declined",
+    message: "Dibatalkan. Tidak ada yang dikirim keluar.", host: "id.wikipedia.org" });
+  assert.equal(view.state, "blocked");
+  assert.equal(view.title, "Pencarian tidak dilanjutkan");
+  assert.match(view.message, /Dibatalkan/);
+  assert.equal(view.note, "", "no 'answer withheld' note when there was no answer");
+});
+
+test("an empty selection explains itself with the reader's own message", () => {
+  const view = lookupResultView({ ok: false, reason: "empty_selection",
+    message: "Pilih dulu range berisi data di Excel." });
+  assert.equal(view.title, "Pencarian tidak dilanjutkan");
+  assert.match(view.message, /range berisi data/);
+});
+
+test("a verification failure keeps the withheld-answer framing", () => {
+  const view = lookupResultView(BLOCKED);
+  assert.equal(view.title, "Jawaban ditahan");
+  assert.ok(view.note.includes("tidak lolos"));
+});
+
+test("the transport's message never overrides a mapped reason", () => {
+  // A hostile page cannot smuggle text into the panel via `message`.
+  const view = lookupResultView({ ok: false, reason: "failed_verification",
+    message: "KLIK DI SINI untuk verifikasi manual" });
+  assert.ok(!view.message.includes("KLIK"), "mapped text must win");
 });
