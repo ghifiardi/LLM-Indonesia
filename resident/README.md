@@ -301,25 +301,53 @@ deployment, so a mismatch refuses to serve rather than adopting the change.
 
 ### The spool
 
-Serve appends; the supervisor ingests. Every record carries an id its writer
-generated and every insert is `INSERT OR IGNORE` on that id, so a crash between
-committing rows and retiring a spool file produces a duplicate *attempt* and no
-duplicate row. Files are retired last, deliberately: the failure that leaves a
-file un-retired is harmless, the one that retires it early loses data.
+**One record per file, published by atomic rename.** Serve writes into
+`spool/staging/` under a name only that write owns, closes the file, then
+`os.replace`s it into `spool/ready/`. The supervisor reads only `ready/`, so by
+the time it can see a file, nothing holds it open. After the database commit the
+file moves to `spool/consumed/`.
+
+    spool/
+    ├── staging/     in-progress writes; never ingested
+    ├── ready/       complete records, atomically published
+    ├── consumed/    retired after the database commit
+    └── quarantine/  unparseable records, plus content-free notes
+
+The first design had serve append to one open file while the supervisor renamed
+*that same file* into `consumed/`. On POSIX a rename follows the inode, so serve
+kept writing into the retired file through its open descriptor and every record
+after the first ingestion tick was silently lost. It surfaced on the first
+launchd observation attempt: an `ask` returned a correct answer while
+`served_requests` and `experiences` both stayed at 0, and the record was found
+sitting inside a file under `consumed/`. A writer and a reader cannot share
+ownership of a file; the fix is to stop trying, and the rename is what transfers
+ownership.
+
+File-per-record costs an inode per request. At this traffic that is not a cost
+worth trading correctness for.
+
+Every record carries an id its writer generated and every insert is
+`INSERT OR IGNORE` on that id, so a crash between committing rows and retiring a
+file produces a duplicate *attempt* and no duplicate row. Files are retired
+last, deliberately: the failure that leaves a file un-retired is harmless, the
+one that retires it early loses data.
+
+Batch `.jsonl` files from the pre-fix design are **not** ingested — a partial
+final line cannot be told from a complete one — but they are counted and
+reported. Data left behind in silence reads as data that was never there.
 
 A served request and its experience are inserted in **one transaction**, and
 both inserts are idempotent, so a replay *heals* a half-applied record rather
 than seeing a duplicate request and skipping the missing experience forever.
 
-Reads are bounded in binary rather than by text iteration: text mode allocates
-a whole line before any size check can run, so one enormous line in a tampered
-spool file would exhaust the supervisor's memory before the cap fired. An
-oversized line is skipped a bounded piece at a time and the records after it
-still land.
+Reads are bounded in binary and capped at the record size limit plus one byte,
+so an oversized file is detected without ever being held in memory whole. It is
+quarantined and the records after it still land.
 
-Spool files hold raw queries and answers, so the directory is `0700` and files
-are `0600`. A line that will not parse is quarantined as **metadata only** —
-source, line number, error, byte length, and a SHA-256 — never its content. A
+Spool files hold raw queries and answers, so every spool directory is `0700` and
+every file is `0600`. A record that will not parse is moved to `quarantine/` and
+noted as **metadata only** — name, error, byte length, and a SHA-256 — never its
+content. A
 rejected record still holds a user's query, and a diagnostic file is not a place
 for one.
 

@@ -1113,7 +1113,14 @@ def _cmd_ingest(store: ResidentStore, args: argparse.Namespace, emit: Any) -> in
             f"ingested {report.inserted} record(s) from {report.files} spool file(s)",
             f"  duplicates   {report.duplicates}",
             f"  quarantined  {report.quarantined}",
-        ],
+        ]
+        + (
+            # Pre-fix batch files cannot be trusted to be complete, so they are
+            # skipped — but never in silence.
+            [f"  legacy files skipped, not ingested  {report.legacy_ignored}"]
+            if report.legacy_ignored
+            else []
+        ),
     )
     return EXIT_OK
 

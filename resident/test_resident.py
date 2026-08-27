@@ -205,6 +205,59 @@ def opened(state_dir: Path) -> Iterator[ResidentStore]:
         store.close()
 
 
+def write_ready(spool_dir: Path, name: str, record: Any) -> Path:
+    """Publish a raw record straight into ready/, bypassing SpoolWriter.
+
+    Lets a test express records SpoolWriter would refuse to produce — truncated
+    JSON, an unknown kind, an oversized payload — as the supervisor would find
+    them after an ill-behaved or crashed writer.
+    """
+
+    ready = Path(spool_dir) / spool_module.READY_DIR
+    ready.mkdir(parents=True, exist_ok=True, mode=0o700)
+    raw = record if isinstance(record, bytes) else json.dumps(record).encode("utf-8")
+    path = ready / f"{name}{spool_module.RECORD_SUFFIX}"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(raw)
+    return path
+
+
+def replay_consumed(spool_dir: Path) -> int:
+    """Move retired records back to ready/: a crash after commit, before retirement."""
+
+    spool_dir = Path(spool_dir)
+    ready = spool_dir / spool_module.READY_DIR
+    ready.mkdir(parents=True, exist_ok=True, mode=0o700)
+    moved = 0
+    for path in sorted((spool_dir / spool_module.CONSUMED_DIR).glob("*.json")):
+        os.replace(path, ready / path.name)
+        moved += 1
+    return moved
+
+
+def await_persisted(state_dir: Path, expected: int, timeout: float = 40.0) -> tuple[int, int]:
+    """Poll a *separate* read-only connection until the supervisor has ingested.
+
+    Reading through its own connection rather than the supervisor's is the
+    point: it observes committed rows the way an operator's `status` would,
+    not internal state the supervisor happens to be holding.
+    """
+
+    deadline = time.monotonic() + timeout
+    counts = (0, 0)
+    while time.monotonic() < deadline:
+        store = ResidentStore.open_readonly(state_dir)
+        try:
+            counts = (store.count_served_requests(), ExperienceLog(store).count())
+        finally:
+            store.close()
+        if counts[0] >= expected:
+            return counts
+        time.sleep(0.2)
+    return counts
+
+
 @contextmanager
 def initialized(seed_policy: str = WEAK_POLICY) -> Iterator[tuple[Path, ResidentStore]]:
     with temp_state_dir() as state_dir:
@@ -2761,10 +2814,8 @@ def test_spool_ingestion_is_idempotent_across_a_replayed_file() -> None:
             assert store.count_served_requests() == 3
             assert ExperienceLog(store).count() == 3
 
-            # Simulate a crash between committing rows and retiring the file.
-            consumed = spool_dir / "consumed"
-            for path in consumed.glob("*.jsonl"):
-                os.replace(path, spool_dir / path.name)
+            # Simulate a crash between committing rows and retiring the files.
+            replay_consumed(spool_dir)
 
             second = spool_module.ingest(store)
             assert second.inserted == 0, "a replay must not insert anything new"
@@ -2773,20 +2824,20 @@ def test_spool_ingestion_is_idempotent_across_a_replayed_file() -> None:
             assert ExperienceLog(store).count() == 3
 
 
-def test_malformed_spool_line_is_quarantined_without_blocking_the_rest() -> None:
+def test_malformed_spool_record_is_quarantined_without_blocking_the_rest() -> None:
     with serving_state() as (root, anchors, context):
         serve_module.answer(context, "pertama")
-        path = context.spool.path
         context.spool.close()
+        spool_dir = (root / "state") / "spool"
 
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write("this is not json\n")
-            handle.write(json.dumps({"kind": "nope", "record_id": "x",
-                                     "created_at": "t", "payload": {}}) + "\n")
-            handle.write(json.dumps({"kind": spool_module.KIND_SERVED_REQUEST,
-                                     "record_id": "later-record", "created_at": utcnow(),
-                                     "payload": {"query": "kedua", "answer": "jawaban",
-                                                 "actual_route": "champion"}}) + "\n")
+        write_ready(spool_dir, "a-not-json", b"this is not json")
+        write_ready(spool_dir, "b-unknown-kind", {"kind": "nope", "record_id": "x",
+                                                  "created_at": "t", "payload": {}})
+        write_ready(spool_dir, "later-record", {
+            "kind": spool_module.KIND_SERVED_REQUEST,
+            "record_id": "later-record", "created_at": utcnow(),
+            "payload": {"query": "kedua", "answer": "jawaban",
+                        "actual_route": "champion"}})
 
         with opened(root / "state") as store:
             report = spool_module.ingest(store)
@@ -2796,8 +2847,112 @@ def test_malformed_spool_line_is_quarantined_without_blocking_the_rest() -> None
             ids = {row["request_id"] for row in store.list_served_requests()}
             assert "later-record" in ids
 
-        quarantine = ((root / "state") / "spool" / "quarantine")
-        assert list(quarantine.glob("*.bad")), "bad lines were not quarantined"
+        quarantine = spool_dir / "quarantine"
+        assert list(quarantine.glob("*.bad")), "bad records were not quarantined"
+        # The offending records are isolated, not silently retired as if clean.
+        assert {p.stem for p in quarantine.glob("*.json")} == {"a-not-json", "b-unknown-kind"}
+
+
+def test_a_consumed_record_is_never_written_to_again() -> None:
+    """The production spool race, at unit scale.
+
+    A live writer published a second record while the first was already
+    retired. Under the old shared-file design that second record landed inside
+    the retired file through an open descriptor and was never seen again.
+    """
+
+    with serving_state() as (root, anchors, context):
+        state_dir = root / "state"
+        spool_dir = state_dir / "spool"
+
+        serve_module.answer(context, "pertanyaan pertama")
+        with opened(state_dir) as store:
+            assert spool_module.ingest(store).inserted == 1
+
+        retired = list((spool_dir / "consumed").glob("*.json"))
+        assert len(retired) == 1
+        retired_path, before = retired[0], retired[0].read_bytes()
+
+        # Same live writer, same process, after the retirement.
+        serve_module.answer(context, "pertanyaan kedua")
+        context.spool.close()
+
+        assert retired_path.read_bytes() == before, "a retired record was appended to"
+        assert len(list((spool_dir / "consumed").glob("*.json"))) == 1
+        assert len(spool_module.ready_files(spool_dir)) == 1
+
+        with opened(state_dir) as store:
+            assert spool_module.ingest(store).inserted == 1
+            assert store.count_served_requests() == 2
+            assert ExperienceLog(store).count() == 2
+
+
+def test_in_progress_spool_writes_are_never_ingested() -> None:
+    with serving_state() as (root, anchors, context):
+        context.spool.close()
+        state_dir = root / "state"
+        staging = (state_dir / "spool") / "staging"
+
+        # A torn write, and a complete record not yet published. Neither is the
+        # supervisor's to touch: only the rename transfers ownership.
+        (staging / "half-written.json").write_bytes(b'{"kind":"served_request","record_id"')
+        (staging / "complete-but-unpublished.json").write_bytes(
+            json.dumps({
+                "kind": spool_module.KIND_SERVED_REQUEST,
+                "record_id": "unpublished", "created_at": utcnow(),
+                "payload": {"query": "q", "answer": "a", "actual_route": "champion"},
+            }).encode("utf-8")
+        )
+
+        with opened(state_dir) as store:
+            report = spool_module.ingest(store)
+            assert report.files == 0 and report.inserted == 0 and report.quarantined == 0
+            assert store.count_served_requests() == 0
+
+        assert sorted(p.name for p in staging.glob("*.json")) == [
+            "complete-but-unpublished.json", "half-written.json"
+        ], "staged records must be left where the writer put them"
+
+
+def test_a_record_published_before_a_crash_is_ingested_on_the_next_pass() -> None:
+    with serving_state() as (root, anchors, context):
+        state_dir = root / "state"
+        spool_dir = state_dir / "spool"
+        serve_module.answer(context, "kartu hilang")
+        # The writer published, then died before anything else happened.
+        context.spool.close()
+
+        assert len(spool_module.ready_files(spool_dir)) == 1
+        assert not list((spool_dir / "staging").glob("*")), "staging must be empty after publish"
+
+        with opened(state_dir) as store:
+            assert spool_module.ingest(store).inserted == 1
+            assert store.count_served_requests() == 1
+            assert ExperienceLog(store).count() == 1
+        assert spool_module.ready_files(spool_dir) == []
+
+
+def test_legacy_batch_files_are_reported_rather_than_silently_ignored() -> None:
+    """Pre-fix batch files are not ingested — a partial line cannot be trusted —
+    but they are counted, because silence about skipped data reads as absence."""
+
+    with serving_state() as (root, anchors, context):
+        context.spool.close()
+        state_dir = root / "state"
+        spool_dir = state_dir / "spool"
+        legacy = spool_dir / "serve-63945-93a32318.jsonl"
+        legacy.write_bytes(json.dumps({
+            "kind": spool_module.KIND_SERVED_REQUEST, "record_id": "from-the-old-shape",
+            "created_at": utcnow(),
+            "payload": {"query": "q", "answer": "a", "actual_route": "champion"},
+        }).encode("utf-8") + b"\n")
+
+        with opened(state_dir) as store:
+            report = spool_module.ingest(store)
+            assert report.legacy_ignored == 1
+            assert report.inserted == 0
+            assert store.count_served_requests() == 0
+        assert legacy.exists(), "evidence must be preserved, not consumed"
 
 
 def test_served_request_records_full_attribution() -> None:
@@ -3015,8 +3170,7 @@ def test_ingestion_converges_from_every_interruption_point() -> None:
         spool_dir = state_dir / "spool"
 
         def replay_spool() -> None:
-            for path in (spool_dir / "consumed").glob("*.jsonl"):
-                os.replace(path, spool_dir / path.name)
+            replay_consumed(spool_dir)
 
         with opened(state_dir) as store:
             # 1. Before either insert.
@@ -3043,30 +3197,25 @@ def test_ingestion_converges_from_every_interruption_point() -> None:
             assert ExperienceLog(store).count() == 1
 
 
-def test_oversized_spool_line_is_bounded_and_does_not_block_the_next_record() -> None:
+def test_oversized_spool_record_is_bounded_and_does_not_block_the_next_record() -> None:
     with serving_state() as (root, anchors, context):
         context.spool.close()
         state_dir = root / "state"
         spool_dir = state_dir / "spool"
 
-        oversized = b"Q" * (spool_module.MAX_SPOOL_LINE_BYTES * 3)
-        path = spool_dir / "oversized.jsonl"
-        with open(path, "wb") as handle:
-            handle.write(
-                b'{"kind":"served_request","record_id":"huge","created_at":"t",'
-                b'"payload":{"query":"' + oversized + b'"}}\n'
-            )
-            handle.write(
-                json.dumps(
-                    {
-                        "kind": spool_module.KIND_SERVED_REQUEST,
-                        "record_id": "after-oversized",
-                        "created_at": utcnow(),
-                        "payload": {"query": "ok", "answer": "a", "actual_route": "champion"},
-                    }
-                ).encode("utf-8")
-                + b"\n"
-            )
+        oversized = b"Q" * (spool_module.MAX_SPOOL_RECORD_BYTES * 3)
+        write_ready(
+            spool_dir,
+            "huge",
+            b'{"kind":"served_request","record_id":"huge","created_at":"t",'
+            b'"payload":{"query":"' + oversized + b'"}}',
+        )
+        write_ready(spool_dir, "after-oversized", {
+            "kind": spool_module.KIND_SERVED_REQUEST,
+            "record_id": "after-oversized",
+            "created_at": utcnow(),
+            "payload": {"query": "ok", "answer": "a", "actual_route": "champion"},
+        })
 
         with opened(state_dir) as store:
             report = spool_module.ingest(store)
@@ -3080,18 +3229,20 @@ def test_oversized_spool_line_is_bounded_and_does_not_block_the_next_record() ->
 def test_spool_is_private_and_quarantine_records_no_content() -> None:
     with serving_state() as (root, anchors, context):
         serve_module.answer(context, "pertanyaan rahasia")
-        spool_path = context.spool.path
         context.spool.close()
         state_dir = root / "state"
         spool_dir = state_dir / "spool"
 
         # Spool files hold raw queries and answers.
         assert spool_dir.stat().st_mode & 0o777 == 0o700
-        assert spool_path.stat().st_mode & 0o777 == 0o600
+        for directory in ("staging", "ready", "consumed", "quarantine"):
+            assert (spool_dir / directory).stat().st_mode & 0o777 == 0o700, directory
+        published = spool_module.ready_files(spool_dir)
+        assert len(published) == 1
+        assert published[0].stat().st_mode & 0o777 == 0o600
 
         secret = "RAHASIA-TIDAK-BOLEH-BOCOR"
-        with open(spool_path, "a", encoding="utf-8") as handle:
-            handle.write(f'{{"kind":"served_request","broken":"{secret}"\n')
+        write_ready(spool_dir, "broken", f'{{"kind":"served_request","broken":"{secret}"'.encode())
 
         with opened(state_dir) as store:
             report = spool_module.ingest(store)
@@ -3746,6 +3897,70 @@ def test_supervisor_owns_starts_restarts_and_stops_the_serve_child() -> None:
         kinds = [e.payload.get("event") for e in supervisor.store.list_events()
                  if e.kind == supervisor_module.SERVE_EVENT]
         assert "started" in kinds and "stopped" in kinds
+
+
+def test_serve_keeps_publishing_across_supervisor_ingestion_ticks() -> None:
+    """Two ordinary asks, separated by real ingestion, must both persist.
+
+    This is the production failure, end to end: real supervisor, real serve
+    child, real Unix socket, no mocks. The first launchd observation attempt
+    answered an ask correctly while `served_requests` stayed at 0, because the
+    supervisor renamed the spool file the serve process still had open. The
+    answer proved nothing — only the committed row does.
+    """
+
+    with supervised_state(seed=SERVING_SAFE_POLICY) as (root, anchors, supervisor):
+        state_dir = root / "state"
+        spool_dir = state_dir / "spool"
+        supervisor.manage_serve = True
+        stop, ready = threading.Event(), threading.Event()
+        thread = threading.Thread(
+            target=supervisor.run, kwargs={"stop": stop, "ready": ready}, daemon=True
+        )
+        thread.start()
+        assert ready.wait(25), "supervisor did not start"
+        try:
+            socket_path = supervisor.serve_socket_path()
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                if socket_path.exists() and supervisor.serve_process is not None:
+                    break
+                time.sleep(0.2)
+            assert supervisor.serve_process is not None, "serve child was never started"
+            assert supervisor.serve_process.poll() is None
+            serve_pid = supervisor.serve_process.pid
+
+            first = serve_module.ask(socket_path, "kartu saya hilang")
+            assert SERVE_SENTINEL in first["answer"]
+            assert await_persisted(state_dir, 1) == (1, 1), "the first ask never landed"
+
+            # The supervisor has now retired that record, and serve is still the
+            # same process — the exact state the old design lost writes in.
+            assert list((spool_dir / "consumed").glob("*.json"))
+            assert supervisor.serve_process.pid == serve_pid
+            assert supervisor.serve_process.poll() is None
+
+            second = serve_module.ask(socket_path, "kartu saya diblokir")
+            assert SERVE_SENTINEL in second["answer"]
+            assert first["request_id"] != second["request_id"]
+            assert await_persisted(state_dir, 2) == (2, 2), "the post-ingestion ask was lost"
+
+            assert supervisor.serve_process.poll() is None, "serve did not survive"
+            assert supervisor.serve_process.pid == serve_pid, "serve was restarted mid-test"
+        finally:
+            stop.set()
+            thread.join(timeout=40)
+
+        # Ingestion restarted over everything already retired adds nothing.
+        assert replay_consumed(spool_dir) == 2
+        with opened(state_dir) as store:
+            report = spool_module.ingest(store)
+            assert report.inserted == 0, "a replay must not duplicate served requests"
+            assert report.duplicates == 2
+            assert store.count_served_requests() == 2
+            assert ExperienceLog(store).count() == 2
+        ids = {row["request_id"] for row in ResidentStore.open_readonly(state_dir).list_served_requests()}
+        assert ids == {first["request_id"], second["request_id"]}
 
 
 def test_a_failed_clock_run_does_not_count_as_a_completed_one() -> None:
@@ -4751,7 +4966,12 @@ TESTS = [
     test_output_guard_is_negation_aware,
     test_serve_cannot_write_to_the_database_or_reach_a_mutation_api,
     test_spool_ingestion_is_idempotent_across_a_replayed_file,
-    test_malformed_spool_line_is_quarantined_without_blocking_the_rest,
+    test_a_consumed_record_is_never_written_to_again,
+    test_in_progress_spool_writes_are_never_ingested,
+    test_a_record_published_before_a_crash_is_ingested_on_the_next_pass,
+    test_legacy_batch_files_are_reported_rather_than_silently_ignored,
+    test_serve_keeps_publishing_across_supervisor_ingestion_ticks,
+    test_malformed_spool_record_is_quarantined_without_blocking_the_rest,
     test_served_request_records_full_attribution,
     test_socket_path_is_short_private_and_owner_only,
     test_stale_socket_is_removed_only_when_nothing_is_listening,
@@ -4759,7 +4979,7 @@ TESTS = [
     test_serving_refuses_to_start_against_edited_anchors,
     test_negation_must_apply_to_the_solicitation_not_the_whole_answer,
     test_ingestion_converges_from_every_interruption_point,
-    test_oversized_spool_line_is_bounded_and_does_not_block_the_next_record,
+    test_oversized_spool_record_is_bounded_and_does_not_block_the_next_record,
     test_spool_is_private_and_quarantine_records_no_content,
     test_supervisor_lock_is_exclusive_and_released_on_exit,
     test_clocks_fire_when_due_and_not_before,
