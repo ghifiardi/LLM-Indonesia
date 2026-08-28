@@ -19,22 +19,34 @@
 // arbitrary code. The whole value of this phase is that the transport can be
 // reviewed while it is still incapable of doing damage.
 import http from "node:http";
-import { createSessionToken, tokensMatch, extractToken, hostIsLoopback } from "./auth.mjs";
+import { createSessionToken, tokensMatch, extractToken, hostIsLoopback, originIsLoopback } from "./auth.mjs";
 import { DryRunAdapter } from "./dryRunAdapter.mjs";
 import { createAdapter, DEFAULT_ADAPTER } from "./adapterFactory.mjs";
 import { dispatchCommand, parseBody, MAX_BODY_BYTES } from "./dispatch.mjs";
 
 export const LOOPBACK = "127.0.0.1";
 
-function send(res, status, body) {
+function corsHeaders(origin) {
+  // Echo only a loopback origin. Never "*": that would let any page on the
+  // internet read replies from a service that drives a presentation.
+  if (!originIsLoopback(origin)) return {};
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Vary": "Origin",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "authorization,content-type,x-tantular-token",
+    "Access-Control-Max-Age": "600",
+  };
+}
+
+function send(res, status, body, origin) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(payload),
-    // No CORS allowance: a page must not be able to read this from another
-    // origin. The deck talks to the bridge with an explicit token instead.
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
+    ...corsHeaders(origin),
   });
   res.end(payload);
 }
@@ -42,19 +54,30 @@ function send(res, status, body) {
 export function createBridge({ token = createSessionToken(), adapter = new DryRunAdapter(), onLog = () => {} } = {}) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://${LOOPBACK}`);
+    const origin = req.headers.origin;
+
+    // Preflight is answered BEFORE the token check: a browser never sends
+    // Authorization on an OPTIONS request, so requiring it here made every
+    // cross-origin call fail with 401 before it began.
+    if (req.method === "OPTIONS") {
+      if (!originIsLoopback(origin)) return send(res, 403, { ok: false, error: "origin not allowed" }, origin);
+      res.writeHead(204, corsHeaders(origin));
+      res.end();
+      return undefined;
+    }
 
     if (!hostIsLoopback(req.headers.host)) {
-      return send(res, 403, { ok: false, error: "non-loopback Host refused" });
+      return send(res, 403, { ok: false, error: "non-loopback Host refused" }, origin);
     }
 
     if (req.method === "GET" && url.pathname === "/health") {
-      return send(res, 200, { ok: true, service: "tantular-presentation-bridge", phase: "N1", adapter: adapter.name });
+      return send(res, 200, { ok: true, service: "tantular-presentation-bridge", phase: "N1", adapter: adapter.name }, origin);
     }
 
     const presented = extractToken(req.headers);
     if (!tokensMatch(token, presented)) {
       onLog({ level: "warn", message: `rejected ${req.method} ${url.pathname}: bad or missing token` });
-      return send(res, 401, { ok: false, error: "missing or invalid session token" });
+      return send(res, 401, { ok: false, error: "missing or invalid session token" }, origin);
     }
 
     if (req.method === "GET" && url.pathname === "/state") {
@@ -64,7 +87,7 @@ export function createBridge({ token = createSessionToken(), adapter = new DryRu
             ok: true,
             state,
             recent: adapter.recentLog?.() ?? adapter.recentScripts?.() ?? [],
-          });
+          }, origin);
         })
         .catch((error) => send(res, 500, { ok: false, error: `state failed: ${error.message}` }));
       return undefined;
@@ -78,7 +101,7 @@ export function createBridge({ token = createSessionToken(), adapter = new DryRu
         size += chunk.length;
         if (size > MAX_BODY_BYTES) {
           aborted = true;
-          send(res, 413, { ok: false, error: `body too large (max ${MAX_BODY_BYTES} bytes)` });
+          send(res, 413, { ok: false, error: `body too large (max ${MAX_BODY_BYTES} bytes)` }, origin);
           req.destroy();
           return;
         }
@@ -87,23 +110,23 @@ export function createBridge({ token = createSessionToken(), adapter = new DryRu
       req.on("end", () => {
         if (aborted) return;
         const parsed = parseBody(Buffer.concat(chunks));
-        if (!parsed.ok) return send(res, 400, { ok: false, error: parsed.error });
+        if (!parsed.ok) return send(res, 400, { ok: false, error: parsed.error }, origin);
         dispatchCommand(adapter, parsed.value)
           .then(({ status, body }) => {
             onLog({ level: body.ok ? "info" : "warn", message: `${parsed.value.action ?? "?"} -> ${status}` });
-            send(res, status, body);
+            send(res, status, body, origin);
           })
           .catch((error) => {
             // Without this the request hangs forever and the presenter simply
             // sees nothing happen.
             onLog({ level: "warn", message: `dispatch rejected: ${error.message}` });
-            send(res, 500, { ok: false, error: `dispatch failed: ${error.message}` });
+            send(res, 500, { ok: false, error: `dispatch failed: ${error.message}` }, origin);
           });
       });
       return undefined;
     }
 
-    return send(res, 404, { ok: false, error: "unknown endpoint" });
+    return send(res, 404, { ok: false, error: "unknown endpoint" }, origin);
   });
 
   return { server, token, adapter };

@@ -144,6 +144,19 @@ adapter: powerpoint   rehearsal: true
 running: true   frontmost: false   inSlideshow: false   permission: granted
 ```
 
+### Cross-origin access
+
+The deck is served on its own port, so every call it makes to the bridge is
+cross-origin. Loopback origins are echoed in `Access-Control-Allow-Origin`;
+anything else gets none, and its preflight is refused with 403. The wildcard
+`*` is never used — a page on the open internet must not be able to read a
+service that drives a presentation.
+
+Preflight is answered **before** the token check, because a browser never
+sends `Authorization` on an `OPTIONS` request. CORS decides who may READ a
+reply; the session token still decides who may act, and an allowed origin
+without a token still gets 401.
+
 ### The fail-safe rule
 
 If an adapter cannot confirm a safe slideshow target, it does nothing and

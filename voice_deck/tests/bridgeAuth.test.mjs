@@ -41,3 +41,13 @@ test("only loopback Host headers are accepted", () => {
     assert.equal(hostIsLoopback(host), false, String(host));
   }
 });
+
+test("only loopback origins are recognised", async () => {
+  const { originIsLoopback } = await import("../bridge/auth.mjs");
+  for (const ok of ["http://localhost:8082", "http://127.0.0.1:8081", "https://localhost:3000", "http://[::1]:8080"]) {
+    assert.equal(originIsLoopback(ok), true, ok);
+  }
+  for (const bad of ["https://evil.example.com", "http://localhost.evil.com", "file://", "null", "", undefined]) {
+    assert.equal(originIsLoopback(bad), false, String(bad));
+  }
+});

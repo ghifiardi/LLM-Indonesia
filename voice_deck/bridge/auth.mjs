@@ -42,3 +42,21 @@ export function hostIsLoopback(hostHeader) {
     : host.split(":")[0];
   return ALLOWED_HOSTS.has(withoutPort);
 }
+
+// The deck is served by a static server on its own port, so every call it
+// makes to the bridge is cross-origin. Refusing CORS outright — the original
+// design — meant the browser could never read a reply, and the transport only
+// appeared to work when driven from Node, where CORS is not enforced.
+//
+// Loopback origins are allowed, any other origin is not. A page on the open
+// internet therefore cannot read this service even if it reaches the port, and
+// the session token still guards every call: CORS decides who may READ a
+// reply, never who may act.
+export function originIsLoopback(origin) {
+  const value = String(origin || "").trim();
+  if (!value) return false;
+  let url;
+  try { url = new URL(value); } catch { return false; }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname);
+}
