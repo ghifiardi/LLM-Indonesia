@@ -105,10 +105,17 @@ test("goto_slide clamps and never wraps", async () => {
   assert.equal(clampSlide(-5, 8), 1);
   assert.equal(clampSlide(3, 0), 3, "unknown deck length must not clamp to nothing");
 
-  const adapter = new PowerPointAdapter({ rehearsal: false, runner: fakeRunner({ capabilities: capsProbe("true", "true", "1") }) });
-  adapter.lastKnown.slideCount = 8;
+  // The deck length now comes from the live app, not from lastKnown: the
+  // slideshow view is read-only, so position and count are read per jump.
+  const adapter = new PowerPointAdapter({
+    rehearsal: false,
+    runner: fakeRunner({
+      capabilities: capsProbe("true", "true", "1"),
+      "read-position": { ok: true, stdout: "1|8" },
+    }),
+  });
   const out = await adapter.goto_slide(99);
-  assert.equal(out.slide, 8);
+  assert.equal(out.slide, 8, "clamped to the last slide, never wrapped to 1");
 });
 
 test("goto_topic resolves against the LIVE app, and refuses when absent", async () => {
@@ -190,4 +197,70 @@ test("capabilities reports the real rehearsal flag, not a hardcoded value", asyn
   assert.equal(caps.rehearsal, true);
   assert.equal(caps.running, true, "detection must work while rehearsing");
   assert.equal(caps.inSlideshow, true);
+});
+
+
+// --- verified against live PowerPoint 16.108.1 ------------------------------
+// Three scripts written from the docs were rejected by the real application.
+// The corrected forms are pinned here because the failure mode is a refusal
+// mid-presentation, which is expensive to discover live.
+
+test("blank/resume use the EPPSlideShowState constants the app accepts", async () => {
+  // "slide show black screen" is not a constant: PowerPoint answered with a
+  // syntax error. The enum is spelled "slide show state ...".
+  const adapter = new PowerPointAdapter({ rehearsal: true });
+  await adapter.blank();
+  await adapter.resume();
+  const scripts = adapter.recentScripts().map((s) => s.script).join("\n");
+  assert.match(scripts, /slide show state black screen/);
+  assert.match(scripts, /slide show state running/);
+  assert.ok(!/to slide show black screen/.test(scripts), "the constant-less form was rejected live");
+});
+
+test("goto_slide steps, because the slideshow view cannot be positioned", async () => {
+  // `go to slide` takes a document view, not a slide show view, and every
+  // positional property on slide show view is read-only. Stepping is the only
+  // route while presenting.
+  const runner = fakeRunner({
+    capabilities: capsProbe("true", "true", "1"),
+    "read-position": { ok: true, stdout: "1|31" },
+  });
+  const adapter = new PowerPointAdapter({ rehearsal: false, runner });
+  const out = await adapter.goto_slide(6);
+  assert.equal(out.slide, 6);
+  assert.equal(out.steps, 5);
+  const jump = runner.scripts.find((s) => s.label === "goto_slide");
+  assert.match(jump.script, /repeat 5 times/);
+  assert.match(jump.script, /go to next slide/);
+  assert.ok(!/go to slide .* number/.test(jump.script), "the direct jump fails with -50 live");
+});
+
+test("a jump backwards steps the other way", async () => {
+  const runner = fakeRunner({
+    capabilities: capsProbe("true", "true", "1"),
+    "read-position": { ok: true, stdout: "6|31" },
+  });
+  const adapter = new PowerPointAdapter({ rehearsal: false, runner });
+  const out = await adapter.goto_slide(2);
+  assert.equal(out.steps, 4);
+  assert.match(runner.scripts.find((s) => s.label === "goto_slide").script, /go to previous slide/);
+});
+
+test("a jump is bounded so a wrong slide count cannot spin the deck", async () => {
+  const runner = fakeRunner({
+    capabilities: capsProbe("true", "true", "1"),
+    "read-position": { ok: true, stdout: "1|100000" },
+  });
+  const adapter = new PowerPointAdapter({ rehearsal: false, runner });
+  const out = await adapter.goto_slide(99999);
+  assert.equal(out.refused, true);
+  assert.equal(out.reason, "too-many-steps");
+  assert.ok(!runner.scripts.some((s) => s.label === "goto_slide"), "nothing may be sent past the guard");
+});
+
+test("end uses the exit slide show command, not a bare exit", async () => {
+  // `exit <view>` parsed as the command plus a stray parameter and failed.
+  const adapter = new PowerPointAdapter({ rehearsal: true });
+  await adapter.end();
+  assert.match(adapter.recentScripts().at(-1).script, /exit slide show \(slide show view of slide show window 1\)/);
 });

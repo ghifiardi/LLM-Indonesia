@@ -17,6 +17,10 @@ const APP = "Microsoft PowerPoint";
 // here cannot be applied inconsistently.
 const VIEW = `slide show view of slide show window 1`;
 
+// A jump is executed as repeated steps; this bounds it so a bad slide count
+// cannot spin through a presentation in front of an audience.
+const MAX_STEPS = 100;
+
 export class PowerPointAdapter {
   constructor({ rehearsal = true, runner, timeoutMs = 5000 } = {}) {
     this.name = "powerpoint";
@@ -112,10 +116,45 @@ export class PowerPointAdapter {
   next() { return this._navigate("next", `go to next slide ${VIEW}`, "next"); }
   previous() { return this._navigate("previous", `go to previous slide ${VIEW}`, "previous"); }
 
+  // Reached by stepping, not by jumping. PowerPoint's `go to slide` takes a
+  // document view, not a slide show view, and every positional property on the
+  // slideshow view is read-only — so while presenting, stepping is the only
+  // route. Bounded so a wrong count can never spin.
   async goto_slide(n) {
-    const count = this.lastKnown.slideCount;
-    const slide = clampSlide(n, count ?? 0);
-    return this._navigate("goto_slide", `go to slide ${VIEW} number ${slide}`, "goto_slide", { slide });
+    const target = await this._target();
+    if (!target.ok) return target.result;
+
+    const read = await this._tell(
+      "read-position",
+      `set p to active presentation\n`
+      + `return ((current show position of ${VIEW}) as text) & "|" & ((count of slides of p) as text)`
+    );
+    if (read.rehearsed) {
+      return performed("goto_slide", { rehearsed: true, slide: clampSlide(n, 0) });
+    }
+    if (!read.ok) return refuse("script-failed", { detail: read.error, permission: read.permission });
+
+    const [posText, countText] = String(read.stdout).split("|");
+    const count = Number(countText) || 0;
+    this.lastKnown.slideCount = count;
+    const from = Number(posText) || 1;
+    const slide = clampSlide(n, count);
+    const steps = Math.abs(slide - from);
+    if (steps === 0) return performed("goto_slide", { slide, steps: 0 });
+    if (steps > MAX_STEPS) {
+      return refuse("too-many-steps", {
+        detail: `${steps} steps from slide ${from} to ${slide} exceeds the ${MAX_STEPS} step guard.`,
+      });
+    }
+
+    const verb = slide > from ? "next" : "previous";
+    const run = await this._tell(
+      "goto_slide",
+      `repeat ${steps} times\n  go to ${verb} slide ${VIEW}\nend repeat`
+    );
+    if (!run.ok) return refuse("script-failed", { detail: run.error, permission: run.permission });
+    this.lastKnown.slide = slide;
+    return performed("goto_slide", { slide, from, steps, rehearsed: Boolean(run.rehearsed) });
   }
 
   // The live document is the source of truth for what is on each slide, so the
@@ -153,8 +192,8 @@ export class PowerPointAdapter {
     return this.goto_slide(index + 1);
   }
 
-  blank() { return this._navigate("blank", `set slide state of ${VIEW} to slide show black screen`, "blank", { blanked: true }); }
-  resume() { return this._navigate("resume", `set slide state of ${VIEW} to slide show running`, "resume", { blanked: false }); }
+  blank() { return this._navigate("blank", `set slide state of ${VIEW} to slide show state black screen`, "blank", { blanked: true }); }
+  resume() { return this._navigate("resume", `set slide state of ${VIEW} to slide show state running`, "resume", { blanked: false }); }
 
   async start() {
     const caps = await this.capabilities();
@@ -172,7 +211,7 @@ export class PowerPointAdapter {
   async end() {
     const target = await this._target();
     if (!target.ok) return target.result;
-    const run = await this._tell("end", `exit ${VIEW}`);
+    const run = await this._tell("end", `exit slide show (${VIEW})`);
     if (!run.ok) return refuse("script-failed", { detail: run.error, permission: run.permission });
     return performed("end", { rehearsed: Boolean(run.rehearsed), presenting: false });
   }
