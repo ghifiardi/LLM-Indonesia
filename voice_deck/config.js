@@ -28,6 +28,18 @@ export const config = {
     duplicateWindowMs: 1200,
   },
 
+  bridge: {
+    // Rehearsal transport to the local native bridge (voice_deck/bridge).
+    // OFF by default: the deck must work standalone, and enabling it should be
+    // a deliberate act before a rehearsal, not something a demo inherits.
+    //
+    // The deck applies every command locally FIRST and never waits on the
+    // bridge to redraw, so a bridge that is down only costs the mirror.
+    enabled: false,
+    endpoint: "http://127.0.0.1:8777",
+    timeoutMs: 1500,
+  },
+
   topicMatch: {
     // Minimum keyword score (see topicMatcher.js) required before a
     // goto_topic command is allowed to navigate. Below this, the command is

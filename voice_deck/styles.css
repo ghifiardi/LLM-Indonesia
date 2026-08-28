@@ -400,3 +400,11 @@ body.hud-hidden #app {
     transition: none !important;
   }
 }
+
+/* Bridge rehearsal row */
+.hud-inline { display: flex; gap: 6px; }
+.hud-inline input { flex: 1 1 auto; min-width: 0; }
+#hudBridgeStatus[data-state="ok"] { color: #6ee7b7; }
+#hudBridgeStatus[data-state="error"] { color: #fca5a5; }
+#hudBridgeStatus[data-state="needs-token"] { color: #fcd34d; }
+#hudBridgeStatus[data-state="off"], #hudBridgeStatus[data-state="idle"] { color: #94a3b8; }

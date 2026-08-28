@@ -87,6 +87,19 @@
         <p id="hudStatus" class="hud-status"></p>
       </div>
 
+      <!-- Bridge rehearsal. Hidden unless config.bridge.enabled, so a normal
+           demo never shows a control it cannot use. The token is pasted, not
+           passed in the URL: a URL reaches history and screen shares. -->
+      <div id="bridgeRow" class="hud-row hidden">
+        <label class="hud-label" for="bridgeToken">Bridge session token</label>
+        <div class="hud-inline">
+          <input id="bridgeToken" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="paste the token printed by the bridge" />
+          <button id="bridgeConnect" type="button">Connect</button>
+        </div>
+        <p id="hudBridgeStatus" class="hud-status" data-state="idle">Bridge idle.</p>
+      </div>
+
       <form id="typedCommandForm" class="hud-row">
         <label class="hud-label" for="typedCommandInput">Typed command fallback</label>
         <input

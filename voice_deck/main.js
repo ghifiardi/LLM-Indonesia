@@ -35,6 +35,10 @@ const els = {
   micButton: document.getElementById("micButton"),
   typedCommandForm: document.getElementById("typedCommandForm"),
   typedCommandInput: document.getElementById("typedCommandInput"),
+  bridgeRow: document.getElementById("bridgeRow"),
+  bridgeToken: document.getElementById("bridgeToken"),
+  bridgeConnect: document.getElementById("bridgeConnect"),
+  hudBridgeStatus: document.getElementById("hudBridgeStatus"),
   btnPrevious: document.getElementById("btnPrevious"),
   btnNext: document.getElementById("btnNext"),
   btnNotes: document.getElementById("btnNotes"),
@@ -110,8 +114,53 @@ async function dispatchTranscript(transcript, source, confidence) {
     return;
   }
 
-  const result = adapter.apply(command);
+  const result = applyCommand(command);
   setStatus(result.message, result.ok ? "ok" : "error");
+}
+
+// ---------- Bridge (rehearsal mirror) ----------
+
+import { BridgeClient } from "./bridgeClient.js";
+
+const bridge = new BridgeClient({
+  endpoint: config.bridge.enabled ? config.bridge.endpoint : "",
+  timeoutMs: config.bridge.timeoutMs,
+});
+
+// Every command goes through here. The local adapter is applied FIRST and its
+// result is what the presenter sees; the bridge is mirrored afterwards and can
+// only ever add a line to the HUD. A failing bridge must never stall or block
+// the deck it is rehearsing against.
+function applyCommand(command) {
+  const result = adapter.apply(command);
+  if (config.bridge.enabled) {
+    bridge.send(command).then(showBridgeStatus).catch(() => {});
+  }
+  return result;
+}
+
+function showBridgeStatus(status) {
+  if (!els.hudBridgeStatus) return;
+  els.hudBridgeStatus.textContent = status.message;
+  els.hudBridgeStatus.dataset.state = status.state;
+}
+
+// The row stays hidden unless the rehearsal transport is on, so an ordinary
+// demo never shows a control that cannot do anything.
+if (config.bridge.enabled && els.bridgeRow) {
+  els.bridgeRow.classList.remove("hidden");
+  const saved = bridge.getToken();
+  if (saved) els.bridgeToken.value = saved;
+
+  const connect = async () => {
+    bridge.setToken(els.bridgeToken.value);
+    showBridgeStatus(await bridge.health());
+  };
+  els.bridgeConnect.addEventListener("click", connect);
+  els.bridgeToken.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); connect(); }
+  });
+  bridge.health().then(showBridgeStatus).catch(() => {});
 }
 
 // ---------- Voice controller ----------
@@ -206,7 +255,7 @@ els.typedCommandForm.addEventListener("submit", (e) => {
 function dispatchDirect(action) {
   const command = createCommand({ action, source: "button", confidence: 1 });
   showLastCommand(command);
-  const result = adapter.apply(command);
+  const result = applyCommand(command);
   setStatus(result.message, result.ok ? "ok" : "error");
 }
 
@@ -250,7 +299,7 @@ window.addEventListener("keydown", (e) => {
       e.preventDefault();
       const command = createCommand({ action: "goto_slide", slide: 1, source: "keyboard", confidence: 1 });
       showLastCommand(command);
-      const result = adapter.apply(command);
+      const result = applyCommand(command);
       setStatus(result.message, result.ok ? "ok" : "error");
       break;
     }
@@ -259,7 +308,7 @@ window.addEventListener("keydown", (e) => {
       const last = adapter.getState().totalSlides;
       const command = createCommand({ action: "goto_slide", slide: last, source: "keyboard", confidence: 1 });
       showLastCommand(command);
-      const result = adapter.apply(command);
+      const result = applyCommand(command);
       setStatus(result.message, result.ok ? "ok" : "error");
       break;
     }

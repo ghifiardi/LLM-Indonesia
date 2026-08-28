@@ -77,3 +77,31 @@ against exactly what was asked for.
 That step is where the risk arrives: macOS Automation permission, and commands
 that move a real presentation. It should not be taken until this layer is
 boring.
+
+## Rehearsing against the web deck
+
+```bash
+node voice_deck/bridge/server.mjs --port 8777 --slides 8   # copy the token
+# set config.bridge.enabled = true in voice_deck/config.js
+python3 -m http.server 8081 --directory voice_deck
+```
+
+Open the deck, paste the token into **Bridge session token** in the HUD, press
+Connect. Every command the deck applies is then mirrored to the bridge, and
+the HUD line reports what the bridge did with it.
+
+The deck applies each command to its own adapter **first** and never waits on
+the bridge to redraw. A bridge that is down, slow or holding a stale token
+costs the mirror line and nothing else — which is the only acceptable
+behaviour while someone is presenting.
+
+`config.bridge.enabled` is **false** by default, and the HUD row stays hidden
+until it is on, so an ordinary demo never shows a control it cannot use.
+
+### Topic resolution during rehearsal
+
+The deck resolves `goto_topic` against its own `slides.json` and sends the
+resulting `goto_slide`, because in rehearsal the deck *is* the presentation.
+Once a native adapter exists, the app is the source of truth and `goto_topic`
+travels unresolved for the adapter to match against live slide titles — which
+is why the dry-run adapter records it unresolved rather than guessing.
