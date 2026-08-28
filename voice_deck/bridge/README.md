@@ -1,0 +1,79 @@
+# Native Presentation Bridge — Phase N1
+
+A local HTTP service that accepts the **same versioned command JSON** the web
+deck already emits, validates it, and hands it to an adapter.
+
+In N1 the adapter is a **dry run**: it records what a native adapter *would*
+do and drives nothing. No AppleScript, no `osascript`, no child process. The
+point of this phase is that the transport, the contract and the authentication
+can be reviewed while the bridge is still incapable of touching a real deck.
+
+## Run
+
+```bash
+node voice_deck/bridge/server.mjs --port 8777 --slides 8
+```
+
+It prints a **session token** on startup. Every call except `/health` must
+present it:
+
+```
+Authorization: Bearer <token>        (or)        x-tantular-token: <token>
+```
+
+The token is minted per run and never stored, so restarting the bridge
+invalidates it.
+
+## Endpoints
+
+| Method | Path | Token | Purpose |
+|---|---|---|---|
+| GET | `/health` | no | liveness and adapter name — you must be able to ask "is it up?" without a credential |
+| GET | `/state` | yes | presentation state plus the recent action log |
+| POST | `/command` | yes | validate and dispatch one command |
+
+There is deliberately **no** endpoint that runs a shell command, AppleScript,
+or arbitrary code. A test asserts `/exec`, `/shell`, `/applescript`,
+`/osascript`, `/run` and `/eval` all return 404.
+
+```bash
+curl -X POST http://127.0.0.1:8777/command \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"version":1,"action":"goto_slide","source":"voice","confidence":1,"slide":6}'
+```
+
+## Why it is built this way
+
+**Loopback is not a security boundary.** Binding `127.0.0.1` keeps the venue
+wifi out, but every process on the machine can still reach the port, and any
+web page can attempt a cross-origin request to it. Hence the session token,
+compared in constant time, and a `Host` header check that refuses anything
+which is not a loopback literal — that check is what stops DNS rebinding, in
+which a page on any origin resolves its own hostname to `127.0.0.1`.
+
+**Validation happens before dispatch, always.** The deck validates on the way
+out, but the deck is not the only thing that can POST to this port. Bodies are
+capped at 16KB and must be JSON objects.
+
+**Failures are contained.** An adapter that throws yields a 500, not a dead
+bridge; an adapter that refuses yields 422, never a false success. A busy port
+prints one line and exits instead of dumping a stack trace at someone who is
+about to present.
+
+**Slide movement clamps.** Running off the end of a deck stops at the last
+slide rather than wrapping to the first, which mid-talk is the difference
+between a pause and a visible mistake.
+
+## What N2 changes
+
+The dry-run adapter is replaced by per-application adapters — Keynote first,
+then PowerPoint — exposing the same `apply()`/`getState()` methods. Voice
+recognition, intent routing and this transport do not change.
+
+`goto_topic` is recorded **unresolved** here on purpose: only the live
+application knows what is on each slide, so N2 resolves it and can be compared
+against exactly what was asked for.
+
+That step is where the risk arrives: macOS Automation permission, and commands
+that move a real presentation. It should not be taken until this layer is
+boring.
