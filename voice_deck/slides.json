@@ -1,0 +1,182 @@
+{
+  "deck": {
+    "title": "Voice-Controlled Presentations",
+    "subtitle": "From a browser prototype to native PowerPoint and Keynote control",
+    "author": "Tantular Labs",
+    "language": "en-US"
+  },
+  "slides": [
+    {
+      "id": 1,
+      "title": "Voice-Controlled Presentations",
+      "body": [
+        "A hands-free way to run a deck.",
+        "Push-to-talk, not always-listening.",
+        "Every command is visible before it acts."
+      ],
+      "notes": "Open by holding the mic button once to show a live command, then immediately show the keyboard still works. That sequencing proves the fallback story before you say a word about it.",
+      "tags": [
+        "intro",
+        "welcome",
+        "overview",
+        "voice deck",
+        "pendahuluan",
+        "pembuka",
+        "ikhtisar",
+        "suara",
+        "presentasi suara"
+      ]
+    },
+    {
+      "id": 2,
+      "title": "The Problem With Presenter Remotes",
+      "body": [
+        "Clickers get lost, run out of battery, or lock to one vendor's app.",
+        "Presenters need both hands free for gestures, demos, or a whiteboard.",
+        "Speech is a natural, low-friction second input -- if it's reliable."
+      ],
+      "notes": "Reliability is the whole pitch. A remote that sometimes skips two slides is worse than no remote.",
+      "tags": [
+        "problem",
+        "motivation",
+        "remote",
+        "clicker",
+        "masalah",
+        "latar belakang",
+        "kendala",
+        "remot",
+        "penunjuk"
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Design Principles",
+      "body": [
+        "Reliability before cleverness.",
+        "Push-to-talk by default -- never always-listening.",
+        "Every recognized command is shown before or as it executes.",
+        "Keyboard and buttons always work, with or without speech or a model."
+      ],
+      "notes": "These four principles are non-negotiable constraints, not aspirations -- they shaped every implementation decision in this deck.",
+      "tags": [
+        "principles",
+        "reliability",
+        "safety",
+        "push to talk",
+        "prinsip",
+        "prinsip desain",
+        "keandalan",
+        "keamanan",
+        "tekan untuk bicara"
+      ]
+    },
+    {
+      "id": 4,
+      "title": "A Transport-Neutral Command Contract",
+      "body": [
+        "One normalized JSON command shape: action, slide, query, source, confidence, transcript.",
+        "The same contract will drive the web deck today and PowerPoint/Keynote adapters later.",
+        "Navigation commands execute immediately; document-editing commands are out of scope."
+      ],
+      "notes": "Point at commandContract.js on screen if this is a live coding demo. The contract is deliberately small -- ten actions, no document mutation.",
+      "tags": [
+        "architecture",
+        "command contract",
+        "json",
+        "adapter",
+        "powerpoint",
+        "keynote",
+        "arsitektur",
+        "kontrak perintah"
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Intent Routing: Deterministic First",
+      "body": [
+        "A bilingual (Indonesian / English) keyword parser handles obvious commands locally.",
+        "An optional Ollama model is a fallback for phrasing the parser doesn't recognize.",
+        "Topic matching stays local -- notes and the full deck are never sent to a model."
+      ],
+      "notes": "This slide is a good goto_topic test target: say or type 'go to intent routing' and it should land here via the local keyword-score matcher, not the model.",
+      "tags": [
+        "intent routing",
+        "ollama",
+        "nlp",
+        "local",
+        "privacy",
+        "bilingual",
+        "perutean niat",
+        "niat",
+        "lokal",
+        "privasi",
+        "dwibahasa",
+        "bahasa"
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Rollout & Pricing",
+      "body": [
+        "Phase 1 (today): free, open web MVP -- any laptop, any projector, zero install.",
+        "Phase 2: native PowerPoint and Keynote control, licensed per presenter seat.",
+        "Phase 3: offline recognition for venues with no reliable network."
+      ],
+      "notes": "If asked about pricing live, this is the slide to land on -- say 'go to pricing' to test the topic matcher on stage.",
+      "tags": [
+        "pricing",
+        "rollout",
+        "roadmap",
+        "business",
+        "licensing",
+        "harga",
+        "penetapan harga",
+        "peluncuran",
+        "peta jalan",
+        "bisnis",
+        "lisensi"
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Why the Web Deck Comes First",
+      "body": [
+        "No install, no OS permissions, no risk to an existing PowerPoint/Keynote file.",
+        "Fastest path to validate the voice UX and the command contract with real audiences.",
+        "Everything learned here -- parsing, dedup, HUD, fallbacks -- carries into the native adapters unchanged."
+      ],
+      "notes": "This is the bridge slide into the native roadmap discussion -- see NATIVE_POWERPOINT_KEYNOTE_ROADMAP.md.",
+      "tags": [
+        "web deck",
+        "prototype",
+        "risk",
+        "mvp",
+        "strategy",
+        "dek web",
+        "purwarupa",
+        "risiko",
+        "strategi"
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Thank You",
+      "body": [
+        "Questions welcome.",
+        "Try it yourself: hold Space or the mic button and say \"go to pricing\".",
+        "Roadmap and source: voice_deck/ in this repository."
+      ],
+      "notes": "Closing slide. Good place to demonstrate 'blank' to hide the screen while taking questions, then 'resume'.",
+      "tags": [
+        "closing",
+        "thank you",
+        "questions",
+        "qa",
+        "penutup",
+        "terima kasih",
+        "pertanyaan",
+        "tanya jawab"
+      ]
+    }
+  ]
+}
