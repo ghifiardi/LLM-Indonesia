@@ -16,3 +16,8 @@ certs/
 # inside dist/workshop-web/ is deleted by the next build (it wipes everything
 # except .vercel), and the entry silently stops applying.
 dist/workshop-web/downloads/
+
+# Installed dependencies. package-lock.json IS committed (see below), so a
+# checkout reproduces this directory with `npm ci` — committing the tree itself
+# would add thousands of files to every dependency bump.
+node_modules/
