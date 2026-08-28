@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tantular</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <link rel="stylesheet" href="./taskpane.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="mark" aria-hidden="true">T</div>
+      <div>
+        <h1>Tantular</h1>
+        <p id="host-subtitle">Asisten privat Bahasa Indonesia untuk Microsoft 365.</p>
+      </div>
+    </header>
+
+    <section class="card settings" aria-labelledby="settings-title">
+      <button class="card-toggle" id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings-body">
+        <span id="settings-title">Pengaturan model lokal</span>
+        <span aria-hidden="true">▾</span>
+      </button>
+      <div id="settings-body" class="settings-body hidden">
+        <label>
+          Endpoint
+          <input id="endpoint-input" type="url" spellcheck="false" />
+        </label>
+        <label>
+          Model
+          <input id="model-input" type="text" spellcheck="false" />
+        </label>
+        <label>
+          Model vision (untuk Extract from image)
+          <input id="vision-model-input" type="text" spellcheck="false" placeholder="mis. llama3.2-vision / qwen2.5vl:7b" />
+        </label>
+        <button id="save-settings" class="secondary" type="button">Simpan</button>
+        <p class="hint">Default: Ollama/OpenAI-compatible endpoint di komputer lokal.</p>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="input-title">
+      <div class="section-title-row">
+        <h2 id="input-title">Teks / seleksi</h2>
+        <button id="load-selection" class="secondary" type="button">Ambil seleksi</button>
+      </div>
+      <textarea id="source-text" rows="9" placeholder="Pilih teks/cell di Office lalu klik Ambil seleksi, atau tempel teks di sini."></textarea>
+      <div class="meta-row">
+        <span id="selection-meta">Belum ada seleksi.</span>
+        <span id="char-count">0 karakter</span>
+      </div>
+    </section>
+
+    <section class="card deck-studio" aria-labelledby="deck-title">
+      <div class="section-title-row">
+        <h2 id="deck-title">✨ Deck Studio</h2>
+        <span class="pill" id="deck-host-note">PowerPoint</span>
+      </div>
+      <p class="hint">Ubah brief/teks di atas menjadi deck PowerPoint yang tertata dan berdesain.</p>
+      <div class="deck-controls">
+        <label>
+          Gaya desain
+          <select id="deck-style"></select>
+        </label>
+        <label>
+          Jumlah slide
+          <select id="deck-count">
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6" selected>6</option>
+            <option value="8">8</option>
+            <option value="10">10</option>
+            <option value="12">12</option>
+          </select>
+        </label>
+      </div>
+      <label class="prompt-label">
+        Tone / instruksi deck (opsional)
+        <input id="deck-tone" type="text" placeholder="Contoh: untuk direksi, tegas, fokus roadmap keamanan..." />
+      </label>
+      <label class="check-row">
+        <input id="deck-summarize" type="checkbox" />
+        <span>Summarize sections (using Tantular model) — ringkas tiap bagian jadi bullet padat</span>
+      </label>
+      <label class="prompt-label">
+        Project / output instructions (bebas)
+        <textarea id="deck-project-instructions" rows="8" placeholder="Tempel style guide, output format, chart preference, executive summary rules, methodology notes, brand colors, dll. Contoh: use #EC008C, #24BDAD, #FFCB09...; output must include 3-5 bullet executive summary and methodology notes."></textarea>
+      </label>
+      <div class="button-row compact-row">
+        <button id="save-project-instructions" class="secondary" type="button">Simpan instruksi</button>
+        <button id="clear-project-instructions" class="secondary" type="button">Kosongkan</button>
+      </div>
+      <div class="deck-image-row">
+        <label class="prompt-label" for="deck-image-input">Sumber gambar/screenshot (opsional)</label>
+        <input id="deck-image-input" type="file" accept="image/*" />
+        <p class="hint">Sumber deck otomatis: gambar yang diunggah → teks di kotak atas → slide yang terpilih.</p>
+      </div>
+      <div class="deck-image-row">
+        <label class="prompt-label" for="deck-document-input">Sumber dokumen/PDF (opsional)</label>
+        <input id="deck-document-input" type="file" accept=".pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.json,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+        <p class="hint">Untuk PDF/DOCX, jalankan companion lokal: <code>npm run doc-server</code>. TXT/MD/CSV bisa dibaca langsung.</p>
+      </div>
+      <div class="button-row">
+        <button id="deck-create" class="primary deck-build" type="button">✨ Buat Deck (sisip ke presentasi)</button>
+        <button id="deck-download" class="secondary" type="button">Download .pptx</button>
+      </div>
+      <p class="hint">Satu klik: Tantular membaca sumber, menyusun rencana, lalu menyisipkan slide langsung ke presentasi aktif agar hasil terlihat cepat. Di luar PowerPoint (atau jika sisip tidak didukung), file .pptx otomatis diunduh. Tombol Download .pptx selalu tersedia.</p>
+      <div id="deck-progress" class="progress hidden" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="deck-progress-text">Menyiapkan deck...</span>
+      </div>
+      <div id="deck-preview" class="deck-preview hidden" aria-live="polite"></div>
+      <p id="deck-status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="card" aria-labelledby="actions-title">
+      <h2 id="actions-title">Aksi cepat</h2>
+      <div id="action-grid" class="action-grid"></div>
+      <label class="prompt-label">
+        Instruksi tambahan (opsional)
+        <input id="user-instruction" type="text" placeholder="Contoh: buat lebih formal, maksimum 5 bullet, label transaksi bank..." />
+      </label>
+      <button id="run-action" class="primary" type="button">Jalankan Tantular</button>
+      <div id="progress" class="progress hidden" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="progress-text">Memproses...</span>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="result-title">
+      <div class="section-title-row">
+        <h2 id="result-title">Hasil</h2>
+        <button id="copy-result" class="secondary" type="button">Salin</button>
+      </div>
+      <textarea id="result-text" rows="10" readonly placeholder="Hasil Tantular akan muncul di sini."></textarea>
+      <div class="button-row">
+        <button id="insert-result" class="secondary" type="button">Masukkan ke dokumen/slide/cell</button>
+        <button id="classify-excel" class="secondary excel-only hidden" type="button">Labeli range Excel</button>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script type="module" src="./taskpane.js"></script>
+</body>
+</html>
