@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Voice Deck</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- Full-screen slide stage -->
+    <main id="stage" aria-live="polite">
+      <div id="blankOverlay" class="overlay hidden" role="status">
+        <p>Screen blanked</p>
+        <p class="overlay-hint">Say or press "resume" (B) to continue</p>
+      </div>
+
+      <div id="startOverlay" class="overlay">
+        <h1 id="deckTitle">Voice Deck</h1>
+        <p id="deckSubtitle"></p>
+        <button id="startButton" type="button">Start Presentation</button>
+        <p class="overlay-hint">or say / type "start"</p>
+      </div>
+
+      <div id="endOverlay" class="overlay hidden">
+        <h1>Presentation Ended</h1>
+        <p class="overlay-hint">Say or type "start" to run it again</p>
+      </div>
+
+      <article id="slideView">
+        <p id="slideProgress" class="slide-progress"></p>
+        <h1 id="slideTitle"></h1>
+        <ul id="slideBody"></ul>
+      </article>
+
+      <aside id="notesPane" class="hidden" aria-label="Speaker notes">
+        <h2>Speaker Notes</h2>
+        <p id="notesText"></p>
+      </aside>
+    </main>
+
+    <!-- Presenter HUD -->
+    <section id="hud" aria-label="Presenter HUD">
+      <header class="hud-header">
+        <strong>Presenter HUD</strong>
+        <button id="hudToggle" type="button" title="Hide HUD (H)">Hide (H)</button>
+      </header>
+
+      <div class="hud-row">
+        <span class="hud-label">Slide</span>
+        <span id="hudSlideNumber" class="hud-value">1 / 1</span>
+      </div>
+
+      <div class="hud-row">
+        <span class="hud-label">Mic</span>
+        <span id="hudMicState" class="hud-value hud-pill">idle</span>
+        <select id="languageSelect" aria-label="Recognition language">
+          <option value="id-ID">id-ID</option>
+          <option value="en-US">en-US</option>
+        </select>
+      </div>
+
+      <div class="hud-row">
+        <button id="micButton" type="button" class="mic-button">
+          Hold to Talk (Space)
+        </button>
+      </div>
+
+      <div class="hud-row hud-block">
+        <span class="hud-label">Live transcript</span>
+        <p id="hudInterimTranscript" class="hud-transcript"></p>
+      </div>
+
+      <div class="hud-row hud-block">
+        <span class="hud-label">Last final transcript</span>
+        <p id="hudFinalTranscript" class="hud-transcript"></p>
+      </div>
+
+      <div class="hud-row hud-block">
+        <span class="hud-label">Last command</span>
+        <pre id="hudLastCommand" class="hud-command">-</pre>
+      </div>
+
+      <div class="hud-row hud-block">
+        <span class="hud-label">Status</span>
+        <p id="hudStatus" class="hud-status"></p>
+      </div>
+
+      <form id="typedCommandForm" class="hud-row">
+        <label class="hud-label" for="typedCommandInput">Typed command fallback</label>
+        <input
+          id="typedCommandInput"
+          type="text"
+          autocomplete="off"
+          placeholder='e.g. "next", "go to pricing", "slide 3"'
+        />
+        <button type="submit">Send</button>
+      </form>
+
+      <div class="hud-row hud-controls">
+        <button id="btnPrevious" type="button">&larr; Prev</button>
+        <button id="btnNext" type="button">Next &rarr;</button>
+        <button id="btnNotes" type="button">Notes (N)</button>
+        <button id="btnBlank" type="button">Blank (B)</button>
+        <button id="btnStart" type="button">Start</button>
+        <button id="btnEnd" type="button">End</button>
+      </div>
+
+      <p class="hud-help">
+        Keys: &larr;/&rarr;/PgUp/PgDn navigate &middot; Home/End jump &middot; N notes &middot;
+        B blank &middot; H hide HUD &middot; Esc recover &middot; hold Space to talk
+      </p>
+    </section>
+  </div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
