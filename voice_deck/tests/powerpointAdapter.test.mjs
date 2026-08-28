@@ -61,7 +61,10 @@ test("rehearsal builds the script and executes nothing", async () => {
   assert.equal(out.rehearsed, true);
   const scripts = adapter.recentScripts();
   assert.match(scripts.at(-1).script, /go to next slide slide show view of slide show window 1/);
-  assert.ok(scripts.every((s) => s.rehearsed), "nothing may execute in rehearsal");
+  // The invariant is that nothing MUTATING executes. The read-only detection
+  // probe does run, so that a preflight can report the real machine state.
+  assert.ok(scripts.filter((s) => !s.readOnly).every((s) => s.rehearsed),
+    "no mutating script may execute in rehearsal");
 });
 
 // --- the fail-safe rule -----------------------------------------------------
@@ -144,4 +147,47 @@ test("capabilities does not launch PowerPoint just to ask if it is running", asy
   assert.match(script, /System Events/, "the non-launching probe form");
   assert.ok(!/^tell application "Microsoft PowerPoint"/m.test(script.split("\n")[0]),
     "a bare tell would start PowerPoint on a machine where it was closed");
+});
+
+// --- rehearsal boundary -----------------------------------------------------
+
+test("only the read-only probe may execute during rehearsal", async () => {
+  // Rehearsal exists to stop the bridge MOVING a presentation, not to stop it
+  // looking at one — a preflight that observes nothing cannot tell you whether
+  // enabling execution is safe. But the exemption must stay confined to
+  // observation: any mutating script that acquired readOnly would execute for
+  // real while the operator believed nothing could.
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(new URL("../bridge/powerpointAdapter.mjs", import.meta.url), "utf8"));
+  const exempted = [...src.matchAll(/readOnly:\s*true/g)];
+  assert.equal(exempted.length, 1, "exactly one script may bypass rehearsal");
+
+  // ...and it must be the capabilities probe, not a navigation command.
+  const before = src.slice(0, src.indexOf("readOnly: true"));
+  assert.match(before.slice(-800), /"capabilities"/, "the exemption must belong to the probe");
+  for (const mutating of ["go to next slide", "go to previous slide", "slide show black screen", "run slide show", "exit "]) {
+    const at = src.indexOf(mutating);
+    if (at < 0) continue;
+    const window = src.slice(at, at + 200);
+    assert.ok(!window.includes("readOnly"), `${mutating} must never bypass rehearsal`);
+  }
+});
+
+test("rehearsal still logs navigation without executing it", async () => {
+  const adapter = new PowerPointAdapter({ rehearsal: true });
+  const out = await adapter.next();
+  assert.equal(out.rehearsed, true, "navigation must remain rehearsed");
+  const nav = adapter.recentScripts().filter((s) => s.label === "next");
+  assert.equal(nav.length, 1);
+  assert.equal(nav[0].rehearsed, true);
+});
+
+test("capabilities reports the real rehearsal flag, not a hardcoded value", async () => {
+  // The preflight must say "execution is disabled" truthfully.
+  const runner = fakeRunner({ capabilities: capsProbe("true", "true", "1") });
+  const rehearsing = new PowerPointAdapter({ rehearsal: true, runner });
+  const caps = await rehearsing.capabilities();
+  assert.equal(caps.rehearsal, true);
+  assert.equal(caps.running, true, "detection must work while rehearsing");
+  assert.equal(caps.inSlideshow, true);
 });

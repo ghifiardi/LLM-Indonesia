@@ -129,6 +129,21 @@ Every adapter implements `capabilities()`, `state()`, `next()`, `previous()`,
 never an application: Keynote (N2.5) drops in without touching the bridge, the
 voice layer, intent routing, or the command contract.
 
+### Rehearsal observes, but never moves
+
+The read-only capabilities probe executes **even in rehearsal**; every
+mutating script is logged and skipped. Rehearsal exists to stop the bridge
+moving a presentation, not to stop it looking at one — a preflight that
+observes nothing cannot tell you whether enabling execution is safe. A test
+asserts exactly one script carries the exemption and that it is the probe.
+
+So `--adapter powerpoint` without `--execute` gives a truthful preflight:
+
+```
+adapter: powerpoint   rehearsal: true
+running: true   frontmost: false   inSlideshow: false   permission: granted
+```
+
 ### The fail-safe rule
 
 If an adapter cannot confirm a safe slideshow target, it does nothing and

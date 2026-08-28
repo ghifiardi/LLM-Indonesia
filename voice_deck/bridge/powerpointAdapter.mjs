@@ -33,6 +33,8 @@ export class PowerPointAdapter {
     // Asking "is it running?" must not LAUNCH it. `application ... is running`
     // via System Events is the non-launching form; `tell application "X"` on
     // its own would start PowerPoint on a machine that had it closed.
+    // Read-only, so it runs in rehearsal too: the preflight must be able to
+    // report what is actually on the machine before execution is enabled.
     const probe = await this.runner.run(
       "capabilities",
       `tell application "System Events"\n`
@@ -44,20 +46,22 @@ export class PowerPointAdapter {
       + `if isRunning then\n`
       + `  tell application "${APP}" to set showCount to count of slide show windows\n`
       + `end if\n`
-      + `return (isRunning as text) & "|" & (isFront as text) & "|" & (showCount as text)`
+      + `return (isRunning as text) & "|" & (isFront as text) & "|" & (showCount as text)`,
+      { readOnly: true }
     );
 
     if (probe.rehearsed) {
+      // Only reachable with a stubbed runner; the real probe is read-only.
       return {
-        adapter: this.name, rehearsal: true,
+        adapter: this.name, rehearsal: this.rehearsal,
         running: false, frontmost: false, inSlideshow: false,
         permission: "unknown",
-        reason: "rehearsal mode — nothing was executed",
+        reason: "probe not executed",
       };
     }
     if (!probe.ok) {
       return {
-        adapter: this.name, rehearsal: false,
+        adapter: this.name, rehearsal: this.rehearsal,
         running: false, frontmost: false, inSlideshow: false,
         permission: probe.permission || "unknown",
         reason: probe.error,
@@ -65,7 +69,7 @@ export class PowerPointAdapter {
     }
     const [running, frontmost, shows] = String(probe.stdout).split("|");
     return {
-      adapter: this.name, rehearsal: false,
+      adapter: this.name, rehearsal: this.rehearsal,
       running: running === "true",
       frontmost: frontmost === "true",
       inSlideshow: Number(shows) > 0,

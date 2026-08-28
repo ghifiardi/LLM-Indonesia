@@ -24,12 +24,19 @@ export class ScriptRunner {
   }
 
   /** @returns {Promise<{ok:boolean, stdout?:string, rehearsed?:boolean, error?:string, permission?:string}>} */
-  async run(label, script) {
-    if (this.rehearsal) {
+  /**
+   * @param {{readOnly?: boolean}} [options] readOnly scripts execute even in
+   *   rehearsal. Rehearsal exists to stop the bridge MOVING a presentation,
+   *   not to stop it looking at one — and a preflight that cannot observe the
+   *   machine tells you nothing about whether it is safe to enable execution.
+   *   Only observation may use this; anything that changes state must not.
+   */
+  async run(label, script, { readOnly = false } = {}) {
+    if (this.rehearsal && !readOnly) {
       this._record({ label, script, rehearsed: true });
       return { ok: true, rehearsed: true, stdout: "", script };
     }
-    this._record({ label, script, rehearsed: false });
+    this._record({ label, script, rehearsed: false, readOnly });
     return new Promise((resolve) => {
       // execFile, never a shell: the script is passed as an argument, so no
       // slide title or spoken phrase can ever be interpreted as shell syntax.
