@@ -6,19 +6,50 @@
 // POST to this port.
 import { validateCommand } from "../commandContract.js";
 
+// action -> adapter method. Dispatch knows the CONTRACT, never an application:
+// adding Keynote must not require editing this file.
+const ACTION_METHOD = Object.freeze({
+  next: (a) => a.next(),
+  previous: (a) => a.previous(),
+  goto_slide: (a, c) => a.goto_slide(c.slide),
+  goto_topic: (a, c) => a.goto_topic(c.query),
+  show_notes: (a) => a.apply?.({ action: "show_notes" }) ?? { ok: true, effect: "show_notes" },
+  hide_notes: (a) => a.apply?.({ action: "hide_notes" }) ?? { ok: true, effect: "hide_notes" },
+  blank: (a) => a.blank(),
+  resume: (a) => a.resume(),
+  start: (a) => a.start(),
+  end: (a) => a.end(),
+  noop: () => ({ ok: true, effect: "noop" }),
+});
+
 export const MAX_BODY_BYTES = 16 * 1024;
 
-export function dispatchCommand(adapter, payload) {
+export async function dispatchCommand(adapter, payload) {
   const result = validateCommand(payload);
   if (!result.ok) {
     return { status: 400, body: { ok: false, error: result.error } };
   }
+  const invoke = ACTION_METHOD[payload.action];
+  if (!invoke) {
+    return { status: 400, body: { ok: false, error: `no dispatch for action: ${payload.action}` } };
+  }
   try {
-    const outcome = adapter.apply(payload);
+    const outcome = await invoke(adapter, payload);
     if (!outcome?.ok) {
-      return { status: 422, body: { ok: false, error: outcome?.error || "adapter refused" } };
+      // A refusal is a deliberate, reportable outcome — the fail-safe rule —
+      // and must never be flattened into a generic error or a false success.
+      return {
+        status: 422,
+        body: {
+          ok: false,
+          refused: Boolean(outcome?.refused),
+          error: outcome?.reason || outcome?.error || "adapter refused",
+          detail: outcome?.detail,
+        },
+      };
     }
-    return { status: 200, body: { ok: true, ...outcome, state: adapter.getState() } };
+    const state = await adapter.state();
+    return { status: 200, body: { ok: true, ...outcome, state } };
   } catch (error) {
     // An adapter fault must not take the bridge down mid-presentation.
     return { status: 500, body: { ok: false, error: `adapter failed: ${error.message}` } };

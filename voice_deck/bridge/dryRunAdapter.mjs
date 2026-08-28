@@ -9,13 +9,15 @@
 // N2 replaces this with per-application adapters exposing the same methods.
 
 export class DryRunAdapter {
+  // NOTE: the live snapshot is `current`, not `state` — `state()` is the
+  // interface method, and a data property of the same name silently shadows it.
   constructor({ slideCount = 0, now = () => Date.now(), logLimit = 200 } = {}) {
     this.name = "dry-run";
     this.slideCount = slideCount;
     this.now = now;
     this.logLimit = logLimit;
     this.log = [];
-    this.state = {
+    this.current = {
       slide: 1,
       blanked: false,
       notesVisible: false,
@@ -34,16 +36,16 @@ export class DryRunAdapter {
   // at the last slide, not jump to the first.
   _setSlide(target) {
     const upper = this.slideCount > 0 ? this.slideCount : Number.MAX_SAFE_INTEGER;
-    this.state.slide = Math.min(Math.max(1, target), upper);
-    return this.state.slide;
+    this.current.slide = Math.min(Math.max(1, target), upper);
+    return this.current.slide;
   }
 
   apply(command) {
     switch (command.action) {
       case "next":
-        return this._moved("next", this._setSlide(this.state.slide + 1));
+        return this._moved("next", this._setSlide(this.current.slide + 1));
       case "previous":
-        return this._moved("previous", this._setSlide(this.state.slide - 1));
+        return this._moved("previous", this._setSlide(this.current.slide - 1));
       case "goto_slide":
         return this._moved("goto_slide", this._setSlide(command.slide));
       case "goto_topic":
@@ -54,22 +56,22 @@ export class DryRunAdapter {
         return { ok: true, effect: "goto_topic", query: command.query, resolved: null };
       case "show_notes":
       case "hide_notes": {
-        this.state.notesVisible = command.action === "show_notes";
-        this._record(command.action, { notesVisible: this.state.notesVisible });
-        return { ok: true, effect: command.action, notesVisible: this.state.notesVisible };
+        this.current.notesVisible = command.action === "show_notes";
+        this._record(command.action, { notesVisible: this.current.notesVisible });
+        return { ok: true, effect: command.action, notesVisible: this.current.notesVisible };
       }
       case "blank":
       case "resume": {
-        this.state.blanked = command.action === "blank";
-        this._record(command.action, { blanked: this.state.blanked });
-        return { ok: true, effect: command.action, blanked: this.state.blanked };
+        this.current.blanked = command.action === "blank";
+        this._record(command.action, { blanked: this.current.blanked });
+        return { ok: true, effect: command.action, blanked: this.current.blanked };
       }
       case "start":
       case "end": {
-        this.state.presenting = command.action === "start";
+        this.current.presenting = command.action === "start";
         if (command.action === "start") this._setSlide(1);
-        this._record(command.action, { presenting: this.state.presenting });
-        return { ok: true, effect: command.action, presenting: this.state.presenting };
+        this._record(command.action, { presenting: this.current.presenting });
+        return { ok: true, effect: command.action, presenting: this.current.presenting };
       }
       case "noop":
         this._record("noop");
@@ -87,8 +89,29 @@ export class DryRunAdapter {
     return { ok: true, effect, slide };
   }
 
+  // --- shared adapter interface -------------------------------------------
+  // Implemented by delegating to apply(), so the dry run and the native
+  // adapters present the same surface to dispatch and Keynote can drop in
+  // later without the bridge learning anything about any application.
+  async capabilities() {
+    return {
+      adapter: this.name, rehearsal: true,
+      running: true, frontmost: true, inSlideshow: this.current.presenting,
+      permission: "granted", reason: "dry run — nothing is driven",
+    };
+  }
+  async state() { return this.getState(); }
+  async next() { return this.apply({ action: "next" }); }
+  async previous() { return this.apply({ action: "previous" }); }
+  async goto_slide(slide) { return this.apply({ action: "goto_slide", slide }); }
+  async goto_topic(query) { return this.apply({ action: "goto_topic", query }); }
+  async blank() { return this.apply({ action: "blank" }); }
+  async resume() { return this.apply({ action: "resume" }); }
+  async start() { return this.apply({ action: "start" }); }
+  async end() { return this.apply({ action: "end" }); }
+
   getState() {
-    return { adapter: this.name, slideCount: this.slideCount, ...this.state };
+    return { adapter: this.name, slideCount: this.slideCount, ...this.current };
   }
 
   recentLog(limit = 20) {

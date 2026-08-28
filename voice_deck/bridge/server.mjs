@@ -21,6 +21,7 @@
 import http from "node:http";
 import { createSessionToken, tokensMatch, extractToken, hostIsLoopback } from "./auth.mjs";
 import { DryRunAdapter } from "./dryRunAdapter.mjs";
+import { createAdapter, DEFAULT_ADAPTER } from "./adapterFactory.mjs";
 import { dispatchCommand, parseBody, MAX_BODY_BYTES } from "./dispatch.mjs";
 
 export const LOOPBACK = "127.0.0.1";
@@ -57,7 +58,16 @@ export function createBridge({ token = createSessionToken(), adapter = new DryRu
     }
 
     if (req.method === "GET" && url.pathname === "/state") {
-      return send(res, 200, { ok: true, state: adapter.getState(), recent: adapter.recentLog() });
+      Promise.resolve(adapter.state())
+        .then((state) => {
+          send(res, 200, {
+            ok: true,
+            state,
+            recent: adapter.recentLog?.() ?? adapter.recentScripts?.() ?? [],
+          });
+        })
+        .catch((error) => send(res, 500, { ok: false, error: `state failed: ${error.message}` }));
+      return undefined;
     }
 
     if (req.method === "POST" && url.pathname === "/command") {
@@ -78,9 +88,17 @@ export function createBridge({ token = createSessionToken(), adapter = new DryRu
         if (aborted) return;
         const parsed = parseBody(Buffer.concat(chunks));
         if (!parsed.ok) return send(res, 400, { ok: false, error: parsed.error });
-        const { status, body } = dispatchCommand(adapter, parsed.value);
-        onLog({ level: body.ok ? "info" : "warn", message: `${parsed.value.action ?? "?"} -> ${status}` });
-        return send(res, status, body);
+        dispatchCommand(adapter, parsed.value)
+          .then(({ status, body }) => {
+            onLog({ level: body.ok ? "info" : "warn", message: `${parsed.value.action ?? "?"} -> ${status}` });
+            send(res, status, body);
+          })
+          .catch((error) => {
+            // Without this the request hangs forever and the presenter simply
+            // sees nothing happen.
+            onLog({ level: "warn", message: `dispatch rejected: ${error.message}` });
+            send(res, 500, { ok: false, error: `dispatch failed: ${error.message}` });
+          });
       });
       return undefined;
     }
@@ -99,9 +117,19 @@ function main() {
   };
   const port = Number(valueFor("--port", 8777));
   const slideCount = Number(valueFor("--slides", 0));
+  const adapterName = valueFor("--adapter", DEFAULT_ADAPTER);
+  // Executing is opt-in on top of choosing an adapter: --adapter powerpoint
+  // still only REHEARSES until --execute is passed as well.
+  const rehearsal = !argv.includes("--execute");
+
+  const chosen = createAdapter(adapterName, { slideCount, rehearsal });
+  if (!chosen.ok) {
+    console.error(chosen.error);
+    process.exit(1);
+  }
 
   const { server, token } = createBridge({
-    adapter: new DryRunAdapter({ slideCount }),
+    adapter: chosen.adapter,
     onLog: ({ level, message }) => console.log(`[${level}] ${message}`),
   });
 
@@ -119,10 +147,10 @@ function main() {
   });
 
   server.listen(port, LOOPBACK, () => {
-    console.log(`Tantular presentation bridge (N1, dry run) on http://${LOOPBACK}:${port}`);
+    console.log(`Tantular presentation bridge on http://${LOOPBACK}:${port}`);
     console.log(`Session token: ${token}`);
     console.log("Send it as:  Authorization: Bearer <token>   (or x-tantular-token)");
-    console.log("Adapter drives nothing this phase — actions are recorded only.");
+    console.log(`Adapter: ${adapterName}${rehearsal ? " (rehearsal — scripts logged, nothing executed)" : " (EXECUTING against the live app)"}`);
   });
 }
 

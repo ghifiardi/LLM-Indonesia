@@ -105,3 +105,52 @@ resulting `goto_slide`, because in rehearsal the deck *is* the presentation.
 Once a native adapter exists, the app is the source of truth and `goto_topic`
 travels unresolved for the adapter to match against live slide titles — which
 is why the dry-run adapter records it unresolved rather than guessing.
+
+## Adapters (N2)
+
+Selection is an explicit flag and **defaults to `dry-run`**:
+
+```bash
+node voice_deck/bridge/server.mjs --adapter dry-run              # inert (default)
+node voice_deck/bridge/server.mjs --adapter powerpoint           # rehearsal: logs scripts, executes nothing
+node voice_deck/bridge/server.mjs --adapter powerpoint --execute # drives the live app
+```
+
+Executing is a **second, separate** opt-in on top of choosing an adapter. A
+bridge started by accident, by a stale script, or with a typo drives nothing —
+an unknown adapter name refuses to start rather than falling back to one that
+moves a real presentation.
+
+### The shared interface
+
+Every adapter implements `capabilities()`, `state()`, `next()`, `previous()`,
+`goto_slide(n)`, `goto_topic(query)`, `blank()`, `resume()`, `start()`,
+`end()`. Dispatch routes by **action name**, so it knows the contract and
+never an application: Keynote (N2.5) drops in without touching the bridge, the
+voice layer, intent routing, or the command contract.
+
+### The fail-safe rule
+
+If an adapter cannot confirm a safe slideshow target, it does nothing and
+reports why. It never guesses and never sends stray keystrokes.
+
+| Condition | Result |
+|---|---|
+| app not running | refused, `app-not-running` |
+| open but **not presenting** | refused, `no-slideshow` |
+| Automation permission denied | refused, `automation-permission-denied`, with the System Settings path |
+| topic matches no slide title | refused, `topic-not-found` |
+
+The second row is the one that matters most: PowerPoint frontmost in edit view
+is exactly when a stray "next" stops being a no-op and becomes an edit to
+someone's document. Refusals return HTTP 422 with `refused: true`, so a
+deliberate refusal is never confused with a fault.
+
+`goto_topic` is resolved against the **live application's** slide titles, not
+the deck's `slides.json` — with a native adapter the app is the source of
+truth. A query containing quotes or backslashes is refused outright rather
+than escaped: it is matched, never executed, so nothing is lost by refusing.
+
+`capabilities()` probes through System Events. A bare `tell application
+"Microsoft PowerPoint"` would **launch** PowerPoint on a machine where it was
+closed, just to ask whether it was running.
