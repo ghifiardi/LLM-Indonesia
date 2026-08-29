@@ -41,3 +41,6 @@ tantular_office_addin/.venv-doc/
 # Source, tests, and schema definitions under resident/ stay tracked.
 .resident/
 resident/.resident/
+
+# Local git worktrees (superpowers:using-git-worktrees)
+.worktrees/
