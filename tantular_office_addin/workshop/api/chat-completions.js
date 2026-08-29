@@ -87,6 +87,18 @@ Anda dapat menangani brief deck panjang hingga 30 slide. Gunakan variasi struktu
     },
     stream: false
   };
+  // The client always sends reasoning_effort: "none" (its way of disabling
+  // thinking against a local Ollama endpoint — see reasoningControlFor in
+  // src/tantularClient.js), spread in above via ...body. This upstream
+  // rejects that field outright with a 400 — confirmed by reproducing it
+  // directly against the live endpoint — which made EVERY cloud request fail
+  // on its first (and only) attempt: the client's own retry-without-
+  // reasoning_effort logic exists for exactly this, but never got the chance
+  // to run, because the generic error message below never contained the
+  // "reasoning" keyword that retry looks for. This deployment already has an
+  // equivalent — chat_template_kwargs.enable_thinking above — so the field is
+  // simply redundant here, not meaningful to forward.
+  delete payload.reasoning_effort;
 
   try {
     const upstream = await fetch(upstreamUrl, {
