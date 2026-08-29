@@ -3,7 +3,7 @@ export const EDIT_SYSTEM_PROMPT = [
   "Anda editor dokumen Bahasa Indonesia yang teliti.",
   "Balas HANYA JSON valid dengan bentuk:",
   '{"edits":[{"find":"<teks persis dari dokumen>","replace":"<teks baru>","before":"<±40 karakter sebelum find>","after":"<±40 karakter sesudah find>","occurrence":1,"alasan":"<alasan singkat>"}]}',
-  "Aturan: find harus persis sama dengan teks di dokumen (maksimal 200 karakter);",
+  "Aturan: find harus persis sama dengan teks di dokumen (maksimal 2000 karakter);",
   "gunakan before/after untuk membedakan teks yang berulang; maksimal 20 edit;",
   "Untuk permintaan elaborasi/perluasan bagian: pilih satu kalimat pendek yang persis ada sebagai find, lalu replace dengan 2-4 paragraf siap pakai (gunakan baris kosong antarparagraf) yang mempertahankan ide asli dan menambahkan definisi, trade-off, implikasi, serta kriteria pemilihan yang konsisten dengan konteks;",
   "Jangan hanya menambah satu klausa. Elaborasi harus substantif tetapi tetap ringkas, sekitar 120-250 kata bila pengguna meminta greater detail;",
@@ -13,7 +13,14 @@ export const EDIT_SYSTEM_PROMPT = [
 ].join(" ");
 
 const MAX_EDITS = 20;
-const MAX_FIND = 200;
+// Raised from 200 to 2000 at the user's explicit request, after being told
+// the tradeoff: the exact-match requirement below is unchanged, so a longer
+// "find" is not less safe in the sense of matching the WRONG text — it just
+// gets harder for the model to reproduce byte-for-byte over a longer span,
+// which fails safe as locateEdit's "not_found" (surfaced, never a silent
+// wrong replacement), not a corrupted document. 2000 chars fits whole
+// long-sentence/paragraph edits in one shot for prose like academic writing.
+const MAX_FIND = 2000;
 
 export function parseEditContract(raw) {
   const text = String(raw ?? "");

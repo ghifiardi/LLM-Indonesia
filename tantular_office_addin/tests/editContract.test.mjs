@@ -15,7 +15,7 @@ test("rejects malformed contracts", () => {
   assert.throws(() => parseEditContract("bukan json"));
   assert.throws(() => parseEditContract('{"edits":[]}'));
   assert.throws(() => parseEditContract(JSON.stringify({ edits: Array.from({ length: 21 }, () => ({ find: "a", replace: "b" })) })));
-  assert.throws(() => parseEditContract(JSON.stringify({ edits: [{ find: "x".repeat(201), replace: "y" }] })));
+  assert.throws(() => parseEditContract(JSON.stringify({ edits: [{ find: "x".repeat(2001), replace: "y" }] })));
 });
 
 // REGRESSION: one malformed item in an otherwise-good batch used to discard
@@ -28,7 +28,7 @@ test("keeps valid edits and reports skipped ones instead of throwing on one bad 
     edits: [
       { find: "naik", replace: "meningkat" },
       { find: "" /* missing find */, replace: "y" },
-      { find: "x".repeat(201) /* too long */, replace: "y" },
+      { find: "x".repeat(2001) /* too long */, replace: "y" },
       { find: "Penutup.", replace: "Selesai." }
     ]
   });
@@ -44,7 +44,7 @@ test("keeps valid edits and reports skipped ones instead of throwing on one bad 
 
 test("all-invalid edits still throws, naming why each one failed", () => {
   assert.throws(
-    () => parseEditContract(JSON.stringify({ edits: [{ find: "", replace: "a" }, { find: "x".repeat(201), replace: "b" }] })),
+    () => parseEditContract(JSON.stringify({ edits: [{ find: "", replace: "a" }, { find: "x".repeat(2001), replace: "b" }] })),
     /Semua 2 edit tidak valid/
   );
 });
