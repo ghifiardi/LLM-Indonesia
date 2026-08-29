@@ -24,7 +24,12 @@ export async function runEditTeks({ instruction, contextText, emit, signal }) {
     user: `${instruction}\n\n${scope}`.trim(),
     maxTokens: 1400,
     temperature: 0.1,
-    signal
+    signal,
+    // A large selection means one JSON edit per sentence — long structured
+    // output, same shape of problem as Studio just on the fast/small chat
+    // model — so this needs Studio's kind of timeout headroom, not the
+    // short budget plain Q&A chat gets. See runTantular in tantularClient.js.
+    task: "edit"
   });
   const { edits, skipped } = parseEditContract(raw);
   const body = await getDocumentBodyText();

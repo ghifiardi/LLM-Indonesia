@@ -220,7 +220,16 @@ export async function runTantular({
     // Studio planning uses a larger local model (9B) plus long JSON output and can
     // cold-start slowly, so give it a much larger budget than short chat calls.
     // 8 minutes accommodates slow CPU-only laptops (~5-8 tok/s) on compact plans.
-    timeoutMs: usesOfficeModel ? 480_000 : 90_000,
+    //
+    // task "edit" (EDIT_TEKS, e.g. "Perbaiki bahasa" on a large selection)
+    // stays on the small/fast chat model even on constrained machines — that
+    // is the point of "lite" — but it still has to produce one JSON edit per
+    // sentence in the selection, so a big selection is long structured output
+    // on possibly slow hardware, same shape of problem as Studio, just with a
+    // faster model. 90s was measured too short for that combination even on
+    // a capable machine; give it real headroom without going all the way to
+    // Studio's 8 minutes, since "lite" is chosen specifically to be fast.
+    timeoutMs: usesOfficeModel ? 480_000 : task === "edit" ? 240_000 : 90_000,
     signal,
     fallbackModel: model === (usesOfficeModel ? DEFAULT_DECK_MODEL : DEFAULT_MODEL)
       ? (usesOfficeModel ? DECK_MODEL_FALLBACK : CHAT_MODEL_FALLBACK)

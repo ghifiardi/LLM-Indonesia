@@ -251,6 +251,46 @@ test("runTantular deck JSON mode sends response_format", async () => {
   }
 });
 
+// REGRESSION: EDIT_TEKS on a large selection asks the local model for one
+// JSON edit per sentence — long structured output on possibly slow hardware,
+// same shape of problem Studio tasks already get 480s for. The plain-chat
+// budget (90s) was measured too short for that even on a capable machine,
+// timing out before the model finished. task: "edit" must get real headroom
+// without silently falling back to the deck/document/workbook model.
+test("runTantular gives task 'edit' a longer timeout than plain chat, on the chat model", async () => {
+  globalThis.localStorage = {
+    getItem: () => JSON.stringify({ model: "tantular-office:lite", deckModel: "tantular-office:0.5-9b" }),
+    setItem: () => {}
+  };
+  const capturedDelays = [];
+  globalThis.window = {
+    setTimeout: (fn, ms) => { capturedDelays.push(ms); return setTimeout(fn, ms); },
+    clearTimeout: (...a) => clearTimeout(...a)
+  };
+  const originalFetch = globalThis.fetch;
+  let capturedModel = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedModel = JSON.parse(init.body).model;
+    return {
+      ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { content: "ok" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    await runTantular({ system: "s", user: "u", task: "edit" });
+    assert.equal(capturedDelays[0], 240_000);
+    assert.equal(capturedModel, "tantular-office:lite", "task 'edit' must stay on the chat model, not deckModel");
+
+    capturedDelays.length = 0;
+    await runTantular({ system: "s", user: "u" }); // default task: "general"
+    assert.equal(capturedDelays[0], 90_000);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("runTantular retries once without reasoning_effort if the server rejects the field", async () => {
   globalThis.localStorage = { getItem: () => null, setItem: () => {} };
   globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
