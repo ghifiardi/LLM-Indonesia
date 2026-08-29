@@ -6,9 +6,12 @@
 // the ONLY place that happens, and it exists so the upstream API key stays on
 // the server. A key shipped in page JavaScript is a public key.
 //
-// The installed Office add-in never reaches this route: companionUrl() keeps it
-// pointed at the local companion whenever Office.js is present, so an install
-// stays local-only exactly as promised.
+// An installed Office add-in reaches this route ONLY in a deliberate Cloud Mode
+// session: companionUrl() keeps it pointed at the local companion unless the user
+// switched modes in the pane, and loadMode() honours that switch only when the
+// consent record carries chosenInOffice — which nothing but the in-pane toggle,
+// running under a real Office host, can write (see src/companionUrl.js). An install
+// left alone therefore never sends text here; one whose owner chose cloud does.
 //
 // Configure in Vercel → Project → Settings → Environment Variables:
 //   TANTULAR_UPSTREAM_URL    OpenAI-compatible chat-completions endpoint
