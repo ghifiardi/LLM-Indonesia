@@ -19,6 +19,41 @@
 
 const MAX_BODY_BYTES = 256 * 1024;
 
+// The client's streaming path (runTantularStream in src/tantularClient.js) sends
+// stream:true and reads SSE `data:` frames, taking choices[0].delta.content
+// (src/chat/sse.js only yields lines beginning with "data:"). This route calls the
+// upstream with stream:false on purpose, so `usage` comes back in-band and the meter
+// never has to parse a stream — which left the streamed pipelines reading a plain JSON
+// body, finding no frames, and failing with "Model tidak mengembalikan teks."
+//
+// So the completion is re-emitted here in the shape that parser expects.
+//
+// This is a SHIM, not streaming: the text still arrives in one burst after the full
+// wait. True passthrough streaming is a deferred milestone and carries a billing
+// consequence — see docs/superpowers/specs/2026-08-29-cloud-metered-billing-design.md
+// section 4.9 — so it is deliberately not attempted here.
+function sseFromCompletion(rawJsonText) {
+  let parsed = null;
+  try { parsed = JSON.parse(rawJsonText); } catch { parsed = null; }
+  const choice = parsed?.choices?.[0] ?? {};
+  const content = String(choice.message?.content ?? "");
+
+  // An unparseable or contentless upstream reply yields an empty delta on purpose:
+  // the client then raises its own "Model tidak mengembalikan teks.", which is the
+  // truthful outcome, rather than this route inventing text.
+  const chunk = (delta, finishReason, extra = {}) => JSON.stringify({
+    id: parsed?.id ?? null,
+    object: "chat.completion.chunk",
+    model: parsed?.model ?? null,
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+    ...extra
+  });
+
+  return `data: ${chunk({ role: "assistant", content }, null)}\n\n`
+    + `data: ${chunk({}, choice.finish_reason ?? "stop", { usage: parsed?.usage ?? null })}\n\n`
+    + "data: [DONE]\n\n";
+}
+
 export default async function handler(request, response) {
   if (request.method === "OPTIONS") return response.status(204).end();
   if (request.method !== "POST") {
@@ -135,6 +170,13 @@ Anda dapat menangani brief deck panjang hingga 30 slide. Gunakan variasi struktu
       });
     }
 
+    // Answer in the shape the caller asked for. Errors above stay JSON: the client's
+    // streaming path reads them with response.text() before touching the body stream.
+    if (body.stream === true) {
+      response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      response.setHeader("Cache-Control", "no-store");
+      return response.status(200).send(sseFromCompletion(text));
+    }
     response.setHeader("Content-Type", "application/json");
     return response.status(200).send(text);
   } catch (error) {
