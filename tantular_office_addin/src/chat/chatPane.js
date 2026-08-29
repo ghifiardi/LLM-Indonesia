@@ -9,6 +9,7 @@ import {
   insertStructuredTextIntoWord
 } from "../officeClient.js";
 import { actionsForHost } from "../prompts.js";
+import { consumeAutoSwitchNote } from "../tantularClient.js";
 
 const CONTEXT_LABELS = { selection: "Seleksi", document: "Dokumen (isi utama)", none: "Tanpa konteks" };
 const CONTEXT_ORDER = [null, "selection", "document", "none"];
@@ -372,6 +373,14 @@ export function mountChatPane({ host }) {
         },
         signal: state.abort.signal
       });
+      // Chat/edit tasks can silently auto-switch model mid-request (see
+      // runTantular's auto-downgrade in tantularClient.js) — e.g. the
+      // configured model was never installed on this machine. Studio surfaces
+      // this via state.deckAutoSwitchNote; chat had no equivalent, so the
+      // switch happened invisibly and Pengaturan model lokal looked like it
+      // had silently changed itself.
+      const autoSwitchNote = consumeAutoSwitchNote();
+      if (autoSwitchNote) addBubble("assistant", autoSwitchNote);
       if (result.kind === "text" && result.text) {
         // Replace streamed plain text with a safe formatted rendering once the
         // complete response is available.

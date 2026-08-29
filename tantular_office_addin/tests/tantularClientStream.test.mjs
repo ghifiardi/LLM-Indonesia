@@ -291,6 +291,58 @@ test("runTantular gives task 'edit' a longer timeout than plain chat, on the cha
   }
 });
 
+// REGRESSION: a RAM-constrained install only ever builds "tantular-office:lite"
+// — it never pulls the 9B chat default OR its qwen3.5:9b fallback. If settings
+// ever point back at that default (a settings reset, a fresh profile, a
+// cleared site data — none of which touch what's actually installed), BOTH
+// the primary model and request.fallbackModel 404 with "model not found", and
+// the raw error used to reach the user with no way to recover short of
+// manually reconfiguring — "keep saying the same error, no matter what I did".
+test("runTantular auto-downgrades a missing chat model to an installed lite one, and persists it", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  const savedSettings = [];
+  globalThis.localStorage.setItem = (_key, value) => savedSettings.push(JSON.parse(value));
+  const attemptedModels = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("/api/models")) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({ models: [{ name: "tantular-office:lite" }] }),
+        text: async () => ""
+      };
+    }
+    const model = JSON.parse(init.body).model;
+    attemptedModels.push(model);
+    if (model === "tantular-office:lite") {
+      return {
+        ok: true, status: 200,
+        json: async () => ({ choices: [{ message: { content: "Halo!" } }] }),
+        text: async () => ""
+      };
+    }
+    // Neither the configured default nor its qwen3.5:9b fallback is installed
+    // on this machine — exactly Ollama's real 404 shape.
+    return {
+      ok: false, status: 404,
+      json: async () => ({ error: `model '${model}' not found` }),
+      text: async () => JSON.stringify({ error: `model '${model}' not found` })
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const out = await runTantular({ system: "s", user: "u" }); // default task: "general"
+    assert.equal(out, "Halo!");
+    assert.deepEqual(attemptedModels, ["tantular-office:0.5-9b", "qwen3.5:9b", "tantular-office:lite"],
+      "must try the configured default, its built-in fallback, then the auto-downgrade — in that order");
+    const persisted = savedSettings.at(-1);
+    assert.equal(persisted.model, "tantular-office:lite", "must persist to the CHAT model field, not deckModel");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("runTantular retries once without reasoning_effort if the server rejects the field", async () => {
   globalThis.localStorage = { getItem: () => null, setItem: () => {} };
   globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };

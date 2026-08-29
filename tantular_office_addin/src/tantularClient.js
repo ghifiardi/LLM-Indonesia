@@ -239,16 +239,35 @@ export async function runTantular({
   try {
     return await callChat(request);
   } catch (error) {
-    // Auto-downgrade: a timeout on a Studio task usually means the machine
-    // cannot hold the model in RAM. Retry once with an installed lighter
-    // model and persist it so every later call is fast too.
-    const timedOut = /terlalu lama/i.test(String(error?.message || ""));
-    if (!usesOfficeModel || !timedOut || signal?.aborted) throw error;
+    // Auto-downgrade, two triggers:
+    // - A timeout on a Studio task usually means the machine cannot hold that
+    //   model in RAM.
+    // - "model not found" means the configured model was never installed
+    //   here at all — settings pointing at a default that a RAM-constrained
+    //   install never pulled (that install only builds "lite"), a settings
+    //   reset (e.g. cleared site data), or a fresh profile. This used to be
+    //   a dead end for chat/edit tasks: request.fallbackModel retries with
+    //   qwen3.5:9b, but a machine that only ever installed "lite" doesn't
+    //   have THAT either, so the fallback 404s too and the raw error reached
+    //   the user with no way to recover short of manually reconfiguring.
+    // Either way: retry once with whatever Tantular model IS actually
+    // installed, and persist it so every later call already has it right.
+    const message = String(error?.message || "");
+    const timedOut = /terlalu lama/i.test(message);
+    const missingModel = /not found|no such model|try pulling/i.test(message);
+    if (signal?.aborted || !((usesOfficeModel && timedOut) || missingModel)) throw error;
     const lite = await findInstalledLiteModel(model);
     if (!lite) throw error;
     const text = await callChat({ ...request, model: lite, fallbackModel: "" });
-    saveSettings({ deckModel: lite });
-    autoSwitchNote = `Model "${model}" terlalu lambat di perangkat ini; otomatis beralih ke "${lite}" dan disimpan sebagai Model Studio.`;
+    if (usesOfficeModel) {
+      saveSettings({ deckModel: lite });
+      autoSwitchNote = missingModel
+        ? `Model "${model}" tidak ditemukan di perangkat ini; otomatis beralih ke "${lite}" dan disimpan sebagai Model Studio.`
+        : `Model "${model}" terlalu lambat di perangkat ini; otomatis beralih ke "${lite}" dan disimpan sebagai Model Studio.`;
+    } else {
+      saveSettings({ model: lite });
+      autoSwitchNote = `Model "${model}" tidak ditemukan di perangkat ini; otomatis beralih ke "${lite}" dan disimpan sebagai Model umum/chat.`;
+    }
     console.warn(`[Tantular] ${autoSwitchNote}`);
     return text;
   }
