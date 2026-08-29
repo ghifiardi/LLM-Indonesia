@@ -90,6 +90,62 @@ test("chat-completions pins the server-side model regardless of the client's req
   }
 });
 
+// REGRESSION: every structured pipeline (EDIT_TEKS's strict "reply with
+// ONLY JSON" contract, Deck/Document/Workbook Studio's schemas) depends on
+// ITS OWN system prompt to get a parseable response — confirmed by
+// reproducing this directly against the live endpoint: with the generic
+// prompt substituted in, the model ignored the JSON-only instruction and
+// answered in prose instead, breaking every structured feature in Cloud
+// Mode, not just producing worse output but failing to parse at all.
+test("chat-completions forwards the CLIENT's task-specific system prompt, not a generic one", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedBody = JSON.parse(init.body);
+    return { ok: true, text: async () => JSON.stringify({ choices: [{ message: { content: "OK" } }] }) };
+  };
+  try {
+    await withEnv({ TANTULAR_UPSTREAM_URL: "https://upstream.example/v1/chat", TANTULAR_UPSTREAM_KEY: "k" }, async () => {
+      const request = {
+        method: "POST",
+        body: {
+          messages: [
+            { role: "system", content: "Balas HANYA JSON valid dengan bentuk {\"edits\":[...]}." },
+            { role: "user", content: "Perbaiki bahasa teks ini." }
+          ]
+        }
+      };
+      const response = mockResponse();
+      await handler(request, response);
+      assert.equal(capturedBody.messages[0].role, "system");
+      assert.match(capturedBody.messages[0].content, /HANYA JSON/,
+        "the pipeline's own system prompt must reach the model, not a generic substitute");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat-completions falls back to the generic system prompt when the client sends none", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedBody = JSON.parse(init.body);
+    return { ok: true, text: async () => JSON.stringify({ choices: [{ message: { content: "OK" } }] }) };
+  };
+  try {
+    await withEnv({ TANTULAR_UPSTREAM_URL: "https://upstream.example/v1/chat", TANTULAR_UPSTREAM_KEY: "k" }, async () => {
+      const request = { method: "POST", body: { messages: [{ role: "user", content: "hai" }] } };
+      const response = mockResponse();
+      await handler(request, response);
+      assert.equal(capturedBody.messages[0].role, "system");
+      assert.match(capturedBody.messages[0].content, /Tantular Office/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("chat-completions never leaks the raw upstream error body to the client", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => ({

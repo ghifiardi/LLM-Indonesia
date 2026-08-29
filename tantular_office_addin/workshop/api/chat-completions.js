@@ -65,8 +65,23 @@ Prioritas:
 
 Anda dapat menangani brief deck panjang hingga 30 slide. Gunakan variasi struktur seperti title, agenda, bullets, cards, columns, metrics, quote, visualization, dan closing bila skema pengguna mengizinkan.`;
 
-  // Cloud production policy is enforced server-side rather than relying on
-  // individual Office clients to send the correct model/runtime controls.
+  // Cloud production policy still overrides model/temperature/sampling below
+  // — none of that is negotiable from the client. The system message is
+  // different: every structured pipeline (EDIT_TEKS's strict "reply with
+  // ONLY JSON" contract, Deck/Document/Workbook Studio's schemas, ...) DEPENDS
+  // on its own task-specific system prompt to get a parseable response at
+  // all. Unconditionally replacing it with this generic one — confirmed by
+  // reproducing it directly against the live endpoint — made the model
+  // ignore the JSON-only instruction and answer in prose instead, so every
+  // structured feature was broken in Cloud Mode, not just producing wrong
+  // output but failing outright once the client tried to parse it. The
+  // client here is our own packaged Office add-in and the hosted portal
+  // page, both of which we control the source of; there's no legitimate
+  // caller of this endpoint whose system prompt needs distrusting the way an
+  // arbitrary third party's would. Use the client's system message when it
+  // sends one, and only fall back to the generic assistant prompt otherwise
+  // (e.g. a raw request with no system role at all).
+  const clientSystemMessage = body.messages.find((message) => message?.role === "system");
   const clientMessages = body.messages.filter(
     (message) => message && message.role !== "system"
   );
@@ -75,7 +90,7 @@ Anda dapat menangani brief deck panjang hingga 30 slide. Gunakan variasi struktu
     ...body,
     model: process.env.TANTULAR_UPSTREAM_MODEL || "Qwen/Qwen3.5-9B",
     messages: [
-      { role: "system", content: TANTULAR_SYSTEM_PROMPT },
+      { role: "system", content: String(clientSystemMessage?.content || "").trim() || TANTULAR_SYSTEM_PROMPT },
       ...clientMessages
     ],
     temperature: 0.2,
