@@ -380,7 +380,12 @@ export function mountChatPane({ host }) {
         if (intent === "TANYA_DOKUMEN") addDocumentAnswerActions(answer, result);
       }
       if (result.kind === "edits") {
-        answer.replaceChildren(tag, document.createTextNode("Usulan edit siap. Buka detail edit di bawah untuk meninjau perubahan."));
+        const skippedNote = result.skipped?.length
+          ? ` (${result.skipped.length} usulan edit dilewati karena tidak valid — sisanya tetap ditampilkan.)`
+          : "";
+        answer.replaceChildren(tag, document.createTextNode(
+          `Usulan edit siap. Buka detail edit di bawah untuk meninjau perubahan.${skippedNote}`
+        ));
         let renderEditPreview;
         try {
           ({ renderEditPreview } = await import("./wordEdits.js"));

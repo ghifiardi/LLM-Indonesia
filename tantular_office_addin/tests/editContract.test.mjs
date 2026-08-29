@@ -18,6 +18,37 @@ test("rejects malformed contracts", () => {
   assert.throws(() => parseEditContract(JSON.stringify({ edits: [{ find: "x".repeat(201), replace: "y" }] })));
 });
 
+// REGRESSION: one malformed item in an otherwise-good batch used to discard
+// the whole batch — a weaker/faster local model asked for many edits at once
+// is more likely to slip on exactly one item, and for a slow local model a
+// forced full retry can mean burning another timeout instead of just using
+// what parsed correctly.
+test("keeps valid edits and reports skipped ones instead of throwing on one bad item", () => {
+  const raw = JSON.stringify({
+    edits: [
+      { find: "naik", replace: "meningkat" },
+      { find: "" /* missing find */, replace: "y" },
+      { find: "x".repeat(201) /* too long */, replace: "y" },
+      { find: "Penutup.", replace: "Selesai." }
+    ]
+  });
+  const { edits, skipped } = parseEditContract(raw);
+  assert.equal(edits.length, 2);
+  assert.deepEqual(edits.map((e) => e.find), ["naik", "Penutup."]);
+  assert.equal(skipped.length, 2);
+  assert.equal(skipped[0].index, 2);
+  assert.match(skipped[0].reason, /find/);
+  assert.equal(skipped[1].index, 3);
+  assert.match(skipped[1].reason, /panjang/);
+});
+
+test("all-invalid edits still throws, naming why each one failed", () => {
+  assert.throws(
+    () => parseEditContract(JSON.stringify({ edits: [{ find: "", replace: "a" }, { find: "x".repeat(201), replace: "b" }] })),
+    /Semua 2 edit tidak valid/
+  );
+});
+
 test("unique find resolves", () => {
   const r = locateEdit(DOC, { find: "Laporan tahunan.", replace: "", occurrence: 1 });
   assert.equal(r.index, 0);

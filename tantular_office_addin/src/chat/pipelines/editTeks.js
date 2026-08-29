@@ -26,7 +26,7 @@ export async function runEditTeks({ instruction, contextText, emit, signal }) {
     temperature: 0.1,
     signal
   });
-  const { edits } = parseEditContract(raw);
+  const { edits, skipped } = parseEditContract(raw);
   const body = await getDocumentBodyText();
-  return { kind: "edits", edits: resolveEdits(body, edits) };
+  return { kind: "edits", edits: resolveEdits(body, edits), skipped };
 }
