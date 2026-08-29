@@ -68,12 +68,16 @@ gateway; confirm it black-box before the plan is written. §4.9 fixes it.
 
 ### Correction required
 
-`workshop/api/chat-completions.js:9-11` states that the installed add-in never reaches the route
-and that "an install stays local-only exactly as promised." That is false as of
-`companionUrl.js:6-8`. The comment is corrected as part of this work, and the privacy
-wording in `workshop/privacy.html` and `dist/workshop-web/privacy.html` moves to the
-accurate claim: **Tantular never sends your text anywhere unless you switch to Cloud
-Mode yourself.**
+`workshop/api/chat-completions.js:9-11` states that the installed add-in never reaches the
+route and that "an install stays local-only exactly as promised." That is false as of
+`companionUrl.js:6-8`, and the comment is corrected as part of this work.
+
+`workshop/privacy.html:102` is **not** wrong: it already scopes its claim to "Content
+processed exclusively in Local Mode." The gap there is the opposite one — **Cloud Mode is
+not disclosed at all**. Section 2 of the policy describes only local processing, so once
+cloud is a paid, promoted feature the policy must gain a Cloud Mode section stating what
+is transmitted, to whom, and what is retained (per §6.6: sizes and usage, never content).
+That is a launch blocker for the billing work, not for the streaming fix.
 
 ## 3. Identity and accounts
 
