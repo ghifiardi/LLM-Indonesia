@@ -1,0 +1,15 @@
+{
+  "task_name": "indonesian_phone_normalizer",
+  "goal": "Normalize Indonesian phone numbers to +62 format. Remove all non-digit characters first. If fewer than 7 digits remain, return ''. If digits start with '62', return '+' + digits. If digits start with '0', return '+62' + digits[1:]. Otherwise return ''.",
+  "allowed_imports": ["re"],
+  "kb": {"country_code": "+62"},
+  "cases": [
+    {"query": "0812-3456-7890", "expected": "+6281234567890", "description": "mobile starts with 0"},
+    {"query": "+62 812 3456 7890", "expected": "+6281234567890", "description": "already +62 with spaces"},
+    {"query": "62-812-3456-7890", "expected": "+6281234567890", "description": "country code without plus"},
+    {"query": "(021) 555-1234", "expected": "+62215551234", "description": "Jakarta landline"},
+    {"query": "  0857 000 111 222 ", "expected": "+62857000111222", "description": "trim whitespace"},
+    {"query": "abc", "expected": "", "description": "invalid input"},
+    {"query": "", "expected": "", "description": "empty input"}
+  ]
+}

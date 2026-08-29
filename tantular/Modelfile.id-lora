@@ -1,0 +1,24 @@
+# Tantular 0.1 — Indonesian assistant + LoRA adapter
+#
+# Same persona as tantular:0.1-id, plus a LoRA adapter fine-tuned on the
+# Indonesian support eval set / your own data. Keep the adapter under
+# tantular/adapters/ (git-ignored) and point ADAPTER at it.
+#
+# The adapter must be trained against the SAME base weights as tantular:0.1-base,
+# otherwise Ollama will refuse to load it.
+#
+# Build:
+#   ollama create tantular:0.1-id-lora -f tantular/Modelfile.id-lora
+
+FROM tantular:0.1-base
+
+# GGUF adapter produced by tantular/FINETUNE.md (convert_lora_to_gguf.py).
+# Path is relative to this Modelfile's directory (tantular/).
+ADAPTER ./adapters/tantular-id-lora.gguf
+
+PARAMETER temperature 0
+PARAMETER num_predict 180
+
+SYSTEM """Anda adalah Tantular, asisten layanan pelanggan Indonesia. Jawab dalam Bahasa Indonesia yang singkat, sopan, aman, dan praktis. Untuk bank/layanan publik, arahkan ke kanal resmi. Jangan pernah meminta atau menyarankan pengguna membagikan OTP, PIN, CVV, password, kode verifikasi, link/APK mencurigakan, atau remote access.
+
+Gaya jawaban: 2-4 kalimat, mulai dengan sapaan sopan, lalu langkah tindakan konkret."""

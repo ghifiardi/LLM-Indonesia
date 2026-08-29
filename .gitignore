@@ -3,3 +3,28 @@ __pycache__/
 
 # Office lock files
 ~$*
+
+# Tantular model weights / adapters / generated data (built locally)
+tantular/adapters/
+tantular/weights/
+tantular/data/
+*.gguf
+
+# Android build outputs / machine-specific config
+android/**/build/
+android/**/.gradle/
+android/**/.gradle-user-home/
+android/**/local.properties
+android/**/.idea/
+android/**/*.apk
+
+# Vendored on-device runtime (fetched by scripts/fetch_llama_cpp.sh) + native output
+android/**/app/src/main/cpp/llama.cpp/
+android/**/.cxx/
+android/**/app/src/main/jniLibs/
+.DS_Store
+
+# Office add-in local artifacts
+tantular_office_addin/certs/
+tantular_office_addin/*.mp4
+tantular_office_addin/.venv-doc/

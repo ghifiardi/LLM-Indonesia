@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Navy field: digital-safety product base -->
+    <path
+        android:fillColor="#0B132B"
+        android:pathData="M0,0h108v108h-108z" />
+
+    <!-- Warm Majapahit-inspired halo / sun disc -->
+    <path
+        android:fillColor="#D6A84F"
+        android:pathData="M54,7C80,7 101,28 101,54C101,80 80,101 54,101C28,101 7,80 7,54C7,28 28,7 54,7Z" />
+    <path
+        android:fillColor="#1E293B"
+        android:pathData="M54,13C76.6,13 95,31.4 95,54C95,76.6 76.6,95 54,95C31.4,95 13,76.6 13,54C13,31.4 31.4,13 54,13Z" />
+
+    <!-- Shoulders / robe -->
+    <path
+        android:fillColor="#7C2D12"
+        android:pathData="M24,92C29,78 40,72 54,72C68,72 79,78 84,92Z" />
+    <path
+        android:fillColor="#9A3412"
+        android:pathData="M36,91C39,80 46,75 54,75C62,75 69,80 72,91Z" />
+
+    <!-- Hair / scholar topknot silhouette -->
+    <path
+        android:fillColor="#111827"
+        android:pathData="M34,49C34,33 43,24 54,24C65,24 74,33 74,49C69,41 62,37 54,37C46,37 39,41 34,49Z" />
+    <path
+        android:fillColor="#111827"
+        android:pathData="M45,27C47,18 61,18 63,27C58,24 50,24 45,27Z" />
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M39,37C48,33 60,33 69,37L67,42C59,39 49,39 41,42Z" />
+
+    <!-- Ears -->
+    <path
+        android:fillColor="#C9844B"
+        android:pathData="M33,51C29,52 28,59 33,63Z" />
+    <path
+        android:fillColor="#C9844B"
+        android:pathData="M75,51C79,52 80,59 75,63Z" />
+
+    <!-- Face -->
+    <path
+        android:fillColor="#D8A16A"
+        android:pathData="M54,32C65,32 72,41 72,53C72,66 64,76 54,76C44,76 36,66 36,53C36,41 43,32 54,32Z" />
+
+    <!-- Cheeks / beard base -->
+    <path
+        android:fillColor="#7C3F1D"
+        android:pathData="M39,61C43,72 48,80 54,82C60,80 65,72 69,61C65,75 61,83 54,86C47,83 43,75 39,61Z" />
+    <path
+        android:fillColor="#B45309"
+        android:pathData="M45,72C49,76 59,76 63,72C61,80 57,84 54,85C51,84 47,80 45,72Z" />
+
+    <!-- Eyes / brows -->
+    <path
+        android:fillColor="#111827"
+        android:pathData="M42,50C46,48 49,48 52,50C49,51 46,51 42,50Z" />
+    <path
+        android:fillColor="#111827"
+        android:pathData="M56,50C59,48 62,48 66,50C62,51 59,51 56,50Z" />
+    <path
+        android:fillColor="#5B2A11"
+        android:pathData="M41,45C45,43 50,43 53,45L52,47C48,46 45,46 41,48Z" />
+    <path
+        android:fillColor="#5B2A11"
+        android:pathData="M55,45C58,43 63,43 67,45L67,48C63,46 60,46 56,47Z" />
+
+    <!-- Nose -->
+    <path
+        android:fillColor="#B97443"
+        android:pathData="M53,52C51,58 50,62 54,64C58,62 57,58 55,52Z" />
+
+    <!-- Moustache -->
+    <path
+        android:fillColor="#4A2512"
+        android:pathData="M42,63C47,59 51,60 54,64C49,65 45,66 42,63Z" />
+    <path
+        android:fillColor="#4A2512"
+        android:pathData="M66,63C61,59 57,60 54,64C59,65 63,66 66,63Z" />
+
+    <!-- Lontar manuscript: Mpu Tantular as poet/scholar -->
+    <path
+        android:fillColor="#F7E7B2"
+        android:pathData="M23,84C33,81 44,81 54,84V94C44,91 33,91 23,94Z" />
+    <path
+        android:fillColor="#F3D78A"
+        android:pathData="M54,84C64,81 75,81 85,84V94C75,91 64,91 54,94Z" />
+    <path
+        android:fillColor="#92400E"
+        android:pathData="M28,87H49V89H28ZM59,87H80V89H59ZM30,91H49V93H30ZM59,91H78V93H59Z" />
+    <path
+        android:fillColor="#111827"
+        android:pathData="M52,83H56V95H52Z" />
+
+    <!-- Small protective blue accent to retain app identity -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M82,20L92,24V33C92,40 88,45 82,48C76,45 72,40 72,33V24Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M80,35L76,31L78,29L80,31L86,25L88,27Z" />
+</vector>

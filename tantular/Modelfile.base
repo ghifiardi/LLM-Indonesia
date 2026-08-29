@@ -1,0 +1,17 @@
+# Tantular 0.1 — base import (no fine-tune)
+#
+# Imports a base GGUF unchanged so it can be tagged, versioned, and used as the
+# common ancestor for every Tantular variant. This is the lineage root; do NOT
+# add a SYSTEM prompt or adapter here.
+#
+# Build:
+#   ollama create tantular:0.1-base -f tantular/Modelfile.base
+#
+# Point FROM at either a local GGUF you downloaded, or an Ollama library tag.
+# Uncomment one:
+
+# FROM ./weights/tantular-0.1.gguf
+FROM qwen2.5:1.5b
+
+PARAMETER temperature 0
+PARAMETER num_predict 180

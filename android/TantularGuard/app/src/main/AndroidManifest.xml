@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Android 11+ package visibility: without these declarations,
+         getLaunchIntentForPackage() returns null even when the app IS
+         installed (e.g. on Galaxy S21 / Android 13+), breaking the
+         "Buka WhatsApp / WA Business" buttons. -->
+    <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+    </queries>
+
+    <!-- INTERNET is used ONLY by the explicit dev-server SLM backend (Ollama/HTTP).
+         Production-default SLM is on-device; when dev-server mode is off, no
+         SLM network call is made and the message never leaves the device. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Stage 2 opt-in SMS guard. RECEIVE_SMS is requested at runtime only when
+         the user enables "Aktifkan pemeriksaan SMS masuk". -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.WRITE_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_MMS" />
+
+    <!-- Android 13+ runtime permission for warning notifications. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_tantular_guard"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Lets users share suspicious text from SMS/WhatsApp/etc. into
+                 Tantular Guard via the Android share sheet. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- Required for default-SMS app candidacy: handle sms:/smsto:
+                 compose intents. This prototype opens the checker UI rather
+                 than a full compose screen. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SENDTO" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".OnboardingActivity"
+            android:exported="false"
+            android:label="@string/app_name" />
+
+        <activity
+            android:name=".GuardLogActivity"
+            android:exported="false"
+            android:label="@string/guard_log_dialog_title" />
+
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="false"
+            android:label="@string/diag_title" />
+
+        <activity
+            android:name=".NotificationDigestActivity"
+            android:exported="false"
+            android:label="@string/digest_screen_title" />
+
+        <activity
+            android:name=".GuardianInboxActivity"
+            android:exported="false"
+            android:label="@string/guardian_inbox_title" />
+
+        <receiver
+            android:name=".SmsReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="999">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_DELIVER" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Required for default-SMS app candidacy. MMS is out of scope for the
+             quarantine prototype, but this no-op receiver lets the package
+             satisfy Android's role checks on devices that require it. -->
+        <receiver
+            android:name=".MmsReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_WAP_PUSH">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
+                <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Required for default-SMS app candidacy: quick-reply/respond via
+             message. Prototype is no-op; it avoids sending SMS by accident. -->
+        <service
+            android:name=".RespondViaMessageService"
+            android:exported="true"
+            android:permission="android.permission.SEND_RESPOND_VIA_MESSAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.RESPOND_VIA_MESSAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </service>
+
+        <!-- Opt-in Account Takeover / scam guard for WhatsApp, WhatsApp Business
+             and common social apps. Reads only notification preview text of
+             monitored apps, locally. User must grant notification access in
+             system settings and enable the in-app toggle. -->
+        <service
+            android:name=".NotificationGuardService"
+            android:exported="false"
+            android:label="@string/notif_guard_service_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

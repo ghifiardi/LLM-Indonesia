@@ -1,0 +1,9 @@
+# Tantular LoRA fine-tuning dependencies.
+# Only needed for the training stage; data prep (--prepare-only) uses stdlib.
+# Install into a venv:  pip install -r godel_agent_prototype/tantular/requirements-train.txt
+torch>=2.2
+transformers>=4.44
+peft>=0.12
+trl>=0.9
+datasets>=2.20
+accelerate>=0.33

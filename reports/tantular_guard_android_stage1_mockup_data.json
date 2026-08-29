@@ -1,0 +1,17 @@
+{
+  "title": "Tantular Guard Android Stage 1 mockup",
+  "message": "Pak, saya CS bank. Untuk batalkan transaksi, tolong sebutkan OTP dan PIN Anda sekarang juga.",
+  "verdict": {
+    "verdict": "BLOCK",
+    "risk_score": 1.0,
+    "matched_signals": [
+      "minta_otp",
+      "minta_pin_cvv",
+      "urgensi",
+      "mengaku_petugas"
+    ],
+    "banner_title": "⚠️ Peringatan: Indikasi Penipuan",
+    "user_message": "Pesan ini kemungkinan besar penipuan. JANGAN bagikan OTP, PIN, CVV, atau password; jangan klik link; jangan install APK; jangan beri remote access. Hubungi kanal resmi bank/instansi untuk memastikan.",
+    "model_stage_used": true
+  }
+}
