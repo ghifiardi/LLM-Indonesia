@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import gatewayHandler from "../workshop/api/chat-completions.js";
 import {
   normalizeModelList,
   buildChatHeaders,
@@ -440,6 +441,93 @@ test("runTantularStream converts pre-response AbortError to dihentikan contract"
     );
   } finally {
     // Restore original fetch
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- gateway streaming end to end -------------------------------------------
+
+// Drive the REAL gateway handler, capture the REAL body it produces, and feed exactly
+// that to the REAL client streaming function. No hand-written SSE fixture: a fixture
+// would have hidden this bug, because the fixture is what the client always agreed with
+// — it was the gateway that disagreed.
+async function gatewayBodyFor(content) {
+  const captured = { statusCode: null, body: null, headers: {} };
+  captured.status = (code) => { captured.statusCode = code; return captured; };
+  captured.json = (payload) => { captured.body = payload; return captured; };
+  captured.send = (text) => { captured.body = text; return captured; };
+  captured.setHeader = (name, value) => { captured.headers[name] = value; };
+  captured.end = () => captured;
+
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.TANTULAR_UPSTREAM_URL;
+  const originalKey = process.env.TANTULAR_UPSTREAM_KEY;
+  globalThis.fetch = async () => ({
+    ok: true,
+    text: async () => JSON.stringify({
+      id: "cmpl-1",
+      model: "Qwen/Qwen3.5-9B",
+      choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 }
+    })
+  });
+  process.env.TANTULAR_UPSTREAM_URL = "https://upstream.example/v1/chat";
+  process.env.TANTULAR_UPSTREAM_KEY = "k";
+  try {
+    await gatewayHandler(
+      { method: "POST", body: { messages: [{ role: "user", content: "hai" }], stream: true } },
+      captured
+    );
+    return captured.body;
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.TANTULAR_UPSTREAM_URL;
+    else process.env.TANTULAR_UPSTREAM_URL = originalUrl;
+    if (originalKey === undefined) delete process.env.TANTULAR_UPSTREAM_KEY;
+    else process.env.TANTULAR_UPSTREAM_KEY = originalKey;
+  }
+}
+
+function responseStreamingBytes(text) {
+  const bytes = new TextEncoder().encode(text);
+  let sent = false;
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (sent) return { done: true, value: undefined };
+            sent = true;
+            return { done: false, value: bytes };
+          }
+        };
+      }
+    },
+    text: async () => ""
+  };
+}
+
+// REGRESSION (Cloud Mode, all seven streaming pipelines: UMUM, RINGKAS, UBAH_NADA,
+// TERJEMAH, CEK_AMAN, DRAFT_TEKS, TANYA_DOKUMEN). Before the gateway shim, the body it
+// returned was plain JSON with no `data:` lines, so the accumulator yielded nothing,
+// `full` stayed empty, and this threw "Model tidak mengembalikan teks." on every
+// ordinary chat message in the cloud.
+test("runTantularStream returns text when driven by the real gateway's own body", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const gatewayBody = await gatewayBodyFor("Halo dunia");
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => responseStreamingBytes(gatewayBody);
+  try {
+    const { runTantularStream } = await import("../src/tantularClient.js");
+    let streamed = "";
+    const out = await runTantularStream({ system: "s", user: "u", onToken: (t) => { streamed += t; } });
+    assert.equal(out, "Halo dunia");
+    assert.equal(streamed, "Halo dunia", "the pane's incremental callback must also receive the text");
+  } finally {
     globalThis.fetch = originalFetch;
   }
 });
