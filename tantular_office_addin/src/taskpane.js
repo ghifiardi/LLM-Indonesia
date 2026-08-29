@@ -870,7 +870,13 @@ function useInstalledModel(target) {
 
 function useTantularForBoth() {
   const options = [...els.installedModel.options].map((option) => option.value).filter(Boolean);
-  const model = options.find((name) => name === "tantular-office:0.5-9b")
+  // Honor an already-selected Tantular model (e.g. the lite variant, picked
+  // deliberately for a low-RAM machine) instead of always overriding it with
+  // the flagship 9B — this button silently reset "lite" back to "0.5-9b" every
+  // time, which looked exactly like "choosing lite does nothing".
+  const selected = String(els.installedModel.value || "").trim();
+  const model = (options.includes(selected) && /^tantular/i.test(selected) ? selected : null)
+    || options.find((name) => name === "tantular-office:0.5-9b")
     || options.find((name) => name === "tantular-office:0.4-9b")
     || options.find((name) => /^tantular-office:/i.test(name))
     || options.find((name) => /^tantular/i.test(name));
