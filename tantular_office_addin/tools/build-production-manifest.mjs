@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const baseUrl = valueFor("--base-url").replace(/\/+$/, "");
-const release = valueFor("--release", "20260825-1");
+// Default to a fresh, always-different token: build-workshop-package.mjs (the
+// only real caller, via release-workshop.mjs) never passes --release, so a
+// static fallback here means every production deploy since ships the exact
+// same cache-busting value — silently defeating the reason this exists (see
+// the comment below on Office's WebView caching bug). --release stays
+// available for a caller that deliberately wants a deterministic/pinned value.
+const release = valueFor("--release", String(Date.now()));
 const output = path.resolve(valueFor("--out", path.join(root, "dist", "workshop-package", "tantular-workshop-manifest.xml")));
 
 if (!/^https:\/\/[^/]+/i.test(baseUrl)) {

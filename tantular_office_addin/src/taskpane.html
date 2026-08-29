@@ -191,6 +191,12 @@
             <button id="use-model-deck" class="secondary" type="button">Pakai untuk Studio</button>
             <button id="refresh-models" class="secondary" type="button">Refresh</button>
           </div>
+          <!-- Right under the dropdown/buttons that change it, not six fields
+               below: choosing a model in the dropdown alone applies nothing —
+               it takes clicking "Pakai untuk chat"/"Pakai untuk Studio" too —
+               and that warning is worthless if the user has already scrolled
+               past it before it appears. -->
+          <p id="model-selection-status-top" class="status model-selection-status" role="status" aria-live="polite"></p>
           <button id="use-tantular-both" class="secondary full-width-button" type="button">Gunakan Tantular Office untuk chat + semua Studio</button>
           <button id="test-selected-model" class="secondary full-width-button" type="button">Tes model terpilih</button>
           <label>

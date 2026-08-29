@@ -137,6 +137,7 @@ const els = {
   testSelectedModel: document.querySelector("#test-selected-model"),
   refreshModels: document.querySelector("#refresh-models"),
   modelSelectionStatus: document.querySelector("#model-selection-status"),
+  modelSelectionStatusTop: document.querySelector("#model-selection-status-top"),
   saveSettings: document.querySelector("#save-settings"),
   sourceText: document.querySelector("#source-text"),
   selectionMeta: document.querySelector("#selection-meta"),
@@ -927,6 +928,13 @@ function persistVisibleModelSettings(message) {
 function setModelSelectionStatus(message, kind = "") {
   els.modelSelectionStatus.textContent = message;
   els.modelSelectionStatus.className = `status model-selection-status ${kind}`.trim();
+  // Mirrored right under the dropdown/buttons that trigger this message — the
+  // original sits six fields below, easy to select a model in the dropdown,
+  // never scroll far enough to see "BELUM dipakai", and assume it applied.
+  if (els.modelSelectionStatusTop) {
+    els.modelSelectionStatusTop.textContent = message;
+    els.modelSelectionStatusTop.className = `status model-selection-status ${kind}`.trim();
+  }
 }
 
 async function testSelectedModel() {
