@@ -2,11 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { builtinModules } from "node:module";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const baseUrl = valueFor("--base-url").replace(/\/+$/, "");
 const out = path.join(root, "dist", "workshop-package");
+const BUILTIN_MODULES = new Set(builtinModules);
 const webDownloads = path.join(root, "dist", "workshop-web", "downloads");
 
 fs.rmSync(out, { recursive: true, force: true });
@@ -39,6 +41,16 @@ copyModuleClosure([
   "tools/doc-setup.mjs",
   "tools/start.mjs",
 ]);
+// A THIRD version of the same bug class the comment above already names: this
+// time not a missing local file, but a missing npm package. domainPolicy.js
+// imports "tldts" — a real runtime dependency, present in the repo's own
+// node_modules — but the package.json written below ships no "dependencies"
+// and nothing here ever runs `npm install`. copyModuleClosure only follows
+// "./"-style specifiers by design (that's what makes it correct for the repo
+// layout); a bare specifier like "tldts" was never something it could see.
+// Vendor what the shipped files actually import instead of trusting that the
+// hand-written dependency list stays in sync with the code.
+vendorNodeModules(bareImportsOf(allModules(out)));
 copy("tools/install-office-model.sh");
 copy("tools/document-extractor.py");
 copy("models/Modelfile.office-9b");
@@ -147,6 +159,17 @@ function verifyPackage(dir) {
     }
   }
 
+  // 1b. Every bare (npm package) import must resolve inside the package's own
+  // node_modules. This is a second, independent reading of the SAME graph
+  // vendorNodeModules() already vendored from — it re-derives the requirement
+  // from the shipped files rather than trusting the vendoring step, the same
+  // relationship check #1 has to copyModuleClosure().
+  for (const name of bareImportsOf(modules, dir)) {
+    if (!fs.existsSync(path.join(dir, "node_modules", name))) {
+      problems.push(`a shipped file imports "${name}", which is NOT vendored into node_modules`);
+    }
+  }
+
   // 2. Every `npm run X` the launchers and installer invoke must exist as a
   //    script. A missing one fails with npm's "Missing script", mid-install.
   const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
@@ -180,9 +203,17 @@ function verifyPackage(dir) {
 }
 
 // Every .mjs/.js in the package, as package-relative paths.
+// Excludes node_modules: vendored packages resolve by their own rules
+// (extensionless specifiers, package.json "exports" maps, dual CJS/ESM
+// builds) that this repo's own import conventions don't follow, so linting
+// their internals with these checks produces false positives, not signal.
+// vendorNodeModules() is the correct check for THAT graph — it re-derives
+// from each package's own package.json "dependencies", which is what that
+// graph's imports actually resolve against.
 function allModules(dir, prefix = "") {
   const found = [];
   for (const entry of fs.readdirSync(path.join(dir, prefix), { withFileTypes: true })) {
+    if (entry.name === "node_modules") continue;
     const relative = prefix ? path.join(prefix, entry.name) : entry.name;
     if (entry.isDirectory()) found.push(...allModules(dir, relative));
     else if (/\.(mjs|js)$/.test(entry.name)) found.push(relative);
@@ -241,6 +272,57 @@ function relativeImportsOf(repoRelative, dir) {
   return [...source.matchAll(RELATIVE_IMPORT)].map((match) =>
     path.relative(dir, path.resolve(path.dirname(path.join(dir, repoRelative)), match[1]))
   );
+}
+
+// Import specifiers that name an actual npm package: not "./x" or "../x"
+// (handled above), and not a "node:"-prefixed or bare Node builtin (fs, path,
+// ...), which resolve without node_modules. Returns bare package names —
+// "@scope/pkg/sub/path" and "pkg/sub/path" both reduce to their package root,
+// since that's the unit `npm` installs and the unit this vendors.
+function packageNameOf(specifier) {
+  const parts = specifier.split("/");
+  return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+}
+function bareImportsOf(repoRelativeFiles, dir = out) {
+  const BARE_IMPORT = /(?:\bfrom|\bimport\()\s*["']([^."'][^"']*)["']/g;
+  const names = new Set();
+  for (const file of repoRelativeFiles) {
+    const source = fs.readFileSync(path.join(dir, file), "utf8");
+    for (const [, specifier] of source.matchAll(BARE_IMPORT)) {
+      if (specifier.startsWith("node:")) continue;
+      const name = packageNameOf(specifier);
+      if (BUILTIN_MODULES.has(name)) continue;
+      names.add(name);
+    }
+  }
+  return [...names];
+}
+
+// Copies each named package's resolved node_modules directory into the
+// package output, then recurses into ITS OWN "dependencies" (never
+// devDependencies — those never run in a shipped package) so a dependency
+// with its own runtime dependencies (tldts -> tldts-core) still resolves.
+// This makes the shipped companion runnable with no `npm install` step, which
+// matters offline and because the installer never runs one.
+function vendorNodeModules(names, seen = new Set()) {
+  for (const name of names) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const source = path.join(root, "node_modules", name);
+    if (!fs.existsSync(source)) {
+      throw new Error(
+        `A shipped file imports "${name}", but node_modules/${name} does not exist here. `
+        + `Run \`npm install\` in the repo, or add it to package.json dependencies.`
+      );
+    }
+    fs.cpSync(source, path.join(out, "node_modules", name), { recursive: true });
+    const pkgJsonPath = path.join(source, "package.json");
+    if (fs.existsSync(pkgJsonPath)) {
+      const deps = Object.keys(JSON.parse(fs.readFileSync(pkgJsonPath, "utf8")).dependencies || {});
+      vendorNodeModules(deps, seen);
+    }
+  }
+  return seen;
 }
 
 // Copy each entry and everything it imports, preserving repo-relative layout so
