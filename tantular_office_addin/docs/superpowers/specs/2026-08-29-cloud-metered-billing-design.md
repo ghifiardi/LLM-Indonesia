@@ -244,8 +244,11 @@ semantics, which is what keeps it maintainable. The meter itself stays strict.
 
 ### 4.9 Streaming: an SSE shim in v1, passthrough later
 
-**v1: the gateway re-emits its non-streaming upstream result as a single SSE `data:`
-frame** that the existing client already parses, followed by `[DONE]`. One change, in one
+**v1: the gateway re-emits its non-streaming upstream result as two SSE `data:` frames**
+— a content frame carrying the assistant's text, then a final frame carrying
+`finish_reason` and `usage` — followed by `[DONE]`, all parsed by the existing client
+unchanged. The final frame is kept separate rather than folded into the content frame
+specifically so `usage` stays in-band for the settle step in §4.4. One change, in one
 file, fixing all seven streaming pipelines with no client change and no mode branch in
 `streamedAnswer`.
 

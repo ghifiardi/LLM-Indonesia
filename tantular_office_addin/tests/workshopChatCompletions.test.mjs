@@ -278,6 +278,31 @@ test("chat-completions still returns plain JSON when the client did not ask to s
   }
 });
 
+// REGRESSION: when the upstream reply parses as JSON but carries no `choices`
+// array at all, the final frame must report finish_reason: null, not a falsely
+// reported "stop" — a future meter needs to be able to tell "no choice" apart
+// from "the model actually finished".
+test("chat-completions reports finish_reason null when the upstream reply has no choices", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    text: async () => JSON.stringify({ id: "cmpl-2", model: "Qwen/Qwen3.5-9B", usage: { prompt_tokens: 5, completion_tokens: 0, total_tokens: 5 } })
+  });
+  try {
+    await withEnv({ TANTULAR_UPSTREAM_URL: "https://upstream.example/v1/chat", TANTULAR_UPSTREAM_KEY: "k" }, async () => {
+      const response = mockResponse();
+      await handler({ method: "POST", body: { messages: [{ role: "user", content: "hai" }], stream: true } }, response);
+
+      const frames = parseFrames(response.body);
+      assert.equal(frames.length, 2, "one content frame and one final frame, before [DONE]");
+      assert.equal(frames[0].choices[0].delta.content, "", "no choice means an empty delta, not invented text");
+      assert.equal(frames.at(-1).choices[0].finish_reason, null);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // The upstream is still called non-streaming whatever the client asked for:
 // that is what keeps `usage` in-band and the meter simple.
 test("chat-completions never forwards stream:true to the upstream", async () => {

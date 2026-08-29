@@ -20,6 +20,14 @@
 // Nothing here has a default that silently costs money: with no URL and key set,
 // the route refuses and says so.
 
+// The shim below waits for the whole upstream completion before writing a byte, so a
+// long generation — this deployment advertises decks up to 30 slides — can outlive the
+// platform's default function duration and be killed mid-wait, delivering nothing at
+// all rather than partial text. 60s is the ceiling on every Vercel plan including
+// Hobby, so this is the largest value that is safe to deploy anywhere; a Pro or
+// Enterprise deployment that wants headroom for the longest decks should raise it.
+export const config = { maxDuration: 60 };
+
 const MAX_BODY_BYTES = 256 * 1024;
 
 // The client's streaming path (runTantularStream in src/tantularClient.js) sends
@@ -34,10 +42,13 @@ const MAX_BODY_BYTES = 256 * 1024;
 // This is a SHIM, not streaming: the text still arrives in one burst after the full
 // wait. True passthrough streaming is a deferred milestone and carries a billing
 // consequence — see docs/superpowers/specs/2026-08-29-cloud-metered-billing-design.md
-// section 4.9 — so it is deliberately not attempted here.
+// section 4.9 — so it is deliberately not attempted here. The completion is split
+// across two frames rather than one: a content frame, then a final frame that carries
+// usage and finish_reason, keeping those in-band for the future meter.
 function sseFromCompletion(rawJsonText) {
   let parsed = null;
   try { parsed = JSON.parse(rawJsonText); } catch { parsed = null; }
+  const hasChoice = Array.isArray(parsed?.choices) && parsed.choices.length > 0;
   const choice = parsed?.choices?.[0] ?? {};
   const content = String(choice.message?.content ?? "");
 
@@ -52,8 +63,10 @@ function sseFromCompletion(rawJsonText) {
     ...extra
   });
 
+  // No choice at all means finish_reason must be null, not a falsely reported "stop" —
+  // a future meter should be able to tell "no choice" apart from "the model stopped".
   return `data: ${chunk({ role: "assistant", content }, null)}\n\n`
-    + `data: ${chunk({}, choice.finish_reason ?? "stop", { usage: parsed?.usage ?? null })}\n\n`
+    + `data: ${chunk({}, hasChoice ? (choice.finish_reason ?? "stop") : null, { usage: parsed?.usage ?? null })}\n\n`
     + "data: [DONE]\n\n";
 }
 
