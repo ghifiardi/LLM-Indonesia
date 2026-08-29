@@ -2,8 +2,8 @@
 """Tiny local document extractor for Tantular Deck Studio.
 
 Runs a CORS-enabled localhost API that accepts multipart uploads and returns
-plain text for TXT/MD/CSV, DOCX/PPTX (stdlib zip/XML), and PDF when either
-pypdf/PyPDF2 or pdftotext is available.
+plain text for TXT/MD/CSV, DOCX/PPTX/XLSX (stdlib zip/XML), and PDF when
+either pypdf/PyPDF2 or pdftotext is available.
 
 This intentionally stays local-only (127.0.0.1) for privacy.
 """
@@ -85,6 +85,8 @@ def extract_text(filename: str, data: bytes) -> Tuple[str, str]:
         return extract_docx(data), "docx"
     if ext == ".pptx":
         return extract_pptx(data), "pptx"
+    if ext == ".xlsx":
+        return extract_xlsx(data), "xlsx"
     if ext == ".pdf":
         return extract_pdf(data), "pdf"
     raise ValueError(f"Unsupported file type: {ext or '(no extension)'}")
@@ -227,6 +229,113 @@ def compact_text_runs(texts: list[str]) -> list[str]:
         out.append(clean)
         last = clean
     return out
+
+
+XLSX_NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+XLSX_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def extract_xlsx(data: bytes) -> str:
+    """Extract cell text from an XLSX, sheet by sheet, in workbook order.
+
+    Cells become tab-separated per row (reads as TSV), rows newline-
+    separated, sheets labeled "[Sheet: Name]" — same spirit as extract_pptx's
+    "[Slide N]" labels. A formula cell is read from its cached <v> result,
+    never re-evaluated; a cell with no cached value (e.g. never opened/saved
+    by Excel) is skipped rather than guessed at, same as everywhere else in
+    this file: extract what is actually there, not what might be inferred.
+
+    Old binary .xls is out of scope on purpose — it is not a zip/XML format
+    at all (OLE2), unlike DOCX/PPTX/XLSX, and parsing it would need a real
+    dependency this file otherwise avoids entirely.
+    """
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        shared = xlsx_shared_strings(z)
+        sheets = xlsx_sheet_order(z)
+        if not sheets:
+            sheets = [
+                (Path(n).stem, n)
+                for n in sorted(nn for nn in z.namelist() if re.match(r"xl/worksheets/sheet\d+\.xml$", nn))
+            ]
+
+        chunks = []
+        for name, path in sheets:
+            if path not in z.namelist():
+                continue
+            try:
+                root = ET.fromstring(z.read(path))
+            except ET.ParseError:
+                continue
+            rows_out = []
+            for row in root.findall(".//m:sheetData/m:row", XLSX_NS):
+                cells = [xlsx_cell_text(cell, shared) for cell in row.findall("m:c", XLSX_NS)]
+                # Trim trailing empty cells so a mostly-empty row doesn't turn
+                # into a long tail of meaningless tabs.
+                while cells and not cells[-1]:
+                    cells.pop()
+                if cells:
+                    rows_out.append("\t".join(cells))
+            if rows_out:
+                chunks.append(f"[Sheet: {name}]\n" + "\n".join(rows_out))
+
+        text = "\n\n".join(chunks).strip()
+        if not text:
+            raise ValueError("No extractable text found in XLSX")
+        return text
+
+
+def xlsx_shared_strings(z: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in z.namelist():
+        return []
+    try:
+        root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+    except ET.ParseError:
+        return []
+    out = []
+    for si in root.findall("m:si", XLSX_NS):
+        # A shared string can be one <t>, or several <r><t> rich-text runs —
+        # concatenate the runs, same treatment as DOCX/PPTX text runs above.
+        out.append("".join(t.text or "" for t in si.findall(".//m:t", XLSX_NS)))
+    return out
+
+
+def xlsx_sheet_order(z: zipfile.ZipFile) -> list[tuple[str, str]]:
+    try:
+        workbook = ET.fromstring(z.read("xl/workbook.xml"))
+        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+    except Exception:
+        return []
+    rel_map = {}
+    for rel in rels:
+        rid = rel.attrib.get("Id")
+        target = rel.attrib.get("Target", "")
+        if rid:
+            rel_map[rid] = target if target.startswith("xl/") else "xl/" + target.lstrip("/")
+    order = []
+    for sheet in workbook.findall(".//m:sheets/m:sheet", XLSX_NS):
+        rid = sheet.attrib.get(f"{XLSX_REL_NS}id")
+        name = sheet.attrib.get("name", "")
+        if rid in rel_map:
+            order.append((name, rel_map[rid]))
+    return order
+
+
+def xlsx_cell_text(cell: ET.Element, shared: list[str]) -> str:
+    cell_type = cell.attrib.get("t", "")
+    if cell_type == "s":
+        v = cell.find("m:v", XLSX_NS)
+        if v is None or not (v.text or "").strip():
+            return ""
+        try:
+            return shared[int(v.text)]
+        except (ValueError, IndexError):
+            return ""
+    if cell_type == "inlineStr":
+        return "".join(t.text or "" for t in cell.findall(".//m:t", XLSX_NS))
+    # Formula-result string ("str"), numeric, and boolean cells all carry
+    # their value verbatim in <v> — just read it.
+    v = cell.find("m:v", XLSX_NS)
+    return v.text or "" if v is not None else ""
 
 
 def extract_pdf(data: bytes) -> str:

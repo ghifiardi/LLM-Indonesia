@@ -81,6 +81,24 @@ test("cloud mode: a PDF upload fails with the companion message, not a 404", asy
   });
 });
 
+test("cloud mode: an XLSX upload fails with the companion message, not a 404", async () => {
+  await inCloudSession(async () => {
+    const { extractDocumentFile } = await import(`../src/deck/documentExtract.js?t=${Date.now()}c`);
+    await assert.rejects(
+      () => extractDocumentFile({
+        name: "anggaran.xlsx",
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size: 1024
+      }),
+      (err) => {
+        assert.match(err.message, /Tantular Companion/);
+        assert.match(err.message, /Mode Cloud/);
+        return true;
+      }
+    );
+  });
+});
+
 test("cloud mode: a plain-text upload still works — it needs no companion", async () => {
   await inCloudSession(async () => {
     const { extractDocumentFile } = await import(`../src/deck/documentExtract.js?t=${Date.now()}b`);

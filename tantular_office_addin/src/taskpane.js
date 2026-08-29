@@ -524,7 +524,7 @@ function bindStaticEvents() {
 // it is not actually running in.
 const CLOUD_BANNER = "☁️ Mode Cloud AKTIF — teks dokumen yang Anda kirim DIPROSES DI SERVER Tantular, bukan di komputer ini.";
 const LOCAL_BANNER = "🔒 Mode Lokal — teks dokumen Anda tidak keluar dari komputer ini.";
-const CLOUD_CONSEQUENCE = "Dengan Mode Cloud, isi dokumen/slide/sheet yang Anda proses DIKIRIM ke server Tantular untuk dijalankan di sana. Ini bukan lagi pemrosesan lokal. Fitur yang butuh Companion (daftar model Ollama, baca file PDF/DOCX/PPTX, Extract from image, kirim antar-aplikasi) tidak tersedia.";
+const CLOUD_CONSEQUENCE = "Dengan Mode Cloud, isi dokumen/slide/sheet yang Anda proses DIKIRIM ke server Tantular untuk dijalankan di sana. Ini bukan lagi pemrosesan lokal. Fitur yang butuh Companion (daftar model Ollama, baca file PDF/DOCX/PPTX/XLSX, Extract from image, kirim antar-aplikasi) tidak tersedia.";
 
 function renderMode() {
   // Before Office.onReady the mode is not yet knowable (see modeIsKnown): stay
