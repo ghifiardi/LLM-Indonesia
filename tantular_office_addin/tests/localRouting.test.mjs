@@ -27,7 +27,13 @@ test("the local model route targets Ollama native /api/chat", () => {
   assert.match(source, /path:\s*"\/api\/chat"/,
     "dev-server must proxy the local model route to /api/chat; " +
     "/v1/chat/completions ignores think:false and the model reasons forever");
-  assert.match(source, /port:\s*11434/, "the local upstream is Ollama on 11434");
+  // The literal port is now a named, overridable constant (so a cancellation
+  // integration test can point it at a fake Ollama instead of colliding with
+  // a real one on the dev machine) — assert its DEFAULT is still 11434, and
+  // that the chat proxy actually uses that constant, not a fresh literal.
+  assert.match(source, /const OLLAMA_PORT = Number\(process\.env\.TANTULAR_OLLAMA_PORT \|\| 11434\)/,
+    "the Ollama upstream port must default to 11434");
+  assert.match(source, /port:\s*OLLAMA_PORT/, "the local upstream must use the OLLAMA_PORT constant");
 });
 
 test("the local route does not use the OpenAI-compatible chat path", () => {

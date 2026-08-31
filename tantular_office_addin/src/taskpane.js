@@ -1,5 +1,6 @@
 import { createRun, classifyOutcome, progressLabel, REQUEST_BUDGET_MS,
-         DECK_BUDGET_MS } from "./chat/runProgress.js";
+         DECK_BUDGET_MS, createStudioProgressRunner } from "./chat/runProgress.js";
+import { fingerprintStudioInputs, resolveAutoLoadedSource } from "./chat/studioCache.js";
 import { ACTIONS, actionsForHost, detectHost, normalizeHostName, scopedUserPrompt } from "./prompts.js";
 import {
   consumeAutoSwitchNote,
@@ -89,7 +90,19 @@ const state = {
   documentSelection: null,
   refineSpec: null,
   documentSpec: null,
+  documentSpecFingerprint: "",
+  documentSpecSource: "",
+  // The Word auto-read path below only fits a 12,000-char preview into the
+  // textarea; these hold the FULL source separately so a later Download
+  // (which re-reads the textarea, not Word) can still fingerprint the
+  // complete document instead of the truncated preview.
+  documentSourceText: "",
+  documentSourcePreview: "",
   workbookSpec: null,
+  workbookSpecFingerprint: "",
+  workbookSpecSource: "",
+  deckSpecFingerprint: "",
+  deckSpecSource: "",
   lastContextUpdatedAt: null,
   lookupDiscovery: null
 };
@@ -1131,9 +1144,9 @@ function boundedBrief(content, setStatus) {
   return text.slice(0, SOURCE_CHAR_BUDGET);
 }
 
-async function resolveDocumentSpec() {
+async function resolveDocumentSpec(signal, setPhase = (text) => { els.documentProgressText.textContent = text; }) {
   const { docFile } = await ingestUploadedSource({
-    setProgress: (text) => { els.documentProgressText.textContent = text; },
+    setProgress: setPhase,
     setStatus: setDocumentStatus,
     extraOcrContext: [
       els.documentTone.value.trim() ? `Tone dokumen: ${els.documentTone.value.trim()}` : "",
@@ -1144,16 +1157,30 @@ async function resolveDocumentSpec() {
   });
 
   let content = uploadedOrTypedContent(docFile);
+  const autoLoaded = resolveAutoLoadedSource({
+    docFile,
+    typedContent: content,
+    storedFullText: state.documentSourceText,
+    storedPreview: state.documentSourcePreview
+  });
+  content = autoLoaded.content;
+  if (!autoLoaded.reused) {
+    state.documentSourceText = "";
+    state.documentSourcePreview = "";
+  }
   if (!content && state.host === "Word") {
-    els.documentProgressText.textContent = "Membaca seleksi Word...";
+    setPhase("Membaca seleksi Word...");
     const selected = await getSelectionContext("Word");
     content = selected.text.trim();
     if (!content) {
-      els.documentProgressText.textContent = "Membaca isi utama dokumen...";
+      setPhase("Membaca isi utama dokumen...");
       content = String(await getDocumentBodyText()).trim();
     }
     if (content) {
-      els.sourceText.value = content.slice(0, 12_000);
+      const preview = content.slice(0, 12_000);
+      state.documentSourceText = content;
+      state.documentSourcePreview = preview;
+      els.sourceText.value = preview;
       els.selectionMeta.textContent = selected.text
         ? selected.meta
         : `Word: ${content.length} karakter dari isi utama dokumen.`;
@@ -1164,16 +1191,52 @@ async function resolveDocumentSpec() {
     throw new Error("Unggah dokumen/PDF/gambar, masukkan brief di kotak sumber, pilih teks Word, atau buka dokumen yang berisi teks.");
   }
 
-  els.documentProgressText.textContent = "Menyusun struktur dokumen dengan Tantular...";
+  const boundedContent = boundedBrief(content, setDocumentStatus);
+  const settings = loadSettings();
+  const fingerprint = fingerprintStudioInputs({
+    content: boundedContent,
+    options: {
+      documentType: els.documentType.value,
+      tone: els.documentTone.value.trim(),
+      sectionCount: documentSectionCount()
+    },
+    instruction: els.documentInstruction.value.trim(),
+    mode: settings.mode,
+    model: settings.deckModel
+  });
+  // Nothing that would change the model's answer has moved since the last
+  // successful build (same source, options, instruction, mode, model) — the
+  // usual case is Download clicked right after Create. Reuse the spec
+  // instead of running the model again for an identical job.
+  if (state.documentSpec && state.documentSpecFingerprint === fingerprint) {
+    renderDocumentPreview(state.documentSpec, state.documentSpecSource);
+    return { spec: state.documentSpec, source: state.documentSpecSource, cached: true };
+  }
+
+  setPhase("Menyusun struktur dokumen dengan Tantular...");
   const result = await planDocument({
-    brief: boundedBrief(content, setDocumentStatus),
+    brief: boundedContent,
     documentType: els.documentType.value,
     tone: els.documentTone.value.trim(),
     sectionCount: documentSectionCount(),
-    instruction: els.documentInstruction.value.trim()
+    instruction: els.documentInstruction.value.trim(),
+    signal,
+    // 2026-08-31: the user's configured Studio model must never be silently
+    // swapped for Lite after a timeout and persisted as the new default — a
+    // slow Q8 run is a timeout the user should see and decide on, not a
+    // quality downgrade that happens without their knowledge. Missing-model
+    // recovery (a machine that never had Q8 installed at all) still uses the
+    // client default ("timeout-and-missing") elsewhere; this call site is
+    // scoped to interactive Document Studio specifically.
+    modelFallbackPolicy: "none"
   });
   if (!result.spec) throw new Error(result.error || "Tantular tidak menghasilkan struktur dokumen.");
   state.documentSpec = result.spec;
+  // A fallback spec is not a genuine model result — caching it would make a
+  // later Download reuse degraded content forever instead of trying the
+  // model again.
+  state.documentSpecFingerprint = result.source === "model" ? fingerprint : "";
+  state.documentSpecSource = result.source;
   renderDocumentPreview(result.spec, result.source);
   return result;
 }
@@ -1188,7 +1251,7 @@ function looksLikeSelectionTableRequest(text) {
 }
 
 async function convertSelectionToTable(instruction) {
-  await withDocumentProgress("Membaca teks yang di-highlight...", async () => {
+  await withDocumentProgress("Membaca teks yang di-highlight...", async (signal, setPhase) => {
     const selection = await getSelectionContext("Word");
     const source = String(selection.text || "").trim();
     if (!source) {
@@ -1200,7 +1263,7 @@ async function convertSelectionToTable(instruction) {
       return;
     }
 
-    els.documentProgressText.textContent = "Menyusun tabel dari teks terpilih...";
+    setPhase("Menyusun tabel dari teks terpilih...");
     const raw = await runTantular({
       system: `Anda mengubah teks menjadi SATU tabel markdown.
 Aturan:
@@ -1212,7 +1275,8 @@ Aturan:
       user: `Instruksi pengguna: ${instruction}\n\nTeks sumber (hasil highlight):\n"""${source}"""`,
       maxTokens: 900,
       temperature: 0.1,
-      task: "document"
+      task: "document",
+      signal
     });
 
     const table = extractMarkdownTable(raw);
@@ -1220,7 +1284,7 @@ Aturan:
       throw new Error("Model tidak menghasilkan tabel yang valid. Coba lagi, atau sebutkan kolom yang diinginkan di Instruksi dokumen.");
     }
 
-    els.documentProgressText.textContent = "Menyisipkan tabel ke Word...";
+    setPhase("Menyisipkan tabel ke Word...");
     // Honor the insert-mode dropdown: "Ganti" replaces the highlighted text
     // with the table; the safe default keeps the text and adds the table after.
     const mode = els.documentInsertMode.value === "replace" ? "replace" : "after";
@@ -1241,20 +1305,39 @@ function extractMarkdownTable(raw) {
   return block.join("\n");
 }
 
+// 2026-08-31 fail-closed follow-up: a fallback caused by the model's own
+// output being invalid (either malformed JSON, or JSON that parsed but broke
+// the compact-schema contract — wrong section count, too many
+// paragraphs/bullets) is a different, more actionable situation for the user
+// than "fallback lokal" alone communicates: it means Tantular tried and
+// produced something it had to reject, not that it never ran. Never surfaces
+// raw model output — only the classification.
+function documentFallbackNote(result) {
+  if (result.source === "model") return "";
+  if (result.errorCode === "invalid_json" || result.errorCode === "invalid_structure") {
+    return " Respons model tidak valid secara struktur; digunakan struktur fallback lokal. Coba lagi.";
+  }
+  return "";
+}
+
 async function createDocumentSmart() {
   const documentInstruction = els.documentInstruction.value.trim();
   if (state.host === "Word" && looksLikeSelectionTableRequest(documentInstruction)) {
     return convertSelectionToTable(documentInstruction);
   }
-  await withDocumentProgress("Menyiapkan dokumen Word...", async () => {
-    const result = await resolveDocumentSpec();
-    els.documentProgressText.textContent = "Membuat file .docx...";
+  await withDocumentProgress("Menyiapkan dokumen Word...", async (signal, setPhase) => {
+    const result = await resolveDocumentSpec(signal, setPhase);
+    const fallbackNote = documentFallbackNote(result);
+    setPhase("Membuat file .docx...");
     const base64 = buildCurrentDocumentBase64();
     if (state.host === "Word") {
       try {
-        els.documentProgressText.textContent = "Memasukkan dokumen ke Word...";
+        setPhase("Memasukkan dokumen ke Word...");
         const message = await insertDocxIntoWord(base64, els.documentInsertMode.value);
-        setDocumentStatus(`${message} Struktur: ${result.source === "model" ? "Tantular" : "fallback lokal"}.`, "ok");
+        setDocumentStatus(
+          `${message} Struktur: ${result.source === "model" ? "Tantular" : "fallback lokal"}.${fallbackNote}`,
+          fallbackNote ? "warn" : "ok"
+        );
         return;
       } catch (error) {
         triggerDocumentDownload(base64);
@@ -1263,15 +1346,16 @@ async function createDocumentSmart() {
       }
     }
     triggerDocumentDownload(base64);
-    setDocumentStatus("File .docx diunduh.", "ok");
+    setDocumentStatus(`File .docx diunduh.${fallbackNote}`, fallbackNote ? "warn" : "ok");
   });
 }
 
 async function downloadDocumentSmart() {
-  await withDocumentProgress("Menyiapkan file .docx...", async () => {
-    await resolveDocumentSpec();
+  await withDocumentProgress("Menyiapkan file .docx...", async (signal, setPhase) => {
+    const result = await resolveDocumentSpec(signal, setPhase);
+    const fallbackNote = documentFallbackNote(result);
     triggerDocumentDownload();
-    setDocumentStatus("File .docx diunduh.", "ok");
+    setDocumentStatus(`File .docx diunduh.${fallbackNote}`, fallbackNote ? "warn" : "ok");
   });
 }
 
@@ -1321,24 +1405,14 @@ function documentSectionCount() {
   return clamped;
 }
 
-async function withDocumentProgress(message, fn) {
-  setDocumentBusy(true, message);
-  try {
-    await fn();
-  } catch (error) {
-    console.error(error);
-    setDocumentStatus(error?.message || String(error), "error");
-  } finally {
-    setDocumentBusy(false);
-  }
-}
-
-function setDocumentBusy(isBusy, message = "Menyusun dokumen...") {
-  els.documentProgress.classList.toggle("hidden", !isBusy);
-  els.documentProgressText.textContent = message;
-  els.documentCreate.disabled = isBusy;
-  els.documentDownload.disabled = isBusy;
-}
+const withDocumentProgress = createStudioProgressRunner({
+  progressEl: els.documentProgress,
+  textEl: els.documentProgressText,
+  cancelButton: els.documentProgressCancel,
+  busyButtons: [els.documentCreate, els.documentDownload],
+  budgetMs: DECK_BUDGET_MS,
+  report: setDocumentStatus
+});
 
 function setDocumentStatus(message, kind = "") {
   els.documentStatus.textContent = message;
@@ -1347,9 +1421,9 @@ function setDocumentStatus(message, kind = "") {
 
 // --- Sheet Studio -----------------------------------------------------------
 
-async function resolveWorkbookSpec() {
+async function resolveWorkbookSpec(signal, setPhase = (text) => { els.workbookProgressText.textContent = text; }) {
   const { docFile } = await ingestUploadedSource({
-    setProgress: (text) => { els.workbookProgressText.textContent = text; },
+    setProgress: setPhase,
     setStatus: setWorkbookStatus,
     extraOcrContext: projectInstructions()
       ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
@@ -1358,7 +1432,7 @@ async function resolveWorkbookSpec() {
 
   let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "Excel") {
-    els.workbookProgressText.textContent = "Membaca range Excel...";
+    setPhase("Membaca range Excel...");
     const selected = await getSelectionContext("Excel");
     content = selected.text.trim();
     if (content) {
@@ -1371,25 +1445,45 @@ async function resolveWorkbookSpec() {
     throw new Error("Unggah dokumen/PDF/gambar, masukkan brief di kotak sumber, atau pilih range Excel terlebih dahulu.");
   }
 
-  els.workbookProgressText.textContent = "Menyusun struktur workbook dengan Tantular...";
+  const boundedContent = boundedBrief(content, setWorkbookStatus);
+  const settings = loadSettings();
+  const fingerprint = fingerprintStudioInputs({
+    content: boundedContent,
+    options: { workbookType: els.workbookType.value, sheetCount: workbookSheetCount() },
+    instruction: els.workbookInstruction.value.trim(),
+    mode: settings.mode,
+    model: settings.deckModel
+  });
+  if (state.workbookSpec && state.workbookSpecFingerprint === fingerprint) {
+    renderWorkbookPreview(state.workbookSpec, state.workbookSpecSource);
+    return { spec: state.workbookSpec, source: state.workbookSpecSource, cached: true };
+  }
+
+  setPhase("Menyusun struktur workbook dengan Tantular...");
   const result = await planWorkbook({
-    brief: boundedBrief(content, setWorkbookStatus),
+    brief: boundedContent,
     workbookType: els.workbookType.value,
     sheetCount: workbookSheetCount(),
-    instruction: els.workbookInstruction.value.trim()
+    instruction: els.workbookInstruction.value.trim(),
+    signal
   });
   if (!result.spec) throw new Error(result.error || "Tantular tidak menghasilkan struktur workbook.");
   state.workbookSpec = result.spec;
+  // A fallback spec is not a genuine model result — caching it would make a
+  // later Download reuse degraded content forever instead of trying the
+  // model again.
+  state.workbookSpecFingerprint = result.source === "model" ? fingerprint : "";
+  state.workbookSpecSource = result.source;
   renderWorkbookPreview(result.spec, result.source);
   return result;
 }
 
 async function createWorkbookSmart() {
-  await withWorkbookProgress("Menyiapkan workbook Excel...", async () => {
-    const result = await resolveWorkbookSpec();
+  await withWorkbookProgress("Menyiapkan workbook Excel...", async (signal, setPhase) => {
+    const result = await resolveWorkbookSpec(signal, setPhase);
     if (state.host === "Excel") {
       try {
-        els.workbookProgressText.textContent = "Membuat sheet di Excel...";
+        setPhase("Membuat sheet di Excel...");
         const message = await writeWorkbookSpecToExcel(state.workbookSpec, els.workbookInsertMode.value, {
           // "tolong dibuatkan chart/grafik" harus menghasilkan chart sungguhan.
           chartType: requestedExcelChartType(els.workbookInstruction.value)
@@ -1408,8 +1502,8 @@ async function createWorkbookSmart() {
 }
 
 async function downloadWorkbookSmart() {
-  await withWorkbookProgress("Menyiapkan file .xlsx...", async () => {
-    await resolveWorkbookSpec();
+  await withWorkbookProgress("Menyiapkan file .xlsx...", async (signal, setPhase) => {
+    await resolveWorkbookSpec(signal, setPhase);
     triggerWorkbookDownload();
     setWorkbookStatus("File .xlsx diunduh.", "ok");
   });
@@ -1461,24 +1555,14 @@ function workbookSheetCount() {
   return clamped;
 }
 
-async function withWorkbookProgress(message, fn) {
-  setWorkbookBusy(true, message);
-  try {
-    await fn();
-  } catch (error) {
-    console.error(error);
-    setWorkbookStatus(error?.message || String(error), "error");
-  } finally {
-    setWorkbookBusy(false);
-  }
-}
-
-function setWorkbookBusy(isBusy, message = "Menyusun workbook...") {
-  els.workbookProgress.classList.toggle("hidden", !isBusy);
-  els.workbookProgressText.textContent = message;
-  els.workbookCreate.disabled = isBusy;
-  els.workbookDownload.disabled = isBusy;
-}
+const withWorkbookProgress = createStudioProgressRunner({
+  progressEl: els.workbookProgress,
+  textEl: els.workbookProgressText,
+  cancelButton: els.workbookProgressCancel,
+  busyButtons: [els.workbookCreate, els.workbookDownload],
+  budgetMs: DECK_BUDGET_MS,
+  report: setWorkbookStatus
+});
 
 function setWorkbookStatus(message, kind = "") {
   els.workbookStatus.textContent = message;
@@ -1570,11 +1654,11 @@ function uploadedOrTypedContent(docFile) {
   return typed;
 }
 
-async function resolveDeckSpec() {
+async function resolveDeckSpec(signal, setPhase = (text) => { els.deckProgressText.textContent = text; }) {
   state.deckPlanWarning = "";
   state.deckAutoSwitchNote = "";
   const { docFile } = await ingestUploadedSource({
-    setProgress: (text) => { els.deckProgressText.textContent = text; },
+    setProgress: setPhase,
     setStatus: setDeckStatus,
     extraOcrContext: [
       els.deckTone.value.trim() ? `Tone deck: ${els.deckTone.value.trim()}` : "",
@@ -1586,7 +1670,7 @@ async function resolveDeckSpec() {
 
   let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "PowerPoint") {
-    els.deckProgressText.textContent = "Membaca slide terpilih...";
+    setPhase("Membaca slide terpilih...");
     const selected = await getSelectedSlideTextContext();
     content = selected.text.trim();
     if (content) {
@@ -1603,7 +1687,7 @@ async function resolveDeckSpec() {
   }
 
   // 4) Build the plan deterministically when possible; fall back to the model.
-  els.deckProgressText.textContent = "Menyusun rencana deck...";
+  setPhase("Menyusun rencana deck...");
   // The count typed by the user always wins; the number parsed from the brief
   // only fills in when the field was never touched. Without this, a brief
   // saying "buat 20 slide" silently overrides an explicit smaller request.
@@ -1614,14 +1698,37 @@ async function resolveDeckSpec() {
   }
   const count = requestedCount || deckSlideCount();
 
+  const settings = loadSettings();
+  const fingerprint = fingerprintStudioInputs({
+    content,
+    options: { count, tone: els.deckTone.value.trim(), summarize: els.deckSummarize.checked },
+    instruction: combinedDeckInstructions(),
+    mode: settings.mode,
+    model: settings.deckModel
+  });
+  // Nothing that would change the result has moved since the last successful
+  // build — the usual case is Download clicked right after Create. Replay
+  // it instead of re-running deck planning (and, on the model branch below,
+  // calling Tantular again) for an identical job.
+  if (state.deckSpec && state.deckSpecFingerprint === fingerprint) {
+    renderDeckPreview(state.deckSpec, state.deckSpecLabel);
+    return state.deckSpecSource;
+  }
+
   const capabilitySpec = buildCapabilityMapSpec(content, count);
   if (capabilitySpec) {
     state.deckSpec = applyProjectOutputFormat(capabilitySpec, content);
+    state.deckSpecFingerprint = fingerprint;
+    state.deckSpecLabel = "capability map";
+    state.deckSpecSource = "capability map";
     renderDeckPreview(state.deckSpec, "capability map");
     return "capability map";
   }
   if (isThinContent(content) && !looksLikePresentationBrief(content)) {
     state.deckSpec = applyProjectOutputFormat(buildTitleSlideSpec(content), content);
+    state.deckSpecFingerprint = fingerprint;
+    state.deckSpecLabel = "judul rapi";
+    state.deckSpecSource = "thin";
     renderDeckPreview(state.deckSpec, "judul rapi");
     return "thin";
   }
@@ -1633,16 +1740,19 @@ async function resolveDeckSpec() {
   if (cameFromDocument || (content.length > 1600 && !looksLikePresentationBrief(content))) {
     const docSpec = buildDocumentDeckSpec(content, count);
     if (docSpec) {
-      const finalized = await maybeSummarize(applyProjectOutputFormat(docSpec, content));
+      const finalized = await maybeSummarize(applyProjectOutputFormat(docSpec, content), signal, setPhase);
       state.deckSpec = finalized;
       // Say so when the document can't fill the requested count — a silent
       // 6-of-20 result reads as a glitch to the user.
       const got = finalized.slides?.length || 0;
       const baseLabel = cameFromDocument ? "struktur dokumen" : "struktur teks panjang";
-      renderDeckPreview(
-        state.deckSpec,
-        got < count ? `${baseLabel} · ${got}/${count} slide — konten sumber tidak cukup untuk ${count} slide` : baseLabel
-      );
+      const label = got < count
+        ? `${baseLabel} · ${got}/${count} slide — konten sumber tidak cukup untuk ${count} slide`
+        : baseLabel;
+      state.deckSpecFingerprint = fingerprint;
+      state.deckSpecLabel = label;
+      state.deckSpecSource = "document";
+      renderDeckPreview(state.deckSpec, label);
       return "document";
     }
   }
@@ -1651,10 +1761,12 @@ async function resolveDeckSpec() {
     brief: content,
     slideCount: count,
     tone: els.deckTone.value.trim(),
-    instruction: combinedDeckInstructions()
+    instruction: combinedDeckInstructions(),
+    signal
   });
-  state.deckSpec = await maybeSummarize(applyProjectOutputFormat(spec, content));
-  renderDeckPreview(state.deckSpec, source === "model" ? "Tantular" : "fallback lokal");
+  state.deckSpec = await maybeSummarize(applyProjectOutputFormat(spec, content), signal, setPhase);
+  const label = source === "model" ? "Tantular" : "fallback lokal";
+  renderDeckPreview(state.deckSpec, label);
   // A fallback deck must never look like a successful model run: it chunks the
   // brief verbatim and reads as garbage. Record it so the final status warns.
   state.deckPlanWarning = source === "model"
@@ -1662,17 +1774,28 @@ async function resolveDeckSpec() {
     : `⚠️ Model Studio tidak merespons${planError ? ` (${planError})` : ""}; deck disusun penyusun sederhana, bukan model. Buka Pengaturan model lokal → Tes model terpilih, pastikan Ollama + Companion berjalan, lalu buat ulang deck.`;
   state.deckAutoSwitchNote = consumeAutoSwitchNote();
   if (state.deckAutoSwitchNote) hydrateSettings();
+  // A fallback deck is not a genuine, model-produced result — caching it
+  // would make a later Download reuse degraded content forever instead of
+  // trying the model again. Only cache a real success.
+  if (source === "model") {
+    state.deckSpecFingerprint = fingerprint;
+    state.deckSpecLabel = label;
+    state.deckSpecSource = source;
+  } else {
+    state.deckSpecFingerprint = "";
+  }
   return source;
 }
 
-async function maybeSummarize(spec) {
+async function maybeSummarize(spec, signal, setPhase = (text) => { els.deckProgressText.textContent = text; }) {
   if (!els.deckSummarize.checked) return spec;
-  els.deckProgressText.textContent = "Meringkas bagian dengan Tantular...";
+  setPhase("Meringkas bagian dengan Tantular...");
   return summarizeDeckSections(
     spec,
     els.deckTone.value.trim(),
     combinedDeckInstructions(),
-    (done, total) => { els.deckProgressText.textContent = `Meringkas bagian ${done}/${total}...`; }
+    (done, total) => setPhase(`Meringkas bagian ${done}/${total}...`),
+    signal
   );
 }
 
@@ -1736,9 +1859,9 @@ function deriveExecutiveSummary(spec, sourceText) {
 }
 
 async function createDeckSmart() {
-  await withDeckProgress("Menyiapkan deck...", async () => {
-    await resolveDeckSpec();
-    els.deckProgressText.textContent = "Membuat file .pptx...";
+  await withDeckProgress("Menyiapkan deck...", async (signal, setPhase) => {
+    await resolveDeckSpec(signal, setPhase);
+    setPhase("Membuat file .pptx...");
     const base64 = buildDeckBase64();
 
     // Preferred path: insert the slides straight into the open presentation so
@@ -1747,7 +1870,7 @@ async function createDeckSmart() {
     let insertFailReason = "";
     if (state.host === "PowerPoint") {
       try {
-        els.deckProgressText.textContent = "Menyisipkan slide ke presentasi aktif...";
+        setPhase("Menyisipkan slide ke presentasi aktif...");
         await insertDeckIntoActivePresentation(base64);
         els.deckDownload.disabled = false;
         if (state.deckPlanWarning) {
@@ -1760,7 +1883,7 @@ async function createDeckSmart() {
       } catch (error) {
         console.warn("Insert into active presentation failed; falling back to download", error);
         insertFailReason = error?.debugInfo?.message || error?.message || String(error);
-        els.deckProgressText.textContent = "Sisip gagal, mengunduh .pptx...";
+        setPhase("Sisip gagal, mengunduh .pptx...");
       }
     } else {
       insertFailReason = `host ${state.host}, bukan PowerPoint`;
@@ -1776,8 +1899,8 @@ async function createDeckSmart() {
 }
 
 async function downloadDeckSmart() {
-  await withDeckProgress("Menyiapkan file .pptx...", async () => {
-    await resolveDeckSpec();
+  await withDeckProgress("Menyiapkan file .pptx...", async (signal, setPhase) => {
+    await resolveDeckSpec(signal, setPhase);
     triggerDeckDownload();
     setDeckStatus(`File .pptx diunduh: ${state.deckSpec.slides.length} slide.`, "ok");
   });
@@ -2024,25 +2147,14 @@ function renderDeckSpecPreview(container, spec, source) {
   `;
 }
 
-async function withDeckProgress(message, fn) {
-  setDeckBusy(true, message);
-  try {
-    await fn();
-  } catch (error) {
-    console.error(error);
-    setDeckStatus(error?.message || String(error), "error");
-  } finally {
-    setDeckBusy(false);
-  }
-}
-
-function setDeckBusy(isBusy, message = "Menyiapkan deck...") {
-  els.deckProgress.classList.toggle("hidden", !isBusy);
-  els.deckProgressText.textContent = message;
-  [els.deckCreate, els.deckDownload].forEach((button) => {
-    button.disabled = isBusy;
-  });
-}
+const withDeckProgress = createStudioProgressRunner({
+  progressEl: els.deckProgress,
+  textEl: els.deckProgressText,
+  cancelButton: els.deckProgressCancel,
+  busyButtons: [els.deckCreate, els.deckDownload],
+  budgetMs: DECK_BUDGET_MS,
+  report: setDeckStatus
+});
 
 function setDeckStatus(message, kind = "") {
   els.deckStatus.textContent = message;

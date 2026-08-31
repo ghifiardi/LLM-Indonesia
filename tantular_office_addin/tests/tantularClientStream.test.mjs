@@ -5,8 +5,11 @@ import {
   normalizeModelList,
   buildChatHeaders,
   endpointErrorMessage,
-  reasoningControlFor
+  reasoningControlFor,
+  runTantular,
+  consumeLastInferenceMetrics
 } from "../src/tantularClient.js";
+import { documentWireSchema } from "../src/document/documentPlanner.js";
 
 test("reasoning control is chosen per model family", () => {
   // Qwen honours the request field — unchanged behaviour.
@@ -252,6 +255,417 @@ test("runTantular deck JSON mode sends response_format", async () => {
   }
 });
 
+// --- JSON Schema structured output (2026-08-31 reliability follow-up) ------
+// json_object mode ("format":"json" on Ollama) only asks for well-formed
+// JSON; it does not stop the model from omitting a closing bracket, which a
+// live itemizable-fixture test reproduced. json_schema ("format":<schema
+// object>) makes Ollama enforce the grammar server-side instead.
+
+test("a caller that passes jsonSchema gets response_format:json_schema, not json_object", async () => {
+  globalThis.localStorage = {
+    getItem: () => JSON.stringify({ deckModel: "qwen3.5:9b" }),
+    setItem: () => {}
+  };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let capturedBody = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "{\"t\":\"x\",\"s\":[]}" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const schema = documentWireSchema(6);
+    await runTantular({ system: "s", user: "u", task: "document", jsonMode: true, jsonSchema: schema });
+    assert.equal(capturedBody.response_format.type, "json_schema");
+    assert.deepEqual(capturedBody.response_format.json_schema.schema, schema);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("documentWireSchema uses the requested section count for s.minItems/maxItems and caps b at 2", () => {
+  const schema = documentWireSchema(6);
+  assert.equal(schema.properties.s.minItems, 6);
+  assert.equal(schema.properties.s.maxItems, 6);
+  assert.equal(schema.properties.s.items.properties.b.maxItems, 2);
+  // "b" itself is not in "required" — a narrative section may omit it entirely.
+  assert.ok(!schema.properties.s.items.required.includes("b"));
+  assert.equal(schema.additionalProperties, false);
+});
+
+test("a malformed/undefined jsonSchema is never sent as response_format.json_schema.schema", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let capturedBody = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "{\"ok\":true}" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    // jsonMode true but no schema supplied: falls back to plain json_object,
+    // never sends a broken/empty schema.
+    await runTantular({ system: "s", user: "u", jsonMode: true });
+    assert.deepEqual(capturedBody.response_format, { type: "json_object" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("schema rejection downgrades exactly once to json_object, not straight to no JSON mode", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    if (body.response_format?.type === "json_schema") {
+      return { ok: false, status: 400, text: async () => "unsupported: response_format.json_schema" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "{\"ok\":true}" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const out = await runTantular({ system: "s", user: "u", jsonMode: true, jsonSchema: documentWireSchema(3) });
+    assert.equal(out, "{\"ok\":true}");
+    assert.equal(bodies.length, 2, "one rejected schema attempt, one successful json_object retry");
+    assert.equal(bodies[0].response_format.type, "json_schema");
+    assert.equal(bodies[1].response_format.type, "json_object");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("json_object rejection after a schema downgrade follows the existing no-JSON-mode behavior", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    if (body.response_format) {
+      return { ok: false, status: 400, text: async () => "unsupported: response_format" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "plain text" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const out = await runTantular({ system: "s", user: "u", jsonMode: true, jsonSchema: documentWireSchema(3) });
+    assert.equal(out, "plain text");
+    assert.equal(bodies.length, 3, "schema rejected, json_object rejected, final attempt has no response_format");
+    assert.equal(bodies[0].response_format.type, "json_schema");
+    assert.equal(bodies[1].response_format.type, "json_object");
+    assert.equal(bodies[2].response_format, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("reasoning-control retries preserve the JSON schema (both rejections handled independently)", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    if (body.reasoning_effort) {
+      return { ok: false, status: 400, text: async () => "unknown parameter: reasoning_effort" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "{\"t\":\"x\",\"s\":[]}" } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const schema = documentWireSchema(3);
+    await runTantular({ system: "s", user: "u", jsonMode: true, jsonSchema: schema });
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0].response_format.type, "json_schema");
+    assert.equal(bodies[1].response_format.type, "json_schema",
+      "dropping reasoning_effort must not also drop the schema — they are independent rejections");
+    assert.equal(bodies[1].reasoning_effort, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- Structured-mode telemetry (2026-08-31 fail-closed follow-up) ----------
+// An earlier reliability gate ran against a stale Companion process that
+// still had the pre-schema bridge loaded — nothing in the client-visible
+// result said so, and the gate's own conclusion ("Ollama ignores nested
+// minItems/maxItems") turned out to be unsupported once that was caught by
+// timestamp inspection. These fields exist so that mistake is visible from
+// the metrics themselves, not just from manually diffing file mtimes against
+// a process start time.
+
+test("structured telemetry: schema used successfully — no downgrade, correct requested/used labels", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      choices: [{ message: { content: "{\"t\":\"x\",\"s\":[]}" }, finish_reason: "stop" }],
+      tantular_metrics: { promptTokens: 40, completionTokens: 300 },
+      tantular_structured_mode: "schema"
+    }),
+    text: async () => ""
+  });
+  try {
+    let metrics = null;
+    await runTantular({
+      system: "s", user: "u", maxTokens: 4000, task: "document",
+      jsonMode: true, jsonSchema: documentWireSchema(3), onMetrics: (m) => { metrics = m; }
+    });
+    assert.equal(metrics.structuredModeRequested, "schema");
+    assert.equal(metrics.structuredModeUsed, "schema");
+    assert.equal(metrics.structuredModeDowngraded, false);
+    assert.equal(metrics.structuredDowngradeReason, null);
+    assert.equal(metrics.finishReason, "stop");
+    assert.equal(metrics.completionTokens, 300);
+    assert.equal(metrics.requestedMaxTokens, 4000);
+    assert.equal(metrics.nearTokenCap, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("structured telemetry: server-reported mode is trusted over the client's own request when both are present", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      // The client asked for schema, but the Companion (e.g. a stale bridge
+      // process) actually sent plain json_object — this is exactly the class
+      // of bug that invalidated an earlier reliability gate.
+      choices: [{ message: { content: "{\"t\":\"x\",\"s\":[]}" }, finish_reason: "stop" }],
+      tantular_metrics: { promptTokens: 40, completionTokens: 300 },
+      tantular_structured_mode: "json_object"
+    }),
+    text: async () => ""
+  });
+  try {
+    let metrics = null;
+    await runTantular({
+      system: "s", user: "u", maxTokens: 4000, task: "document",
+      jsonMode: true, jsonSchema: documentWireSchema(3), onMetrics: (m) => { metrics = m; }
+    });
+    assert.equal(metrics.structuredModeRequested, "schema");
+    assert.equal(metrics.structuredModeUsed, "json_object",
+      "the server-confirmed mode must win over what the client merely asked for");
+    assert.equal(metrics.structuredModeDowngraded, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("structured telemetry: schema rejected -> json_object downgrade is reported with a reason", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.response_format?.type === "json_schema") {
+      return { ok: false, status: 400, text: async () => "unsupported: response_format.json_schema" };
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "{\"t\":\"x\",\"s\":[]}" }, finish_reason: "stop" }],
+        tantular_metrics: { promptTokens: 40, completionTokens: 300 }
+        // No tantular_structured_mode here — simulates a hosted gateway that
+        // doesn't run this Companion; the client's own tracked mode must be
+        // used as the fallback.
+      }),
+      text: async () => ""
+    };
+  };
+  try {
+    let metrics = null;
+    await runTantular({
+      system: "s", user: "u", maxTokens: 4000, task: "document",
+      jsonMode: true, jsonSchema: documentWireSchema(3), onMetrics: (m) => { metrics = m; }
+    });
+    assert.equal(metrics.structuredModeRequested, "schema");
+    assert.equal(metrics.structuredModeUsed, "json_object");
+    assert.equal(metrics.structuredModeDowngraded, true);
+    assert.equal(metrics.structuredDowngradeReason, "schema_rejected_by_endpoint");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("structured telemetry: json_object rejected -> none is reported with a reason", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.response_format) {
+      return { ok: false, status: 400, text: async () => "unsupported: response_format" };
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "plain text" }, finish_reason: "stop" }],
+        tantular_metrics: { promptTokens: 40, completionTokens: 5 }
+      }),
+      text: async () => ""
+    };
+  };
+  try {
+    let metrics = null;
+    await runTantular({
+      system: "s", user: "u", maxTokens: 4000, task: "document",
+      jsonMode: true, jsonSchema: documentWireSchema(3), onMetrics: (m) => { metrics = m; }
+    });
+    assert.equal(metrics.structuredModeRequested, "schema");
+    assert.equal(metrics.structuredModeUsed, "none");
+    assert.equal(metrics.structuredModeDowngraded, true);
+    assert.equal(metrics.structuredDowngradeReason, "json_object_rejected_by_endpoint");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("structured telemetry: cancellation never reaches the point of reporting a downgrade", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+    init.signal?.addEventListener("abort", () => {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      reject(err);
+    });
+  });
+  try {
+    const controller = new AbortController();
+    const promise = runTantular({
+      system: "s", user: "u", task: "document", jsonMode: true, jsonSchema: documentWireSchema(3), signal: controller.signal
+    });
+    controller.abort();
+    await assert.rejects(() => promise);
+    // consumeLastInferenceMetrics must not carry stale telemetry from a
+    // cancelled attempt into whatever call reads it next.
+    assert.equal(consumeLastInferenceMetrics(), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("structured telemetry: finishReason 'length' and nearTokenCap both reflect a completion at the token ceiling", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      choices: [{ message: { content: "{\"t\":\"x\",\"s\":[]}" }, finish_reason: "length" }],
+      tantular_metrics: { promptTokens: 40, completionTokens: 3960 },
+      tantular_structured_mode: "schema"
+    }),
+    text: async () => ""
+  });
+  try {
+    let metrics = null;
+    await runTantular({
+      system: "s", user: "u", maxTokens: 4000, task: "document",
+      jsonMode: true, jsonSchema: documentWireSchema(3), onMetrics: (m) => { metrics = m; }
+    });
+    assert.equal(metrics.finishReason, "length");
+    assert.equal(metrics.nearTokenCap, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("structured telemetry: a plain chat call with no JSON mode gets no structured-mode fields at all", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      choices: [{ message: { content: "Halo!" }, finish_reason: "stop" }],
+      tantular_metrics: { promptTokens: 10, completionTokens: 5 }
+    }),
+    text: async () => ""
+  });
+  try {
+    let metrics = null;
+    await runTantular({ system: "s", user: "u", onMetrics: (m) => { metrics = m; } });
+    assert.equal(metrics.structuredModeRequested, undefined);
+    assert.equal(metrics.structuredModeUsed, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("cancellation during a schema-mode request performs no downgrade or retry", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    calls += 1;
+    if (init.signal?.aborted) {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      throw err;
+    }
+    return new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => {
+        const err = new Error("Aborted");
+        err.name = "AbortError";
+        reject(err);
+      });
+    });
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const controller = new AbortController();
+    const promise = runTantular({
+      system: "s", user: "u", jsonMode: true, jsonSchema: documentWireSchema(3), signal: controller.signal
+    });
+    controller.abort();
+    await assert.rejects(() => promise);
+    assert.equal(calls, 1, "an aborted request must not retry with a downgraded JSON mode");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // REGRESSION: EDIT_TEKS on a large selection asks the local model for one
 // JSON edit per sentence — long structured output on possibly slow hardware,
 // same shape of problem Studio tasks already get 480s for. The plain-chat
@@ -339,6 +753,169 @@ test("runTantular auto-downgrades a missing chat model to an installed lite one,
       "must try the configured default, its built-in fallback, then the auto-downgrade — in that order");
     const persisted = savedSettings.at(-1);
     assert.equal(persisted.model, "tantular-office:lite", "must persist to the CHAT model field, not deckModel");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- modelFallbackPolicy (2026-08-31 benchmark-contamination follow-up) ----
+// A 10-run itemizable reliability gate asked for Q8 and got a silent
+// mid-run downgrade to Lite after a Studio timeout — the row still reported
+// "success" and inflated its own wall-clock past 15 minutes hiding what
+// actually happened. A benchmark/gate must be able to say "never substitute
+// a different model for me" and have a timeout reported as a timeout.
+
+// A window whose setTimeout fires immediately makes callChat's own 480s
+// watchdog abort every later real request instantly too if it leaks into
+// another test — always restore it in `finally`, the same way `fetch` is
+// restored, not just reassign it and move on.
+const REAL_WINDOW = { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+
+test("modelFallbackPolicy 'none': a Studio timeout is reported as a timeout, never tries Lite, never persists settings", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  const savedSettings = [];
+  globalThis.localStorage.setItem = (_key, value) => savedSettings.push(JSON.parse(value));
+  // Firing the timeout callback immediately (instead of waiting the real
+  // 480s) simulates the timeout deterministically.
+  globalThis.window = {
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {}
+  };
+  const originalFetch = globalThis.fetch;
+  const attemptedModels = [];
+  globalThis.fetch = async (_url, init) => {
+    const model = JSON.parse(init.body).model;
+    attemptedModels.push(model);
+    if (init.signal?.aborted) {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      throw err;
+    }
+    return new Promise(() => {}); // never resolves — the timeout is what ends this
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    await assert.rejects(
+      () => runTantular({ system: "s", user: "u", task: "document", modelFallbackPolicy: "none" }),
+      /terlalu lama/i
+    );
+    assert.deepEqual(attemptedModels, ["tantular-office:0.5-9b"],
+      "exactly one model attempt — no Lite retry");
+    assert.equal(savedSettings.length, 0, "a policy of 'none' must never persist a different Studio model");
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = REAL_WINDOW;
+  }
+});
+
+test("modelFallbackPolicy 'missing-model-only': a Studio timeout still fails as a timeout, but a missing model still downgrades", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  const savedSettings = [];
+  globalThis.localStorage.setItem = (_key, value) => savedSettings.push(JSON.parse(value));
+  globalThis.window = { setTimeout: (fn) => { fn(); return 1; }, clearTimeout: () => {} };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    if (init.signal?.aborted) {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      throw err;
+    }
+    return new Promise(() => {});
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    await assert.rejects(
+      () => runTantular({ system: "s", user: "u", task: "document", modelFallbackPolicy: "missing-model-only" }),
+      /terlalu lama/i
+    );
+    assert.equal(savedSettings.length, 0, "a timeout must not trigger the missing-model downgrade path");
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = REAL_WINDOW;
+  }
+
+  // Missing-model case: this path IS still allowed under "missing-model-only".
+  const attemptedModels = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("/api/models")) {
+      return { ok: true, status: 200, json: async () => ({ models: [{ name: "tantular-office:lite" }] }), text: async () => "" };
+    }
+    const model = JSON.parse(init.body).model;
+    attemptedModels.push(model);
+    if (model === "tantular-office:lite") {
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "ok" } }] }), text: async () => "" };
+    }
+    return { ok: false, status: 404, json: async () => ({}), text: async () => "model not found" };
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const out = await runTantular({ system: "s", user: "u", modelFallbackPolicy: "missing-model-only" });
+    assert.equal(out, "ok");
+    assert.ok(attemptedModels.includes("tantular-office:lite"), "a missing model must still downgrade under 'missing-model-only'");
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = REAL_WINDOW;
+  }
+});
+
+test("modelFallbackPolicy default ('timeout-and-missing') preserves the existing downgrade-on-timeout behavior", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.localStorage.setItem = () => {};
+  globalThis.window = { setTimeout: (fn) => { fn(); return 1; }, clearTimeout: () => {} };
+  const originalFetch = globalThis.fetch;
+  const attemptedModels = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("/api/models")) {
+      return { ok: true, status: 200, json: async () => ({ models: [{ name: "tantular-office:lite" }] }), text: async () => "" };
+    }
+    const model = JSON.parse(init.body).model;
+    attemptedModels.push(model);
+    if (model === "tantular-office:lite") {
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "ok" } }] }), text: async () => "" };
+    }
+    if (init.signal?.aborted) {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      throw err;
+    }
+    return new Promise(() => {});
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    // No modelFallbackPolicy passed — must behave exactly as before this change.
+    const out = await runTantular({ system: "s", user: "u", task: "document" });
+    assert.equal(out, "ok");
+    assert.ok(attemptedModels.includes("tantular-office:lite"), "unchanged default: a Studio timeout still downgrades to Lite");
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = REAL_WINDOW;
+  }
+});
+
+test("cancellation performs no fallback regardless of modelFallbackPolicy", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window = REAL_WINDOW;
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    calls += 1;
+    return new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => {
+        const err = new Error("Aborted");
+        err.name = "AbortError";
+        reject(err);
+      });
+    });
+  };
+  try {
+    const { runTantular } = await import("../src/tantularClient.js");
+    const controller = new AbortController();
+    const promise = runTantular({
+      system: "s", user: "u", task: "document", modelFallbackPolicy: "timeout-and-missing", signal: controller.signal
+    });
+    controller.abort();
+    await assert.rejects(() => promise);
+    assert.equal(calls, 1, "a cancelled request must not retry with a different model, no matter the policy");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -551,6 +1128,238 @@ test("listLocalModels aborts instead of hanging when the companion never answers
         "must name the companion, not blame the model install");
       return true;
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- Inference telemetry (verified fix follow-up) ---------------------------
+// consumeLastInferenceMetrics() is the one place a future benchmarking pass
+// (or a diagnostics panel) reads real Ollama timing/token counts instead of
+// guessing. It must reflect the MOST RECENT local-model call and must not be
+// visible again once consumed.
+
+test("consumeLastInferenceMetrics returns the most recent local call's real Ollama timing, one-shot", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{ message: { content: "Jawaban." } }],
+      tantular_metrics: {
+        promptTokens: 80,
+        completionTokens: 300,
+        loadDurationMs: 120,
+        promptEvalDurationMs: 300,
+        evalDurationMs: 15000,
+        totalDurationMs: 15420,
+        tokensPerSecond: 20
+      }
+    }),
+    text: async () => ""
+  });
+
+  try {
+    consumeLastInferenceMetrics(); // drain any state left by an earlier test
+    const out = await runTantular({ system: "s", user: "u", maxTokens: 50 });
+    assert.equal(out, "Jawaban.");
+
+    const metrics = consumeLastInferenceMetrics();
+    assert.ok(metrics, "metrics must be captured after a call that returned tantular_metrics");
+    assert.equal(metrics.completionTokens, 300);
+    assert.equal(metrics.tokensPerSecond, 20);
+    assert.ok(metrics.model, "the metrics must record which model produced them");
+
+    assert.equal(consumeLastInferenceMetrics(), null,
+      "one-shot: a second consume before any new call must return nothing");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("consumeLastInferenceMetrics stays null when the response carries no metrics (e.g. Cloud Mode/portal)", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ choices: [{ message: { content: "Jawaban dari cloud." } }] }),
+    text: async () => ""
+  });
+
+  try {
+    consumeLastInferenceMetrics();
+    await runTantular({ system: "s", user: "u", maxTokens: 50 });
+    assert.equal(consumeLastInferenceMetrics(), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- Stale metrics (verified fix follow-up) ---------------------------------
+// The old code only assigned lastInferenceMetrics when a response carried
+// tantular_metrics, so a request that came back WITHOUT metrics — or never
+// came back at all — silently left a prior successful local call's numbers
+// sitting in the slot for the next unrelated consumeLastInferenceMetrics()
+// caller to mistake for its own.
+
+test("stale metrics: an unconsumed local result does not leak into a later Cloud response with no metrics", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let call = 0;
+  globalThis.fetch = async () => {
+    call += 1;
+    if (call === 1) {
+      // Local call WITH metrics — deliberately never consumed.
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          choices: [{ message: { content: "Lokal." } }],
+          tantular_metrics: { promptTokens: 10, completionTokens: 20, tokensPerSecond: 5 }
+        }),
+        text: async () => ""
+      };
+    }
+    // "Cloud" call with no metrics field at all.
+    return {
+      ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { content: "Dari cloud." } }] }),
+      text: async () => ""
+    };
+  };
+  try {
+    await runTantular({ system: "s", user: "u", maxTokens: 8 }); // local, metrics NOT consumed
+    await runTantular({ system: "s", user: "u", maxTokens: 8 }); // "cloud", no metrics
+    assert.equal(consumeLastInferenceMetrics(), null,
+      "the cloud call's absence of metrics must win — the stale local metrics must not surface here");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stale metrics: an unconsumed local result does not leak into a later failed request", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let call = 0;
+  globalThis.fetch = async () => {
+    call += 1;
+    if (call === 1) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          choices: [{ message: { content: "Lokal." } }],
+          tantular_metrics: { promptTokens: 10, completionTokens: 20, tokensPerSecond: 5 }
+        }),
+        text: async () => ""
+      };
+    }
+    return { ok: false, status: 500, text: async () => "boom", json: async () => ({}) };
+  };
+  try {
+    await runTantular({ system: "s", user: "u", maxTokens: 8 }); // local, metrics NOT consumed
+    await assert.rejects(runTantular({ system: "s", user: "u", maxTokens: 8 })); // fails outright
+    assert.equal(consumeLastInferenceMetrics(), null,
+      "a failed request must not leave a prior call's metrics behind for the next consumer");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stale metrics: an unconsumed local result does not leak into a later cancelled request", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  let call = 0;
+  globalThis.fetch = async (_url, init) => {
+    call += 1;
+    if (call === 1) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          choices: [{ message: { content: "Lokal." } }],
+          tantular_metrics: { promptTokens: 10, completionTokens: 20, tokensPerSecond: 5 }
+        }),
+        text: async () => ""
+      };
+    }
+    return new Promise((_resolve, reject) => {
+      // The signal reaching fetch is often ALREADY aborted by the time this
+      // runs (runTantular's controller aborts synchronously on entry when
+      // the caller's signal is pre-aborted) — the "abort" event only fires
+      // once, at the moment .abort() is called, so a listener attached
+      // after that point would wait forever without this check.
+      if (init?.signal?.aborted) {
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        return;
+      }
+      init?.signal?.addEventListener("abort", () =>
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    });
+  };
+  try {
+    await runTantular({ system: "s", user: "u", maxTokens: 8 }); // local, metrics NOT consumed
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(runTantular({ system: "s", user: "u", maxTokens: 8, signal: controller.signal }));
+    assert.equal(consumeLastInferenceMetrics(), null,
+      "a cancelled request must not leave a prior call's metrics behind for the next consumer");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("onMetrics is invoked with THIS call's own metrics, independent of the shared module slot", async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      choices: [{ message: { content: "Jawaban." } }],
+      tantular_metrics: { promptTokens: 1, completionTokens: 2, tokensPerSecond: 3 }
+    }),
+    text: async () => ""
+  });
+  try {
+    let received = "unset";
+    await runTantular({
+      system: "s", user: "u", maxTokens: 8,
+      onMetrics: (metrics) => { received = metrics; }
+    });
+    assert.notEqual(received, "unset", "onMetrics must be called");
+    assert.equal(received.completionTokens, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("metrics.model reflects the response's own reported model, not just the requested one", async () => {
+  globalThis.localStorage = { getItem: () => JSON.stringify({ deckModel: "model-a" }), setItem: () => {} };
+  globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), clearTimeout: (...a) => clearTimeout(...a) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      model: "model-b", // the server answered with a different model than requested
+      choices: [{ message: { content: "Jawaban." } }],
+      tantular_metrics: { promptTokens: 5, completionTokens: 10, tokensPerSecond: 2 }
+    }),
+    text: async () => ""
+  });
+  try {
+    let received = null;
+    await runTantular({
+      system: "s", user: "u", maxTokens: 8, task: "document",
+      onMetrics: (m) => { received = m; }
+    });
+    assert.equal(received.model, "model-b", "onMetrics must report the RESPONSE's model, not the request's");
+    const stale = consumeLastInferenceMetrics();
+    assert.equal(stale.model, "model-b");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -4,10 +4,14 @@ import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createWorkspaceStore, handleWorkspaceRequest } from "./workspace.mjs";
+import { randomUUID } from "node:crypto";
 import {
   ollamaLineToOpenAiEvent,
   openAiToOllamaBody,
-  parseOllamaResponse
+  parseOllamaResponse,
+  BRIDGE_CAPABILITIES,
+  BRIDGE_REVISION,
+  structuredModeFromNativeFormat
 } from "../src/chat/ollamaBridge.js";
 import {
   lookupEnabled, allowedHosts, describedHosts, prepareLookup, authorizeExecution,
@@ -39,6 +43,27 @@ if (process.env.TANTULAR_LOOKUP_DEBUG === "true") {
   };
   console.log(`[debug] lookup diagnosis on: ${debugPath}`);
 }
+
+// --- demo trace: pairs a screen recording with what the pane actually did ---
+//
+// Off unless TANTULAR_TRACE=1, same policy as the lookup debug log above:
+// diagnosis is explicit, never the default. When on, every API request the
+// companion serves and every console line the pane forwards to /api/__trace
+// lands in one NDJSON file, each entry stamped with the wall clock. The
+// recorder writes a session_start entry the moment capture begins, so an
+// entry's offset from it is the timecode to scrub to in the video.
+const tracePath = process.env.TANTULAR_TRACE === "1"
+  ? (process.env.TANTULAR_TRACE_FILE || path.join(process.env.HOME || ".", ".tantular-trace.ndjson"))
+  : null;
+
+function trace(entry) {
+  if (!tracePath) return;
+  try {
+    fs.appendFileSync(tracePath, `${JSON.stringify({ t: new Date().toISOString(), ...entry })}\n`);
+  } catch { /* tracing must never break a demo */ }
+}
+
+if (tracePath) console.log(`[trace] demo trace on: ${tracePath}`);
 
 async function completeLocally(prompt) {
   const response = await fetch("http://127.0.0.1:11434/api/chat", {
@@ -77,6 +102,16 @@ function appendLookupAudit(record) {
 }
 const root = path.resolve(__dirname, "..");
 const port = Number(process.env.PORT || 3000);
+// Overridable only so tests can point this at a fake Ollama on a free port
+// instead of colliding with a real one that may already be running on the
+// dev machine; every real install keeps the default.
+const OLLAMA_PORT = Number(process.env.TANTULAR_OLLAMA_PORT || 11434);
+
+// A fresh id per process start — lets a benchmark/gate confirm the Companion
+// it is measuring is the SAME process that loaded the bridge it just
+// checked capabilities on, not one that was restarted (or never restarted)
+// out from under it between the check and the run.
+const COMPANION_BOOT_ID = randomUUID();
 
 // Office's task pane WebView (WKWebView on Mac, confirmed on this project's
 // own test hosts) has been observed serving a stale ES module graph across
@@ -213,6 +248,41 @@ const mime = new Map([
 
 function handler(req, res) {
   const url = new URL(req.url || "/", "https://localhost");
+
+  // Pane-side console lines. GET reports whether tracing is on so the sink in
+  // the pane can detach itself everywhere else — on the hosted build this
+  // route does not exist, and the sink stays inert.
+  if (url.pathname === "/api/__trace") {
+    if (!allowApiOrigin(req, res)) return;
+    if (req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", ...corsHeaders(req) });
+      res.end(JSON.stringify({ on: Boolean(tracePath) }));
+      return;
+    }
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json; charset=utf-8", ...corsHeaders(req) });
+      res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+      return;
+    }
+    readJsonBody(req, (error, body) => {
+      if (!error) {
+        for (const line of Array.isArray(body?.lines) ? body.lines.slice(0, 200) : []) {
+          // Boot lines are buffered in the pane and posted once the sink is
+          // installed, so the line's own timestamp is the honest one.
+          const stamped = typeof line?.t === "string" && !Number.isNaN(Date.parse(line.t)) ? { t: line.t } : {};
+          trace({
+            kind: "pane",
+            level: String(line?.level || "log").slice(0, 16),
+            text: String(line?.text || "").slice(0, 2000),
+            ...stamped
+          });
+        }
+      }
+      res.writeHead(error ? (error.status || 400) : 204, corsHeaders(req));
+      res.end();
+    });
+    return;
+  }
 
   if (url.pathname === "/api/document-extract") {
     proxyDocumentExtract(req, res);
@@ -500,6 +570,24 @@ function handler(req, res) {
     return;
   }
 
+  // Lets a local diagnostic tool (tools/benchmark-studio.mjs) confirm it is
+  // inspecting the SAME Ollama instance this Companion actually generates
+  // against — measured generation always goes through THIS process's
+  // OLLAMA_PORT, but a caller could point its own metadata/load-state checks
+  // at a different Ollama on the same machine via --ollama-origin. Origin
+  // only, nothing sensitive (no model list, no settings, no keys).
+  if (url.pathname === "/api/diagnostics") {
+    if (!allowApiOrigin(req, res)) return;
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", ...corsHeaders(req) });
+    res.end(JSON.stringify({
+      ollamaOrigin: `http://127.0.0.1:${OLLAMA_PORT}`,
+      companionBootId: COMPANION_BOOT_ID,
+      bridgeRevision: BRIDGE_REVISION,
+      bridgeCapabilities: BRIDGE_CAPABILITIES
+    }));
+    return;
+  }
+
   if (url.pathname.startsWith("/api/workspace")) {
     if (!allowApiOrigin(req, res)) return;
     handleWorkspaceRequest(workspaceStore, req, res, url);
@@ -690,10 +778,14 @@ function proxyChatCompletions(req, res) {
     }
 
     const ollamaBody = openAiToOllamaBody(body);
+    // Computed from the SAME native.format value actually sent to Ollama
+    // below, not from the client's request — see structuredModeFromNativeFormat's
+    // own doc comment for why that distinction matters.
+    const structuredModeUsed = structuredModeFromNativeFormat(ollamaBody.format);
     const proxyReq = http.request(
       {
         hostname: "127.0.0.1",
-        port: 11434,
+        port: OLLAMA_PORT,
         path: "/api/chat",
         method: "POST",
         headers: {
@@ -708,7 +800,8 @@ function proxyChatCompletions(req, res) {
               writeModelProxyError(res, req, collectError);
               return;
             }
-            const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502);
+            if (res.writableEnded || res.destroyed) return; // client already gone
+            const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502, structuredModeUsed);
             res.writeHead(proxyRes.statusCode || 502, {
               "Content-Type": "application/json; charset=utf-8",
               ...corsHeaders(req),
@@ -727,7 +820,8 @@ function proxyChatCompletions(req, res) {
             writeModelProxyError(res, req, collectError);
             return;
           }
-          const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502);
+          if (res.writableEnded || res.destroyed) return; // client already gone
+          const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502, structuredModeUsed);
           res.writeHead(proxyRes.statusCode || 502, {
             "Content-Type": "application/json; charset=utf-8",
             ...corsHeaders(req),
@@ -738,7 +832,33 @@ function proxyChatCompletions(req, res) {
       }
     );
 
-    proxyReq.on("error", (proxyError) => writeModelProxyError(res, req, proxyError));
+    // The browser's fetch() aborting (a Studio Cancel click, or the tab/pane
+    // closing) closes THIS response's underlying connection before res.end()
+    // is ever reached — Node signals that as 'close' with writableEnded still
+    // false. A normal, fully-served response also emits 'close' eventually,
+    // but by then writableEnded is already true, so this only fires for a
+    // genuine premature disconnect. Destroying proxyReq (and, once it exists,
+    // proxyRes via streamOllamaAsOpenAi's own listeners) tears down the
+    // outbound Ollama connection so generation actually stops, instead of
+    // running to completion for an answer nobody is listening for anymore.
+    res.on("close", () => {
+      if (res.writableEnded) return;
+      proxyReq.destroy();
+    });
+    // A write attempted after the client's socket is already gone (e.g. a
+    // streamOllamaAsOpenAi chunk racing the close above) surfaces as an
+    // 'error' event here rather than a thrown exception; with no listener
+    // that is an unhandled error, which would crash the whole server for
+    // every other in-flight request too.
+    res.on("error", () => {});
+
+    proxyReq.on("error", (proxyError) => {
+      // Firing writeModelProxyError here would try to write to a response
+      // whose connection just closed — either because destroy() above was
+      // the CAUSE of this error, or the client is independently already gone.
+      if (res.writableEnded || res.destroyed) return;
+      writeModelProxyError(res, req, proxyError);
+    });
     proxyReq.end(JSON.stringify(ollamaBody));
   });
 }
@@ -841,7 +961,7 @@ function proxyOllamaModels(req, res) {
   const proxyReq = http.request(
     {
       hostname: "127.0.0.1",
-      port: 11434,
+      port: OLLAMA_PORT,
       path: "/api/tags",
       method: "GET"
     },
@@ -893,10 +1013,25 @@ function allowApiOrigin(req, res) {
   return false;
 }
 
+// Static asset noise drowns the calls that matter, so only API routes and the
+// pane document itself are traced.
+function tracedHandler(req, res) {
+  if (!tracePath) return handler(req, res);
+  const started = Date.now();
+  const method = req.method;
+  const pathname = new URL(req.url || "/", "https://localhost").pathname;
+  if (pathname !== "/api/__trace" && (pathname.startsWith("/api/") || pathname.endsWith(".html"))) {
+    res.on("finish", () => {
+      trace({ kind: "http", method, path: pathname, status: res.statusCode, ms: Date.now() - started });
+    });
+  }
+  return handler(req, res);
+}
+
 const hasCert = fs.existsSync(certPath) && fs.existsSync(keyPath);
 const server = hasCert
-  ? https.createServer({ cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) }, handler)
-  : http.createServer(handler);
+  ? https.createServer({ cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) }, tracedHandler)
+  : http.createServer(tracedHandler);
 
 // Running `npm run dev` twice is the most common mistake there is, and Node's
 // default is an unhandled 'error' event: a raw EADDRINUSE stack trace. Someone
