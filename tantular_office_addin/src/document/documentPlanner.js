@@ -1,6 +1,14 @@
 // Tantular Document Studio — brief/source text → normalized document spec.
 
 import { runTantular } from "../tantularClient.js";
+import {
+  detectTitle as detectStructureTitle,
+  detectSections,
+  detectSectionsLoose,
+  normalize as normalizeStructureText,
+  stripRepeatedPageLines
+} from "./extractedStructure.js";
+import { looksLikeStatement, statementBullets, detectPeriods, stripBilingualMirror } from "../deck/statementRows.js";
 
 // Token-efficiency pass (2026-08-31): the model was spending real generation
 // tokens on things that never needed to come from the model at all — the
@@ -255,20 +263,145 @@ export function normalizeDocumentSpec(value, sourceText = "", sectionCount = 6) 
 }
 
 export function fallbackDocumentSpec(sourceText, documentType = "Dokumen", sectionCount = 6) {
+  return buildDeterministicDocumentSpec(sourceText, documentType, sectionCount);
+}
+
+// 2026-08-31 fallback-quality follow-up: a financial PDF converted through
+// this fallback used to shred a bilingual title page and financial-statement
+// rows into evenly-sized chunks labeled "Bagian 1", "Bagian 2" — the extractor
+// already flattens PDF/DOCX/PPTX/XLSX text with structural markers
+// ("[Page N]", "[Slide N]", "[Sheet: Name]") and headings are still
+// detectable in that flattened text, but the old fallback never looked for
+// them. This reuses the SAME detection Deck Studio's deterministic path
+// already relies on (src/document/extractedStructure.js, moved out of
+// src/deck/documentDeck.js so both can share it) instead of a second,
+// weaker implementation.
+//
+// Scope note: this is deterministic TEXT-PATTERN structure detection over
+// the flattened extractor output — not a per-format OOXML/PDF block-level
+// parser (real DOCX heading styles, PPTX shape geometry, XLSX cell
+// addresses). It fixes the demonstrated fallback-quality bug (generic
+// section labels, lost titles, unassociated statement rows) using the same
+// text the model prompt already receives; it does not add structural
+// fidelity beyond what is recoverable from that flattened text.
+export function buildDeterministicDocumentSpec(sourceText, documentType = "Dokumen", sectionCount = 6) {
   const source = String(sourceText || "").trim();
-  const sections = fallbackSections(source, sectionCount);
+  const count = clamp(sectionCount, 3, 12);
+  const normalized = stripRepeatedPageLines(normalizeStructureText(source));
+
+  // inferTitle() specifically handles "Buatlah laporan tentang X" style
+  // instructions (extracting "X" as the real topic) — detectStructureTitle()
+  // has no such handling, so an instruction-shaped candidate from it must be
+  // rejected in favor of inferTitle()'s own extraction, not used verbatim.
+  const structureTitle = text(detectStructureTitle(normalized));
+  const title = (structureTitle && !/^(buat|buatlah|susun|tulis|create|write)\b/i.test(structureTitle) ? structureTitle : "")
+    || inferTitle(source) || documentType || "Dokumen Tantular";
+  const periods = documentPeriods(normalized);
+
+  let detected = detectSections(normalized);
+  if (detected.length < 3) detected = detectSectionsLoose(normalized);
+  // "Ikhtisar"/"Isi Utama" catch-all buckets (used when body text precedes
+  // the first detected heading) do not count as a MEANINGFUL heading on
+  // their own — at least 2 sections must carry a real, detected title before
+  // this path is trusted over the plain-paragraph fallback.
+  const meaningfulCount = detected.filter((s) => s.title && s.title !== "Ikhtisar").length;
+
+  let coverageNote = null;
+  let sections;
+  if (meaningfulCount >= 2) {
+    let chosen = detected;
+    if (detected.length > count) {
+      // More real sections than requested: keep the most substantial ones,
+      // in original document order — never fabricate extra ones when there
+      // are fewer than requested (handled by the `else` branch below).
+      chosen = [...detected]
+        .map((s, i) => ({ ...s, i }))
+        .sort((a, b) => b.body.length - a.body.length)
+        .slice(0, count)
+        .sort((a, b) => a.i - b.i);
+    } else if (detected.length < count) {
+      coverageNote = `Dokumen sumber memiliki ${detected.length} bagian bermakna yang terdeteksi — ditampilkan apa adanya, tidak diisi otomatis untuk mencapai ${count} bagian yang diminta.`;
+    }
+    sections = chosen.map((section) => structuredSectionToBlock(section, periods));
+  } else {
+    // No real headings detected (plain prose / typed brief with no
+    // structure) — unchanged behavior: balanced paragraph groups.
+    sections = fallbackSections(source, count);
+  }
+
+  const closing = [
+    "Validasi isi terhadap sumber sebelum dokumen digunakan sebagai keputusan final.",
+    "Lengkapi pemilik, tenggat, dan data pendukung bila diperlukan."
+  ];
+  if (coverageNote) closing.unshift(coverageNote);
+
   return {
-    title: inferTitle(source) || documentType || "Dokumen Tantular",
+    title,
     subtitle: documentType,
     author: "",
     date: "",
-    executiveSummary: sections.slice(0, 4).map((section) => section.heading),
+    executiveSummary: sections.slice(0, 5).map((section) => section.heading),
     sections,
-    closing: [
-      "Validasi isi terhadap sumber sebelum dokumen digunakan sebagai keputusan final.",
-      "Lengkapi pemilik, tenggat, dan data pendukung bila diperlukan."
-    ]
+    closing
   };
+}
+
+// A detected section's own source is either a financial-statement table
+// (rendered as bullets — one line item per bullet, values labelled by
+// period) or prose (kept as paragraphs, never invented). Bilingual mirror
+// headings ("LAPORAN LABA RUGI/PROFIT OR LOSS") are reduced to their
+// Indonesian half — same treatment Deck Studio already gives statement
+// headings — so the heading is not visibly duplicated.
+function structuredSectionToBlock(section, documentPeriodsList) {
+  const heading = text(stripBilingualMirror(section.title)) || "Bagian";
+  if (looksLikeStatement(section.body)) {
+    return {
+      heading,
+      level: 1,
+      paragraphs: [],
+      bullets: statementBullets(section.body, section.title, 8, documentPeriodsList),
+      quote: ""
+    };
+  }
+  return {
+    heading,
+    level: 1,
+    paragraphs: paragraphsFromBody(section.body),
+    bullets: [],
+    quote: ""
+  };
+}
+
+// Splits a section's flattened body into readable paragraphs without
+// inventing content: whole existing blank-line paragraphs are kept verbatim
+// when present; otherwise the body is split at sentence boundaries and
+// regrouped into at most 3 reasonably-sized paragraphs, never a single
+// unreadable wall of text.
+function paragraphsFromBody(body) {
+  const raw = String(body || "").trim();
+  if (!raw) return [];
+  const existing = raw.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  if (existing.length > 1) return existing.slice(0, 3);
+  const sentences = raw.replace(/\s+/g, " ").split(/(?<=[.!?])\s+(?=[A-Z0-9"“])/).filter(Boolean);
+  if (sentences.length <= 3) return [raw.replace(/\s+/g, " ")];
+  const perParagraph = Math.ceil(sentences.length / 3);
+  const paragraphs = [];
+  for (let i = 0; i < sentences.length; i += perParagraph) {
+    paragraphs.push(sentences.slice(i, i + perParagraph).join(" ").trim());
+  }
+  return paragraphs.filter(Boolean).slice(0, 3);
+}
+
+// Document-level statement periods (e.g. ["2026", "2025"]), read from the
+// first line naming at least two years — same heuristic documentDeck.js
+// already uses so a statement row's own values are labelled consistently
+// with what Deck Studio would show for the same source.
+function documentPeriods(sourceText) {
+  for (const line of String(sourceText || "").split("\n")) {
+    const periods = detectPeriods(line);
+    if (periods.length >= 2) return periods;
+  }
+  return [];
 }
 
 function normalizeSection(section, index = 0) {

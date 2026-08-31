@@ -8,25 +8,26 @@ import {
   statementBullets,
   looksLikeStatement,
   stripBilingualMirror,
-  detectPeriods,
-  isStatementRow
+  detectPeriods
 } from "./statementRows.js";
-
-const HEADING_WORDS = [
-  "abstract", "abstrak", "introduction", "pendahuluan", "background", "latar belakang",
-  "method", "methods", "methodology", "metodologi", "approach", "pendekatan",
-  "results", "hasil", "discussion", "pembahasan", "analysis", "analisis",
-  "evaluation", "evaluasi", "experiments", "eksperimen", "related work",
-  "conclusion", "kesimpulan", "conclusions", "summary", "ringkasan",
-  "future work", "limitations", "keterbatasan", "contributions", "kontribusi",
-  "references", "daftar pustaka", "acknowledgments", "overview", "ikhtisar"
-];
+// 2026-08-31: title/heading/section detection moved to the neutral
+// src/document/extractedStructure.js so Document Studio's deterministic
+// fallback can reuse the exact same, already-proven logic instead of a
+// second, weaker copy (which is what produced generic "Bagian N" sections on
+// a financial-PDF fallback). See that module's own header comment.
+import {
+  detectTitle as detectTitleShared,
+  detectSections,
+  detectSectionsLoose,
+  normalize,
+  truncate
+} from "../document/extractedStructure.js";
 
 export function buildDocumentDeckSpec(rawText, slideCount = 8) {
   const text = normalize(rawText);
   if (text.length < 400) return null; // too short; let other paths handle it
 
-  const title = detectTitle(text);
+  const title = detectTitleShared(text) || "Dokumen";
   let sections = detectSections(text);
   if (sections.length < 3) sections = detectSectionsLoose(text);
   const requestedCount = clamp(slideCount, 4, 30);
@@ -102,173 +103,8 @@ function documentPeriods(text) {
 }
 
 // --- detection ---------------------------------------------------------------
-
-function detectTitle(text) {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  const skip = /(published as|conference paper|under review|preprint|arxiv|proceedings|copyright|all rights reserved|^\d{4}$|^page \d+)/i;
-  const candidates = [];
-  for (const raw of lines.slice(0, 25)) {
-    const clean = raw.replace(/^\[Page \d+\]\s*/i, "").trim();
-    if (clean.length < 8 || clean.length > 120) continue;
-    if (skip.test(clean)) continue;
-    if (/^abstract|^abstrak|^keywords/i.test(clean)) continue;
-    if (!hasEnoughLetters(clean)) continue;
-    // A statement row is never the document's title. The first page of a
-    // financial report is a statement page, so without this the deck opened on
-    // "hasil investasi lain-lain 91,003 18,478 from other investments".
-    if (isStatementRow(clean)) continue;
-    candidates.push(clean);
-  }
-  // Prefer an early, title-like line (mostly letters, not a sentence).
-  const titleLike = candidates.find((c) => !/[.]$/.test(c) && letterRatio(c) > 0.6);
-  const chosen = titleLike || candidates[0] || lines[0] || "Dokumen";
-  return truncate(stripBilingualMirror(respaceHeading(chosen)), 100);
-}
-
-function detectSections(text) {
-  const lines = text.split("\n");
-  const sections = [];
-  let current = null;
-
-  for (const rawLine of lines) {
-    const line = rawLine.replace(/^\[Page \d+\]\s*/i, "").trim();
-    if (!line) continue;
-    if (isHeading(line)) {
-      current = { title: cleanHeading(line), body: [] };
-      sections.push(current);
-    } else if (current) {
-      current.body.push(line);
-    } else {
-      current = { title: "Ikhtisar", body: [line] };
-      sections.push(current);
-    }
-  }
-
-  return sections
-    .map((s) => ({ title: s.title, body: s.body.join("\n").trim() }))
-    .filter((s) => s.body.length > 40);
-}
-
-function isHeading(line) {
-  if (line.length > 90) return false;
-  if (!hasEnoughLetters(line)) return false;          // reject axis labels / number rows
-  if (letterRatio(line) < 0.45) return false;         // mostly digits/symbols => not a heading
-  if (/[.:;,]$/.test(line) && !/^#+/.test(line)) {
-    // trailing sentence punctuation usually means it's prose, not a heading
-    if (!/^\d+(\.\d+)*\s/.test(line)) return false;
-  }
-  if (/^#{1,6}\s+\S/.test(line)) return true;                // markdown heading
-  if (/^\d+(\.\d+)*\.?\s+[A-Z][A-Za-z]/.test(line) && line.length <= 80) return true; // "3.1 Method"
-  const words = line.split(/\s+/);
-  if (words.length <= 9) {
-    const lower = line.toLowerCase().replace(/^\d+(\.\d+)*\.?\s*/, "");
-    if (HEADING_WORDS.some((w) => lower === w || lower.startsWith(w + " ") || lower === w + ":")) return true;
-    if (/^[A-Z][A-Z0-9 \-/&]+$/.test(line) && /[A-Z]{3,}/.test(line) && line.length >= 4) return true; // ALLCAPS heading
-  }
-  return false;
-}
-
-function hasEnoughLetters(line) {
-  return (line.match(/[A-Za-z]/g) || []).length >= 3;
-}
-
-function letterRatio(line) {
-  const letters = (line.match(/[A-Za-z]/g) || []).length;
-  const nonSpace = line.replace(/\s/g, "").length || 1;
-  return letters / nonSpace;
-}
-
-function cleanHeading(line) {
-  return respaceHeading(line.replace(/^#{1,6}\s+/, "").replace(/:$/, "").trim());
-}
-
-// Some PDFs (special title fonts) export headings with no spaces, e.g.
-// "DARWINGÖDELMACHINE". Re-insert spaces by greedily splitting long ALL-CAPS
-// tokens against a small dictionary. Only applied to titles/headings.
-const RESPACE_WORDS = [
-  "INTRODUCTION", "BACKGROUND", "METHODOLOGY", "METHODS", "METHOD", "APPROACH",
-  "RESULTS", "DISCUSSION", "ANALYSIS", "EVALUATION", "EXPERIMENTS", "RELATED",
-  "WORK", "CONCLUSIONS", "CONCLUSION", "SUMMARY", "REFERENCES", "ABSTRACT",
-  "LIMITATIONS", "CONTRIBUTIONS", "OVERVIEW", "FUTURE", "EVOLUTION", "MACHINE",
-  "AGENTS", "AGENT", "IMPROVING", "IMPROVEMENT", "OPEN", "ENDED", "SELF",
-  "DARWIN", "GÖDEL", "GODEL", "OF", "AND", "THE", "FOR", "WITH", "SYSTEM",
-  "FRAMEWORK", "MODEL", "LEARNING", "DEEP", "NEURAL", "NETWORK", "SECURITY",
-  "PLATFORM", "STRATEGY", "OPERATIONS", "CENTER"
-].sort((a, b) => b.length - a.length);
-
-function respaceHeading(text) {
-  return String(text || "")
-    .split(/(\s+|-|:|,|\/)/)
-    .map((tok) => (needsRespace(tok) ? greedySplit(tok) : tok))
-    .join("")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-}
-
-function needsRespace(token) {
-  if (token.length < 11) return false;
-  return /^[A-ZÀ-ÖØ-Þ]+$/.test(token); // uppercase-only run (incl. accents)
-}
-
-function greedySplit(token) {
-  const out = [];
-  let i = 0;
-  while (i < token.length) {
-    let matched = "";
-    for (const w of RESPACE_WORDS) {
-      if (token.startsWith(w, i)) { matched = w; break; }
-    }
-    if (matched) {
-      out.push(matched);
-      i += matched.length;
-    } else {
-      // accumulate until the next dictionary word starts
-      let j = i + 1;
-      while (j < token.length && !RESPACE_WORDS.some((w) => token.startsWith(w, j))) j += 1;
-      out.push(token.slice(i, j));
-      i = j;
-    }
-  }
-  return out.join(" ");
-}
-
-// Second pass for prose/notes-style documents (no numbered/keyword headings):
-// a short standalone line without sentence punctuation is very likely a
-// heading (e.g. "Primary recommendation: ShinkaEvolve"). Kept separate from
-// isHeading() because line-wrapped PDF text would produce false positives.
-function detectSectionsLoose(text) {
-  const lines = text.split("\n");
-  const sections = [];
-  let current = null;
-
-  for (const rawLine of lines) {
-    const line = rawLine.replace(/^\[Page \d+\]\s*/i, "").trim();
-    if (!line) continue;
-    if (isHeading(line) || isLooseHeading(line)) {
-      current = { title: cleanHeading(line), body: [] };
-      sections.push(current);
-    } else if (current) {
-      current.body.push(line);
-    } else {
-      current = { title: "Ikhtisar", body: [line] };
-      sections.push(current);
-    }
-  }
-
-  const result = sections
-    .map((s) => ({ title: s.title, body: s.body.join("\n").trim() }))
-    .filter((s) => s.body.length > 40);
-  return result.length >= 3 ? result : [];
-}
-
-function isLooseHeading(line) {
-  if (line.length < 4 || line.length > 60) return false;
-  if (/[.!?;,]$/.test(line)) return false;      // sentence punctuation => prose
-  if (!hasEnoughLetters(line)) return false;
-  if (letterRatio(line) < 0.55) return false;
-  if (!/^[A-Z0-9"“(]/.test(line)) return false; // headings start capitalized
-  return line.split(/\s+/).length <= 8;
-}
+// detectTitle/detectSections/detectSectionsLoose/isHeading/etc. now live in
+// ../document/extractedStructure.js — imported above.
 
 function fallbackSections(text, targetGroups = 6) {
   // No clear headings: split into balanced paragraph groups. Split on line
@@ -380,19 +216,7 @@ function splitSentences(text) {
 }
 
 // --- helpers -----------------------------------------------------------------
-
-function normalize(text) {
-  return String(text || "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function truncate(text, max) {
-  const t = String(text || "").trim();
-  return t.length > max ? t.slice(0, max - 1).trimEnd() + "…" : t;
-}
+// normalize/truncate now come from ../document/extractedStructure.js (imported above).
 
 function clamp(n, lo, hi) {
   return Math.min(hi, Math.max(lo, Math.round(Number(n) || lo)));
