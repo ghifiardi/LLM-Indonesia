@@ -386,7 +386,13 @@ export function mountChatPane({ host }) {
         // complete response is available.
         answer.replaceChildren(tag);
         renderChatMarkdown(answer, result.text);
-        if (intent === "TANYA_DOKUMEN") addDocumentAnswerActions(answer, result);
+        // RINGKAS results had no way to reach the document at all — the user
+        // could read a summary in the chat pane but never insert it, unlike
+        // TANYA_DOKUMEN (full action set) or DRAFT_TEKS (single insert
+        // button). Every insert here still requires the user's own click —
+        // consistent with this pane's existing confirm-gated writes, never
+        // automatic.
+        if (intent === "TANYA_DOKUMEN" || intent === "RINGKAS") addDocumentAnswerActions(answer, result);
       }
       if (result.kind === "edits") {
         const skippedNote = result.skipped?.length

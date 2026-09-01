@@ -90,7 +90,7 @@ Brief:
 """${brief}"""`;
 }
 
-export async function planDeck({ brief, slideCount = 6, tone = "", instruction = "" }) {
+export async function planDeck({ brief, slideCount = 6, tone = "", instruction = "", signal }) {
   const count = clampCount(slideCount);
   // Small local models become slow and structurally fragile when asked to emit
   // 20-30 slide objects in one response. Ask for a dense 12-slide core, then
@@ -108,12 +108,20 @@ export async function planDeck({ brief, slideCount = 6, tone = "", instruction =
     maxTokens: tokenBudgetForSlideCount(coreCount),
     temperature: 0.25,
     task: "deck",
-    jsonMode: true
+    jsonMode: true,
+    signal
   });
   let raw = "";
   try {
     raw = await requestPlan(modelCount);
   } catch (error) {
+    // A user's Cancel must stop the workflow — not retry, not degrade into a
+    // fallback deck that then gets built and inserted anyway. A user cancel
+    // and a budget timeout both surface from runTantular as the same
+    // "terlalu lama" message (see tantularClient.js's AbortError handling),
+    // so this check MUST come before the timeout/retry logic below, or a
+    // deliberate cancel would silently turn "stop" into "try again".
+    if (signal?.aborted) throw error;
     // Slow (CPU-only / low-RAM) machines can time out purely on output
     // length. Retry once with a compact core plan — roughly half the tokens;
     // the deterministic splitter still expands it to the requested count.
@@ -125,6 +133,7 @@ export async function planDeck({ brief, slideCount = 6, tone = "", instruction =
     try {
       raw = await requestPlan(compactCount);
     } catch (retryError) {
+      if (signal?.aborted) throw retryError;
       return { spec: fallbackDeck(brief, count), source: "fallback", error: retryError?.message || String(retryError) };
     }
   }
@@ -629,7 +638,7 @@ Isi bagian:
 ${body}`;
 }
 
-export async function summarizeSlideBullets(headline, bullets, tone = "", instruction = "") {
+export async function summarizeSlideBullets(headline, bullets, tone = "", instruction = "", signal) {
   if (!bullets || !bullets.length) return bullets || [];
   let raw;
   try {
@@ -638,10 +647,14 @@ export async function summarizeSlideBullets(headline, bullets, tone = "", instru
       user: summarizeUser(headline, bullets, tone, instruction),
       maxTokens: 400,
       temperature: 0.2,
-      task: "deck"
+      task: "deck",
+      signal
     });
-  } catch {
-    return bullets; // keep original on failure — reliability first
+  } catch (error) {
+    // A user's Cancel must stop summarizing, not silently keep the original
+    // bullets and move on to the next slide as if nothing happened.
+    if (signal?.aborted) throw error;
+    return bullets; // keep original on a genuine failure — reliability first
   }
   const lines = String(raw || "")
     .split(/\r?\n/)
@@ -656,7 +669,7 @@ export async function summarizeSlideBullets(headline, bullets, tone = "", instru
   return usable.length >= 2 ? usable : bullets;
 }
 
-export async function summarizeDeckSections(spec, tone = "", instruction = "", onProgress = () => {}) {
+export async function summarizeDeckSections(spec, tone = "", instruction = "", onProgress = () => {}, signal) {
   if (!spec?.slides?.length) return spec;
   const targets = spec.slides.filter((s) => s.type === "bullets");
   let done = 0;
@@ -664,7 +677,7 @@ export async function summarizeDeckSections(spec, tone = "", instruction = "", o
   for (const slide of spec.slides) {
     if (slide.type === "bullets") {
       // eslint-disable-next-line no-await-in-loop
-      const bullets = await summarizeSlideBullets(slide.headline, slide.bullets, tone, instruction);
+      const bullets = await summarizeSlideBullets(slide.headline, slide.bullets, tone, instruction, signal);
       slides.push({ ...slide, bullets });
       done += 1;
       onProgress(done, targets.length);
@@ -743,6 +756,9 @@ Teks slide sumber:
       signal
     });
   } catch (error) {
+    // A user's Cancel must stop the workflow, not degrade into a fallback
+    // slide that then gets built and inserted into the presentation anyway.
+    if (signal?.aborted) throw error;
     return { spec: improveFallbackSpec(source), source: "fallback", error: error?.message || String(error) };
   }
 

@@ -71,11 +71,19 @@ function defaultGit(args) {
   return result.status === 0 ? result.stdout : "";
 }
 
-function run(command, args, label) {
+// 2026-08-31: a live deploy went to a BRAND NEW, unrelated Vercel project
+// instead of "workshop-web" (the one office.tantular.ai is actually bound
+// to) because this function used to hardcode cwd:ROOT for every command,
+// including `vercel deploy`. Vercel CLI silently auto-creates and deploys to
+// a fresh project when run from a directory with no `.vercel/project.json`
+// link — the deploy reported success and printed a live-looking URL, but
+// office.tantular.ai never changed. `spawner` is injectable so a test can
+// pin the cwd each call site actually uses without spawning real processes.
+export function run(command, args, label, cwd = ROOT, spawner = spawnSync) {
   process.stdout.write(`\n> ${label}\n`);
   // Never pipe: a pipeline reports the LAST command's status, so a failed build
   // reads as success. That has bitten this repo more than once.
-  const result = spawnSync(command, args, { cwd: ROOT, stdio: "inherit" });
+  const result = spawner(command, args, { cwd, stdio: "inherit" });
   if (result.status !== 0) {
     console.error(`\nGagal: ${label} (exit ${result.status})`);
     process.exit(1);
@@ -137,7 +145,16 @@ function main() {
     return;
   }
 
-  run("vercel", ["deploy", "--prod", "--yes"], "vercel deploy --prod");
+  // MUST run from WEB_DIR: that is where the pre-existing `.vercel/project.json`
+  // links to the actual "workshop-web" project office.tantular.ai is bound to.
+  // Running this from ROOT (the previous behavior, via run()'s old hardcoded
+  // cwd) has no project link of its own there, so the Vercel CLI silently
+  // auto-creates and deploys to a BRAND NEW, unrelated project instead — the
+  // deploy reports success and even prints a live-looking URL, but
+  // office.tantular.ai never changes. This is exactly the failure class the
+  // block comment at the top of this file already warns about: a "successful"
+  // deploy that doesn't actually reach the site anyone visits.
+  run("vercel", ["deploy", "--prod", "--yes"], "vercel deploy --prod", WEB_DIR);
   console.log("\nDeploy selesai. Verifikasi URL live sebelum membagikan tautan.\n");
 }
 

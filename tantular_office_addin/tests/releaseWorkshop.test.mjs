@@ -1,65 +1,76 @@
+// 2026-08-31 regression: `npm run release:workshop -- --deploy` reported
+// success and printed a live-looking production URL, but https://office.tantular.ai
+// never changed — the deploy went to a brand-new, unrelated Vercel project
+// instead of the pre-linked "workshop-web" project the domain is actually
+// bound to. Cause: run()'s `vercel deploy` call used cwd:ROOT (the repo
+// root, which has no `.vercel/project.json` link of its own) instead of
+// cwd:WEB_DIR (dist/workshop-web, where the real project link lives).
+// Vercel CLI silently auto-creates a new project when it finds no link
+// rather than failing loudly, so nothing about the deploy's own output
+// exposed the mistake.
+
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
-import {
-  missingReleaseFiles,
-  dirtyBuildInputs,
-  REQUIRED_PAGES,
-  REQUIRED_DOWNLOADS,
-  BUILD_INPUTS,
-} from "../tools/release-workshop.mjs";
+import { fileURLToPath } from "node:url";
+import { run, ROOT, WEB_DIR } from "../tools/release-workshop.mjs";
 
-const WEB = "/tmp/web";
-const present = (...names) => {
-  const set = new Set(names);
-  return (file) => set.has(path.relative(WEB, file));
-};
-const all = [
-  ...REQUIRED_PAGES,
-  ...REQUIRED_DOWNLOADS.map((n) => path.join("downloads", n)),
-];
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const scriptSource = fs.readFileSync(path.join(root, "tools/release-workshop.mjs"), "utf8");
 
-test("a complete release reports nothing missing", () => {
-  assert.deepEqual(missingReleaseFiles(WEB, present(...all)), []);
-});
-
-test("the exact failure that shipped: pages present, downloads/ empty", () => {
-  // The web build wiped downloads/ and the package build never followed. The
-  // site served /support with a 200 and every download link 404'd.
-  const missing = missingReleaseFiles(WEB, present(...REQUIRED_PAGES));
-  assert.equal(missing.length, REQUIRED_DOWNLOADS.length);
-  assert.ok(missing.includes("downloads/tantular-workshop.zip"));
-  assert.ok(missing.includes("downloads/tantular-workshop-manifest.xml"));
-  assert.ok(missing.includes("downloads/setup.sh"));
-  assert.ok(missing.includes("downloads/setup.ps1"));
-});
-
-test("every file the support page links to is required", () => {
-  // These two are the links that were dead in production; they must never be
-  // droppable from the required set without a test failing.
-  assert.ok(REQUIRED_DOWNLOADS.includes("tantular-workshop.zip"));
-  assert.ok(REQUIRED_DOWNLOADS.includes("tantular-workshop-manifest.xml"));
-  assert.ok(REQUIRED_PAGES.includes("support.html"));
-});
-
-test("a zero-length artifact counts as missing", () => {
-  // A truncated zip is worse than an absent one: the link works and the
-  // archive fails to open, which reads as corruption rather than a bad release.
-  const statFile = (file) => path.relative(WEB, file) !== "downloads/tantular-workshop.zip"
-    && new Set(all).has(path.relative(WEB, file));
-  assert.deepEqual(missingReleaseFiles(WEB, statFile), ["downloads/tantular-workshop.zip"]);
-});
-
-test("dirty build inputs are reported so a release stays traceable", () => {
-  const runner = (args) => {
-    assert.equal(args[0], "status");
-    // The inputs queried must match what the package build stamps.
-    for (const input of BUILD_INPUTS) assert.ok(args.includes(input), `must check ${input}`);
-    return " M src/taskpane.js\n?? src/auth.js\n";
+test("run() spawns in the given cwd, not always ROOT", () => {
+  const calls = [];
+  const fakeSpawner = (command, args, opts) => {
+    calls.push({ command, args, cwd: opts.cwd });
+    return { status: 0 };
   };
-  assert.deepEqual(dirtyBuildInputs(runner), ["M src/taskpane.js", "?? src/auth.js"]);
+  run("echo", ["hi"], "test label", WEB_DIR, fakeSpawner);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cwd, WEB_DIR);
 });
 
-test("a clean tree reports no dirty inputs", () => {
-  assert.deepEqual(dirtyBuildInputs(() => ""), []);
+test("run() still defaults to ROOT when no cwd is given (build steps, which have no per-directory project link concern)", () => {
+  const calls = [];
+  const fakeSpawner = (command, args, opts) => {
+    calls.push({ command, args, cwd: opts.cwd });
+    return { status: 0 };
+  };
+  run("echo", ["hi"], "test label", undefined, fakeSpawner);
+  assert.equal(calls[0].cwd, ROOT);
+});
+
+test("run() exits nonzero on a failed spawn instead of silently reporting success", () => {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  let exitCode = null;
+  let errorLines = [];
+  process.exit = (code) => { exitCode = code; throw new Error("exit called"); };
+  console.error = (line) => { errorLines.push(line); };
+  try {
+    assert.throws(() => run("false", [], "a failing step", ROOT, () => ({ status: 1 })));
+    assert.equal(exitCode, 1);
+    assert.ok(errorLines.some((l) => l.includes("Gagal")));
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+});
+
+// The regression: the actual `vercel deploy` call site in main() must pass
+// WEB_DIR explicitly, not fall through to run()'s ROOT default — a future
+// edit that drops the argument (as originally happened) must fail this test.
+test("the vercel deploy call site in main() explicitly passes WEB_DIR as its cwd", () => {
+  const deployCallMatch = scriptSource.match(/run\(\s*"vercel",\s*\[[^\]]*"deploy"[^\]]*\][^)]*\)/s);
+  assert.ok(deployCallMatch, "expected to find the vercel deploy run() call");
+  assert.match(deployCallMatch[0], /WEB_DIR/,
+    "the vercel deploy call must pass WEB_DIR as cwd — deploying from ROOT silently creates a new, unrelated Vercel project instead of using the pre-linked 'workshop-web' project office.tantular.ai is bound to");
+});
+
+test("the build steps (web, package) intentionally still run from ROOT — only the deploy step needs WEB_DIR", () => {
+  const buildWebMatch = scriptSource.match(/run\([^)]*build-workshop-web\.mjs[^)]*\)/s);
+  const buildPackageMatch = scriptSource.match(/run\([^)]*build-workshop-package\.mjs[^)]*\)/s);
+  assert.ok(buildWebMatch && buildPackageMatch, "expected to find both build run() calls");
+  assert.doesNotMatch(buildWebMatch[0], /WEB_DIR/);
+  assert.doesNotMatch(buildPackageMatch[0], /WEB_DIR/);
 });

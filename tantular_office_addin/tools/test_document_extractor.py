@@ -148,5 +148,90 @@ class ExtractXlsxTests(unittest.TestCase):
         self.assertEqual(text, mod.extract_xlsx(data))
 
 
+def build_pdf(object_bodies):
+    """object_bodies: list of strings, each the body of indirect objects
+    1..N in order (without the 'N 0 obj'/'endobj' wrapper). Returns real PDF
+    bytes with a correct xref table — hand-built the same way build_xlsx()
+    hand-builds real zip/XML above, so extract_pdf() runs against genuine
+    input rather than a mock standing in for one."""
+    buf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for i, body in enumerate(object_bodies, start=1):
+        offsets.append(len(buf))
+        buf.extend(f"{i} 0 obj\n{body}\nendobj\n".encode("latin-1"))
+    xref_offset = len(buf)
+    n = len(object_bodies) + 1
+    xref = f"xref\n0 {n}\n0000000000 65535 f \n"
+    for off in offsets[1:]:
+        xref += f"{off:010d} 00000 n \n"
+    buf.extend(xref.encode("latin-1"))
+    buf.extend(f"trailer\n<< /Size {n} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode("latin-1"))
+    return bytes(buf)
+
+
+def build_textless_pdf():
+    # One page, no /Font in its Resources — the shape of a scanned/screenshot
+    # PDF flattened to an image, with no machine-readable text layer at all.
+    return build_pdf([
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> >>",
+    ])
+
+
+def build_text_pdf(text="Hello World"):
+    content = f"BT /F1 24 Tf 10 100 Td ({text}) Tj ET"
+    content_bytes = content.encode("latin-1")
+    return build_pdf([
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+        "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        f"<< /Length {len(content_bytes)} >>\nstream\n{content}\nendstream",
+    ])
+
+
+def _pdf_library_available():
+    try:
+        import pypdf  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    try:
+        import PyPDF2  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_pdf_library_available(), "no pypdf/PyPDF2 installed in this environment")
+class ExtractPdfTests(unittest.TestCase):
+    def test_pdf_with_real_text_layer_extracts_it(self):
+        data = build_text_pdf("Hello World")
+        text = mod.extract_pdf(data)
+        self.assertEqual(text, "[Page 1]\nHello World")
+
+    def test_scanned_pdf_with_no_text_layer_gives_actionable_ocr_error(self):
+        # A reader genuinely ran (this environment has pypdf) and still found
+        # no text on any page — installing a library will not fix that, so
+        # the error must not suggest it, and must point at the OCR path
+        # (Sumber gambar/screenshot) that actually handles this case.
+        data = build_textless_pdf()
+        with self.assertRaises(ValueError) as ctx:
+            mod.extract_pdf(data)
+        message = str(ctx.exception)
+        self.assertIn("scan/gambar", message)
+        self.assertIn("Sumber gambar/screenshot", message)
+        self.assertNotIn("pypdf", message)
+        self.assertNotIn("pdftotext", message)
+
+    def test_extract_text_dispatches_pdf_extension(self):
+        data = build_text_pdf("dispatch check")
+        text, kind = mod.extract_text("brief.pdf", data)
+        self.assertEqual(kind, "pdf")
+        self.assertEqual(text, mod.extract_pdf(data))
+
+
 if __name__ == "__main__":
     unittest.main()

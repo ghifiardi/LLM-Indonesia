@@ -25,6 +25,57 @@
       }
     })();
   </script>
+  <!-- Demo trace, part 1 of 2: the collector.
+       Buffers console output from the very first line the pane emits, before
+       any module has loaded. traceSink.js decides afterwards whether to keep
+       any of it — by then boot is over, and boot is exactly where the pane's
+       interesting failures happen. ES5 like the guard above, and it removes
+       itself when the companion says tracing is off. -->
+  <script>
+    (function () {
+      if (typeof window.console === "undefined" || typeof window.addEventListener !== "function") return;
+      var LEVELS = ["log", "info", "warn", "error"];
+      var state = { buffer: [], sink: null, original: {}, limit: 200 };
+
+      function textOf(args) {
+        var parts = [];
+        for (var i = 0; i < args.length; i += 1) {
+          var value = args[i];
+          if (typeof value === "string") { parts.push(value); continue; }
+          if (value instanceof Error) { parts.push(value.name + ": " + value.message); continue; }
+          try { parts.push(JSON.stringify(value)); } catch (e) { parts.push(String(value)); }
+        }
+        return parts.join(" ");
+      }
+
+      function record(level, text) {
+        var line = { level: level, text: text, t: new Date().toISOString() };
+        if (state.sink) { state.sink(line); return; }
+        if (state.buffer.length < state.limit) state.buffer.push(line);
+      }
+
+      for (var i = 0; i < LEVELS.length; i += 1) {
+        (function (level) {
+          var original = window.console[level];
+          if (typeof original !== "function") return;
+          state.original[level] = original;
+          window.console[level] = function () {
+            original.apply(window.console, arguments);
+            try { record(level, textOf(arguments)); } catch (e) { /* never disturb the pane */ }
+          };
+        })(LEVELS[i]);
+      }
+
+      window.addEventListener("error", function (event) {
+        record("error", "uncaught: " + event.message + " @ " + event.filename + ":" + event.lineno);
+      });
+      window.addEventListener("unhandledrejection", function (event) {
+        record("error", "unhandled rejection: " + textOf([event.reason]));
+      });
+
+      window.__tantularTrace = state;
+    })();
+  </script>
   <link rel="stylesheet" href="./taskpane.css" />
 </head>
 <body>
@@ -32,7 +83,7 @@
     <header class="hero">
       <div class="mark" aria-hidden="true">T</div>
       <div>
-        <h1>Tantular <small class="build-tag" style="font-size:11px;color:#98a2b3;font-weight:400">host11</small></h1>
+        <h1>Tantular <small class="build-tag" style="font-size:11px;color:#98a2b3;font-weight:400">host12</small></h1>
         <p id="host-subtitle">Asisten privat Bahasa Indonesia untuk Microsoft 365.</p>
       </div>
     </header>
@@ -61,7 +112,7 @@
 
     <section class="card chat hidden" id="chat-card" aria-labelledby="chat-title">
       <div class="section-title-row">
-        <h2 id="chat-title">💬 Tantular Chat <small class="build-tag" style="font-size:10px;color:#98a2b3;font-weight:400">host11</small></h2>
+        <h2 id="chat-title">💬 Tantular Chat <small class="build-tag" style="font-size:10px;color:#98a2b3;font-weight:400">host12</small></h2>
         <button id="chat-context-pill" class="pill pill-button" type="button"
                 title="Konteks yang akan dibaca Tantular">Konteks: —</button>
       </div>
@@ -465,9 +516,17 @@
   }
   </script>
 
-  <!-- entry=host11 is an intentional top-level cache generation. Even when a
+  <!-- Demo trace, part 2 of 2: the sink. Inert unless the local companion
+       reports TANTULAR_TRACE=1; on the hosted build the probe simply fails
+       and the collector above is unwound. -->
+  <script type="module">
+    import { installTraceSink } from "./traceSink.js?entry=host12";
+    installTraceSink().catch(() => {});
+  </script>
+
+  <!-- entry=host12 is an intentional top-level cache generation. Even when a
        long-running dev server still has its previous module-cache token, this
        URL has never existed in Office's WebView cache. -->
-  <script type="module" src="./taskpane.js?entry=host11"></script>
+  <script type="module" src="./taskpane.js?entry=host12"></script>
 </body>
 </html>
