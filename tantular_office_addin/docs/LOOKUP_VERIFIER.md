@@ -267,3 +267,39 @@ Correction, in `answerWithLookup`:
 named in the finding. The verifier (`verifyWebAnswer.js`) is unchanged. The
 `sourceCoverage: "none"` verified shape no longer exists; every verified answer
 now carries citations.
+
+## Live scenarios through the approval gate, 2026-09-02 (build ef28e1f)
+
+Same companion, token and verifier the pane uses; the click replaced by the
+prepare/execute calls. Cards rendered through `renderLookupResultHtml`.
+
+    1 title repeat     "Sahabat-AI dan Transformasi Data"
+                       verified, [S1][S2][S3], document claim unlabelled, no
+                       invented labels                                  PASS
+    2 mixed doc+web    "arsitektur Sahabat-AI Gemma Llama parameter bahasa daerah"
+                       verified, [S1][S2]; document's Gemma 2 9B / Llama 3 8B
+                       and training-language claims unlabelled, web claims
+                       labelled, no invented labels                     PASS
+    3 topical          "Perkembangan Sahabat-AI dan model bahasa Indonesia hingga 2026"
+                       run A (Brave): gate refused invented [DOKUMEN PENGGUNA]
+                       run B (Bing): verifier blocked on "2026" (from the
+                       question); the prose also described the pages instead
+                       of the marker. Nothing shown either time.        SAFE
+    4 regression       exact open-weight query, memo document, Brave
+                       model again wrote the marker and described the page
+                       ("Konten web menjelaskan ...", "Artikel tersebut
+                       membahas ..."); refused — newFacts named "fully open",
+                       "partially open"; the phrase rule would have refused it
+                       next. Red "Jawaban ditahan" card, nothing shown. CLOSED
+
+Nothing uncited reached the pane; no invented label reached the pane.
+Composer defects seen and contained: invented [DOKUMEN PENGGUNA] (1 of 4),
+described-pages prose under the marker (2 of 4). The mixed query as a
+comparison sentence ("Bandingkan klaim dokumen ...") found no relevant page;
+it had to be rephrased as search terms.
+
+Operational: Brave rate-limited this IP three times in the session; after an
+episode its budget was about one request. `TANTULAR_LOOKUP_MAX_PAGES=1` cuts
+each lookup to one search request. The verifier blocked a question-supplied
+year ("2026") in scenario 3B; the citation gate already permits question
+figures on its own path. Noted, not changed.
