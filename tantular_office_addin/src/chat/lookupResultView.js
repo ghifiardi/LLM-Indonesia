@@ -40,7 +40,17 @@ const REASON_MESSAGES = Object.freeze({
   mismatch: "Query berubah setelah disetujui.",
   expired: "Persetujuan kedaluwarsa.",
   unknown_token: "Permintaan tidak dikenal atau sudah dipakai.",
-  declined: "Dibatalkan. Tidak ada yang dikirim keluar."
+  declined: "Dibatalkan. Tidak ada yang dikirim keluar.",
+  // Discovery ran and came back empty-handed. Three different empty hands, and
+  // the first is the one users hit: the adapters always return SOMETHING, and
+  // an off-topic page is now discarded before the model ever sees it.
+  no_relevant_sources: "Sumber yang ditemukan tidak membahas pertanyaan "
+    + "ini. Coba ubah query agar lebih spesifik.",
+  no_fetchable_sources: "Sumber yang ditemukan tidak dapat diambil.",
+  no_allowed_results: "Tidak ada hasil dari domain yang diizinkan.",
+  provider_error: "Provider pencarian tidak dapat dihubungi.",
+  provider_rate_limited: "Penyedia pencarian sedang membatasi permintaan. Coba lagi "
+    + "beberapa saat atau gunakan penyedia lain."
 });
 
 // Refusals that happen BEFORE any answer exists. Rendering these as "the
@@ -51,8 +61,25 @@ const NO_ANSWER_REASONS = new Set([
   "declined", "empty_query", "empty_selection", "empty_document",
   "host_unavailable", "unsupported_host", "read_failed", "disabled",
   "cloud_session", "not_local", "companion_unreachable", "no_document",
-  "host_not_allowed", "no_adapter", "busy"
+  "host_not_allowed", "no_adapter", "busy",
+  // No source was retrieved, so no answer was ever composed. Rendering these
+  // as "the answer failed verification" would blame the user's document for a
+  // search that found nothing.
+  "no_relevant_sources", "no_fetchable_sources", "no_allowed_results",
+  "provider_error", "provider_rate_limited"
 ]);
+
+// A source's tier in the user's terms. "public" is a site nobody vouched for;
+// the label says so plainly rather than leaking the machine name.
+const TIER_LABELS = Object.freeze({
+  official: "resmi",
+  "trusted-reference": "referensi tepercaya",
+  public: "web umum"
+});
+
+export function tierLabel(tier) {
+  return TIER_LABELS[String(tier || "")] || String(tier || "");
+}
 
 export function explainFindings(findings) {
   if (!findings || typeof findings !== "object") return [];
@@ -86,7 +113,14 @@ export function lookupResultView(response) {
     return {
       state: "verified", canEdit: true, answer: String(response.answer),
       title: "Jawaban terverifikasi",
-      message: "Jawaban ini sudah dicocokkan dengan dokumen Anda.",
+      // A verified answer built with NO usable web source is still verified —
+      // against the document. Saying so keeps the badge honest: the user must
+      // not read "terverifikasi" as "the web confirmed this".
+      message: response.sourceCoverage === "none"
+        ? "Sumber web yang diambil tidak memuat jawabannya. Teks ini hanya "
+          + "berdasarkan dokumen Anda."
+        : "Jawaban ini sudah dicocokkan dengan dokumen Anda.",
+      sourceCoverage: response.sourceCoverage === "none" ? "none" : "sources",
       findings: [], host,
       // What was checked, so "terverifikasi" is inspectable rather than a badge.
       protectedStrings: Array.isArray(response.protected)
@@ -142,12 +176,17 @@ export function renderLookupResultHtml(response) {
       ? `<div class="lookup-sources"><strong>Sumber yang benar-benar diambil:</strong><ul>`
         + view.sources.map((source) =>
           `<li>${escapeHtml(source.id)} — ${escapeHtml(source.title)} `
-          + `(${escapeHtml(source.tier)}): ${escapeHtml(source.url)}</li>`).join("")
+          + `(${escapeHtml(tierLabel(source.tier))}): ${escapeHtml(source.url)}</li>`).join("")
         + `</ul></div>`
       : "";
+    // The one case where a verified answer needs a caveat on screen: it passed
+    // against the DOCUMENT, and the web sources contributed nothing.
+    const coverageNote = view.sourceCoverage === "none"
+      ? `<div class="lookup-note">${escapeHtml(view.message)}</div>` : "";
     return `<div class="lookup-result lookup-verified" data-state="verified">`
       + `<div class="lookup-title">✅ ${escapeHtml(view.title)}</div>`
       + hostLine
+      + coverageNote
       + `<div class="lookup-answer">${escapeHtml(view.answer)}</div>`
       + sources
       + checked

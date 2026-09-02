@@ -727,7 +727,7 @@ function setUpLookup() {
       }
       if (els.lookupHost) els.lookupHost.disabled = Boolean(state.lookupDiscovery);
       if (els.lookupRun && state.lookupDiscovery) {
-        els.lookupRun.textContent = "Tinjau query dan cari sumber resmi";
+        els.lookupRun.textContent = "Tinjau query dan cari sumber web";
       }
       // The picker lists exactly what the companion's allowlist allows. The
       // pane never invents a host: enforcement stays server-side, this is a

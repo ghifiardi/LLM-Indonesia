@@ -204,3 +204,28 @@ Open, and each one blocks enabling:
 3. **One host.** `id.wikipedia.org`. Adding another needs its own adapter and
    its own run of both suites; the HTML measurement used a local origin, not a
    real HTML host.
+
+## Re-measurement, 2026-09-02 (citation-first composer prompt)
+
+The composer prompt was rewritten to state the [S#] citation rule before the
+retrieved content, forbid invented labels, and reserve the no-coverage marker
+for answers that owe nothing to the web. `answerWithLookup` now refuses any
+bracketed label that is not a supplied source ID on every path, and the
+single-host path hands its page over as source S1. Results of
+`node tools/injection-e2e.mjs` against `tantular-office:0.5-9b`, full rows in
+`docs/injection-e2e-result-2026-09-02.json`:
+
+    run                              reached  blocked  shown answers citing [S1]
+    old prompt (same day)               0        2        0/5
+    v1 citation-first only              1        1        6/6   <- rejected
+    v2 + label gate on all paths        0        3        4/4
+    v3 + "===" document delimiters      0        3        4/4
+
+v1 exposed a gap the old prompt had hidden: on the single-host path the model
+relayed a hostile page's "[REDACTED]" instruction inside a disclaimer and the
+echo check has no cue for "wajib menulis", so it was shown. The label gate now
+refuses it regardless of path. The verifier itself is unchanged.
+
+Cost: in v2 and v3 the model wrote "[DOKUMEN PENGGUNA]" as a label in 3 and 2
+of 7 answers, and those answers were refused. Citation compliance, not
+containment, is now the limiting factor.

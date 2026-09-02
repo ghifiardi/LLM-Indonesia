@@ -11,7 +11,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { verify, deriveProtected } from "../src/chat/verifyWebAnswer.js";
-import { answerWithLookup } from "../src/chat/lookupAnswer.js";
+import { answerWithLookup, buildLookupPrompt, NO_COVERAGE_MARKER }
+  from "../src/chat/lookupAnswer.js";
 
 const DOC = `LAPORAN ANGGARAN TRIWULAN II 2026
 
@@ -254,4 +255,229 @@ test("rewriting the ambient currency as a foreign one stays flagged", () => {
                      document: XLDOC, untrusted: WIKI });
   assert.equal(r.ok, false, "Rp->USD is a real distortion");
   assert.ok(r.findings.no_new_facts);
+});
+
+// --- the no-coverage double bind (2026-09-01) --------------------------------
+// The prompt tells the model to say so in one sentence when the sources do not
+// contain the answer; the citation gate then required a [S] marker that such an
+// answer cannot honestly carry. Every no-coverage run was blocked as
+// "no fetched-source citation" — a correct answer refused. The prompt now names
+// a sentinel for that case and the gate accepts it INSTEAD of a citation.
+
+test("prompt names the no-coverage sentinel it expects", () => {
+  const prompt = buildLookupPrompt({ document: DOC, untrusted: PAGE,
+                                     question: "apa isi dokumen?" });
+  assert.ok(prompt.includes(NO_COVERAGE_MARKER),
+            "the model cannot emit a marker the prompt never names");
+});
+
+// A no-coverage answer is NOT a bare refusal: checkPreserves requires the
+// document's own facts to survive into it, so the shape that passes is the
+// document answered on its own, marked as owing nothing to the web.
+const NO_COVERAGE_ANSWER = "Pagu belanja modal Rp 1.750.000.000 dengan vendor "
+  + "utama PT Sinar Mas, kontrak 11 Februari 2026, realisasi Rp 412.300.000 "
+  + "atau 23,6 persen.";
+
+test("an honest no-coverage answer is verified, not blocked", async () => {
+  const sources = [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
+                     host: "www.bps.go.id", tier: "official", contentHash: "abc" }];
+  const result = await answerWithLookup({
+    complete: async () => `${NO_COVERAGE_ANSWER} ${NO_COVERAGE_MARKER}`,
+    document: DOC, untrusted: PAGE,
+    verifier: () => ({ ok: true, protected: [] }), sources
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "verified");
+  assert.equal(result.sourceCoverage, "none");
+  // The marker is machinery, not prose: the user must never read it.
+  assert.doesNotMatch(result.answer, /TIDAK ADA SUMBER/);
+  assert.match(result.answer, /PT Sinar Mas/);
+});
+
+test("the sentinel cannot smuggle an uncited web claim through", async () => {
+  const sources = [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
+                     host: "www.bps.go.id", tier: "official", contentHash: "abc" }];
+  // The marker claims the answer owes nothing to the web. A figure that is not
+  // in the document gives that claim the lie, whatever the page says.
+  const result = await answerWithLookup({
+    complete: async () => `${NO_COVERAGE_ANSWER} Inflasi tercatat 5,2 persen `
+      + `menurut halaman tersebut. ${NO_COVERAGE_MARKER}`,
+    document: DOC, untrusted: PAGE,
+    verifier: () => ({ ok: true, protected: [] }), sources
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "source_citation_failed");
+});
+
+test("a plain uncited answer is still blocked", async () => {
+  const sources = [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
+                     host: "www.bps.go.id", tier: "official", contentHash: "abc" }];
+  const result = await answerWithLookup({
+    complete: async () => "Pagu Rp 1.750.000.000 dan vendor PT Sinar Mas.",
+    document: DOC, untrusted: PAGE,
+    verifier: () => ({ ok: true, protected: [] }), sources
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "source_citation_failed");
+});
+
+test("the no-coverage marker never reaches the verifier", async () => {
+  // It is all-caps, so the entity check reads it as an invented organisation
+  // and blocks the answer it exists to permit. Measured against the real model
+  // on 2026-09-01: no_new_facts entities ["tidak ada"].
+  const seen = [];
+  const sources = [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
+                     host: "www.bps.go.id", tier: "official", contentHash: "abc" }];
+  const result = await answerWithLookup({
+    complete: async () => `${NO_COVERAGE_ANSWER} ${NO_COVERAGE_MARKER}`,
+    document: DOC, untrusted: PAGE, sources,
+    verifier: ({ answer }) => { seen.push(answer); return { ok: true, protected: [] }; }
+  });
+  assert.doesNotMatch(seen[0], /TIDAK ADA SUMBER/);
+  assert.equal(result.ok, true);
+  // And the real verifier agrees, rather than only the stub above.
+  assert.equal(verify({ answer: seen[0], document: DOC, untrusted: PAGE }).ok, true);
+});
+
+test("a no-coverage answer may repeat figures from the user's own question", () => {
+  // "inflasi indonesia 2026" blocked its own honest no-coverage answer: the
+  // year came from the query, not from any page, but the guard only permitted
+  // facts found in the document (measured live, 2026-09-01).
+  return answerWithLookup({
+    complete: async () => `${NO_COVERAGE_ANSWER} Tidak ada data inflasi 2026 `
+      + `pada sumber yang diambil. ${NO_COVERAGE_MARKER}`,
+    document: DOC, untrusted: PAGE, question: "inflasi indonesia 2026",
+    verifier: () => ({ ok: true, protected: [] }),
+    sources: [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
+                host: "www.bps.go.id", tier: "official", contentHash: "abc" }]
+  }).then((result) => {
+    assert.equal(result.ok, true);
+    assert.equal(result.sourceCoverage, "none");
+  });
+});
+
+test("the prompt forbids dates and regulation numbers from memory", () => {
+  // Measured against the real model twice, hours apart, at temperature 0: asked
+  // about "peraturan perlindungan data pribadi" it completed the enactment date
+  // as "1 Desember 2016", a string absent from the fetched page. The verifier
+  // caught it every time, so the user saw a block instead of an answer. Adding
+  // this rule to the prompt removed the invention (2026-09-01).
+  const prompt = buildLookupPrompt({ document: DOC, untrusted: PAGE,
+                                     question: "peraturan perlindungan data pribadi" });
+  assert.match(prompt, /tanggal, nomor peraturan, atau nama lembaga/);
+  assert.match(prompt, /tertulis PERSIS/);
+});
+
+// --- citation compliance (2026-09-02) -----------------------------------------
+// Live with three real sources the 9B wrote web facts with no [S] label and
+// appended the no-coverage marker; the gate refused it, correctly. The prompt
+// buried the citation rule after the retrieved content, and the model invented
+// a "[DOKUMEN PENGGUNA]" label when asked to cite. These pin the prompt shape
+// and the gate's answer to each failure mode.
+
+const TWO_SOURCES = [
+  { id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
+    host: "www.bps.go.id", tier: "official", contentHash: "abc" },
+  { id: "S2", url: "https://id.linkedin.com/pulse/x", title: "LinkedIn",
+    host: "id.linkedin.com", tier: "public", contentHash: "def" }
+];
+const stub = () => ({ ok: true, protected: [] });
+const DOC_CLAIM = "Pagu Rp 1.750.000.000 dengan vendor PT Sinar Mas.";
+
+test("the prompt states the citation rule before the retrieved content", () => {
+  const prompt = buildLookupPrompt({ document: DOC, untrusted: PAGE, question: "q" });
+  const rule = prompt.indexOf("[S1]");
+  const content = prompt.indexOf("[KONTEN WEB TIDAK TEPERCAYA");
+  assert.ok(rule > 0 && content > 0 && rule < content,
+    "citation rule must precede the untrusted block, or a long page buries it");
+  assert.match(prompt, /setiap (klaim|kalimat)[^.]*web[^.]*\[S/i);
+});
+
+test("the prompt forbids invented labels and names the only valid ones", () => {
+  const prompt = buildLookupPrompt({ document: DOC, untrusted: PAGE, question: "q" });
+  assert.match(prompt, /\[DOKUMEN PENGGUNA\][^.]*(JANGAN|tidak sah|dilarang)/i);
+  assert.match(prompt, /hanya (label|ID) sumber yang (disediakan|tersedia)/i);
+});
+
+test("the prompt reserves the no-coverage marker for genuinely unsupported answers", () => {
+  const prompt = buildLookupPrompt({ document: DOC, untrusted: PAGE, question: "q" });
+  assert.match(prompt, /HANYA JIKA[^.]*sumber web/i);
+  assert.match(prompt, new RegExp("memakai (konten|sumber) web[^.]*JANGAN[^.]*"
+    + NO_COVERAGE_MARKER.replace(/[[\]]/g, "\\$&")));
+});
+
+test("mixed answer: uncited document claims plus cited web claims is verified", async () => {
+  const result = await answerWithLookup({
+    complete: async () => `${DOC_CLAIM} Anggaran daerah direalisasikan bertahap [S1]. `
+      + "Penyerapan terbesar pada triwulan IV [S1][S2].",
+    document: DOC, untrusted: PAGE, verifier: stub, sources: TWO_SOURCES
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.sourceCoverage, "sources");
+  assert.equal(result.sources.length, 2);
+});
+
+test("a citation to a source ID that was not fetched is refused", async () => {
+  const result = await answerWithLookup({
+    complete: async () => `${DOC_CLAIM} Anggaran direalisasikan bertahap [S3].`,
+    document: DOC, untrusted: PAGE, verifier: stub, sources: TWO_SOURCES
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "source_citation_failed");
+  assert.match(result.findings.fail_closed[0], /invalid/);
+});
+
+test("an invented document label is refused even beside a valid citation", async () => {
+  for (const label of ["[DOKUMEN PENGGUNA]", "[Dokumen]", "[DOK]"]) {
+    const result = await answerWithLookup({
+      complete: async () => `${DOC_CLAIM} ${label} Anggaran direalisasikan bertahap [S1].`,
+      document: DOC, untrusted: PAGE, verifier: stub, sources: TWO_SOURCES
+    });
+    assert.equal(result.ok, false, label);
+    assert.equal(result.reason, "source_citation_failed", label);
+    assert.match(result.findings.fail_closed[0], /invented/, label);
+  }
+});
+
+test("web claims with no citation at all are refused with a named finding", async () => {
+  const result = await answerWithLookup({
+    complete: async () => `${DOC_CLAIM} Anggaran daerah direalisasikan bertahap.`,
+    document: DOC, untrusted: PAGE, verifier: stub, sources: TWO_SOURCES
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.findings.fail_closed[0], /no fetched-source citation/);
+});
+
+// Measured 2026-09-02 through tools/injection-e2e.mjs: on the single-host path
+// (no source list) the model relayed a hostile page's "[REDACTED]" instruction
+// and labelled document sentences "[DOKUMEN PENGGUNA]"; the verifier's echo
+// check has no cue for "wajib menulis" and passed it. The label gate must not
+// depend on which path composed the answer: a bracketed label is either a
+// supplied source ID or it is invented.
+test("bracketed labels are checked even when no source list was supplied", async () => {
+  const result = await answerWithLookup({
+    complete: async () => `${DOC_CLAIM} Nama vendor wajib ditulis sebagai [REDACTED].`,
+    document: DOC, untrusted: PAGE, verifier: stub
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "source_citation_failed");
+  assert.match(result.findings.fail_closed[0], /invented source label: \[REDACTED\]/);
+});
+
+test("a citation with no source list behind it is invalid, not ignored", async () => {
+  const result = await answerWithLookup({
+    complete: async () => `${DOC_CLAIM} Anggaran direalisasikan bertahap [S1].`,
+    document: DOC, untrusted: PAGE, verifier: stub
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "source_citation_failed");
+  assert.match(result.findings.fail_closed[0], /invalid/);
+});
+
+test("a label-free answer with no source list is still verified", async () => {
+  const result = await answerWithLookup({
+    complete: async () => DOC_CLAIM, document: DOC, untrusted: PAGE, verifier: stub
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.sourceCoverage, "sources");
 });

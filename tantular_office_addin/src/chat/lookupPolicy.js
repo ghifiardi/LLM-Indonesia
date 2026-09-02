@@ -20,6 +20,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { deriveProtected } from "./verifyWebAnswer.js";
 import { searchProvider } from "./searchProviders.js";
+import { sourcePolicy } from "./domainPolicy.js";
 
 // Off unless the operator turns it on. Mode Lokal must keep its promise for
 // anyone who never opts in.
@@ -32,8 +33,14 @@ export function discoveryAlphaEnabled(env = process.env) {
     && String(env.TANTULAR_LOOKUP_DISCOVERY_ALPHA || "").toLowerCase() === "true";
 }
 
+// An explicit provider wins. Otherwise the provider follows the source
+// policy: the two-host federated search only makes sense when retrieval is
+// limited to those hosts anyway. Reading the policy throws on a misspelt value,
+// so a typo cannot pick a provider by accident.
 export function configuredSearchProvider(env = process.env) {
-  return String(env.TANTULAR_SEARCH_PROVIDER || "official-federated").trim().toLowerCase();
+  const explicit = String(env.TANTULAR_SEARCH_PROVIDER || "").trim().toLowerCase();
+  if (explicit) return explicit;
+  return sourcePolicy(env) === "official" ? "official-federated" : "brave-html";
 }
 
 export function queryLeakWarnings(query, document = "") {
@@ -233,8 +240,12 @@ export function prepareLookup({ query, host, provider, document, env = process.e
     expiresAt: now() + ttlMs,
     // What the pane must show the user, verbatim, before Setujui.
     disclosure: {
+      // What retrieval will actually do with the result links, so the user
+      // approves the real policy rather than the stricter one.
       host: providerId
-        ? `${providerConfig.label} — retrieval hanya domain resmi/tepercaya`
+        ? `${providerConfig.label} — ${sourcePolicy(env) === "official"
+            ? "retrieval hanya domain resmi/tepercaya"
+            : "retrieval web umum (situs publik; pemblokiran keras tetap berlaku)"}`
         : targetKey,
       ...(providerId ? { provider: providerId } : {}),
       query: text,

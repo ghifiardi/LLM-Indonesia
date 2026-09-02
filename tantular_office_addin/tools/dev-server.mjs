@@ -15,11 +15,12 @@ import {
 } from "../src/chat/ollamaBridge.js";
 import {
   lookupEnabled, allowedHosts, describedHosts, prepareLookup, authorizeExecution,
-  auditRecord, wrapUntrusted, resolveUrl, auditKey,
+  auditRecord, resolveUrl, auditKey,
   discoveryAlphaEnabled, configuredSearchProvider
 } from "../src/chat/lookupPolicy.js";
 import { answerWithLookup } from "../src/chat/lookupAnswer.js";
 import { discoverAndRetrieve, sourcesAsUntrusted } from "../src/chat/discovery.js";
+import { sourcePolicy, classifyDomain } from "../src/chat/domainPolicy.js";
 import {
   buildRefinePrompt,
   deterministicRefineResult,
@@ -29,6 +30,9 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const LOOKUP_MODEL = process.env.TANTULAR_LOOKUP_MODEL || "tantular-office:0.5-9b";
+// Fail at startup on a misspelt source policy. Serving requests with a value
+// nobody recognises would mean picking a retrieval policy for the user.
+const SOURCE_POLICY = sourcePolicy(process.env);
 
 // Opt-in, local-only diagnosis. The verifier's findings deliberately never
 // quote hostile literals, which also means a false positive on a REAL page
@@ -42,6 +46,17 @@ if (process.env.TANTULAR_LOOKUP_DEBUG === "true") {
     catch { /* diagnosis must never break the request */ }
   };
   console.log(`[debug] lookup diagnosis on: ${debugPath}`);
+}
+
+// One place decides what a blocked answer looks like in the debug log, so the
+// discovery path and the single-host path cannot drift — they did, and the
+// path with no dump was the one that failed in the field.
+function debugBlocked(composed) {
+  if (composed?.ok !== false) return;
+  if (process.env.TANTULAR_LOOKUP_DEBUG !== "true") return;
+  globalThis.__lookupDebug?.(`blocked reason=${composed.reason} `
+    + `findings=${JSON.stringify(composed.findings)} `
+    + `answer=${JSON.stringify(String(composed.answerForDebug || ""))}`);
 }
 
 // --- demo trace: pairs a screen recording with what the pane actually did ---
@@ -370,7 +385,10 @@ function handler(req, res) {
                              discovery: {
                                enabled: discoveryAlphaEnabled(),
                                provider: configuredSearchProvider(),
-                               policy: "default-deny-official-and-trusted-reference"
+                               sourcePolicy: SOURCE_POLICY,
+                               policy: SOURCE_POLICY === "official"
+                                 ? "default-deny-official-and-trusted-reference"
+                                 : "open-web-hard-blocks-only"
                              } }));
     return;
   }
@@ -452,12 +470,27 @@ function handler(req, res) {
           audit: auditDiscovery
         });
         if (!discovered.ok) {
-          return reply(502, {
+          appendLookupAudit(auditRecord({
+            key: lookupAuditKey, query, provider, approved: true,
+            outcome: `no_sources:${discovered.reason}`, stage: "retrieve"
+          }));
+          // "Nothing relevant was found" is a RESULT — the search ran, the
+          // pages came back, none were about the question. Reporting it as 502
+          // told the pane a transport failed and hid the one thing the user
+          // needs to know: to rephrase the query.
+          const transportFailure = discovered.reason === "provider_error"
+            || discovered.reason === "provider_rate_limited";
+          return reply(transportFailure ? 502 : 200, {
             ok: false,
             reason: discovered.reason,
-            message: discovered.reason === "provider_error"
+            message: discovered.reason === "provider_rate_limited"
+              ? "Penyedia pencarian sedang membatasi permintaan. Coba lagi "
+                + "beberapa saat atau gunakan penyedia lain."
+              : transportFailure
               ? "Provider pencarian alpha tidak dapat dihubungi."
-              : "Tidak ada sumber resmi/tepercaya yang dapat diambil."
+              : discovered.reason === "no_relevant_sources"
+                ? "Sumber yang ditemukan tidak membahas pertanyaan ini."
+                : "Tidak ada sumber yang dapat diambil."
           });
         }
         const composed = await answerWithLookup({
@@ -472,9 +505,11 @@ function handler(req, res) {
           outcome: composed.ok ? "verified" : `blocked_by_verifier:${composed.reason}`,
           stage: "verify"
         }));
-        if (!composed.ok) {
-          return reply(200, { ...composed, provider });
-        }
+        // Same diagnosis as the single-host branch below. Without it a block
+        // on the discovery path showed a reason and no answer text, which is
+        // exactly the case that needs the text to be diagnosed at all
+        // (2026-09-01: source_citation_failed, cause invisible in the log).
+        debugBlocked(composed);
         return reply(200, { ...composed, provider });
       }
 
@@ -518,13 +553,24 @@ function handler(req, res) {
         // against the user's document, and checked before anything is
         // returned — because the model obeys hostile pages 3 times in 7 and
         // the pane cannot tell a corrupted answer from a good one.
+        // The fetched page is source S1, in the same labelled shape the
+        // discovery path uses. Before this the single-host path handed the
+        // model an unlabelled block and the composer no source list, so a
+        // "[S1]" it wrote was unverifiable and a "[REDACTED]" it relayed from
+        // a hostile page went unchecked (injection harness, 2026-09-02).
+        const singleSource = {
+          id: "S1", url: target, title: authorized.entry.host,
+          host: authorized.entry.host, tier: classifyDomain(target).tier,
+          text: text.slice(0, 20_000)
+        };
         const composed = await answerWithLookup({
           document: String(body?.document || ""),
           // Use the token-bound query, not a separate caller-supplied question.
           // This is the exact text the user reviewed and the companion
           // authorized before it left the machine.
           question: authorized.entry.query,
-          untrusted: wrapUntrusted(authorized.entry.host, text.slice(0, 20_000)),
+          untrusted: sourcesAsUntrusted([singleSource]),
+          sources: [singleSource],
           complete: (prompt) => completeLocally(prompt)
         });
         appendLookupAudit(auditRecord({ key: lookupAuditKey,
@@ -532,11 +578,7 @@ function handler(req, res) {
           approved: true,
           outcome: composed.ok ? "verified" : `blocked_by_verifier:${composed.reason}`
         }));
-        if (!composed.ok && process.env.TANTULAR_LOOKUP_DEBUG === "true") {
-          globalThis.__lookupDebug?.(`blocked reason=${composed.reason} `
-            + `findings=${JSON.stringify(composed.findings)} `
-            + `answer=${JSON.stringify(String(composed.answerForDebug || ""))}`);
-        }
+        debugBlocked(composed);
         if (!composed.ok) {
           // 200, not an error status: the lookup ran correctly and the answer
           // was refused. The pane must render this as "not trusted", which is

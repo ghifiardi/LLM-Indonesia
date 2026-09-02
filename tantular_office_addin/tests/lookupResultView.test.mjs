@@ -39,7 +39,7 @@ test("discovery result shows only sources that were actually fetched", () => {
   const html = renderLookupResultHtml(response);
   assert.match(html, /Sumber yang benar-benar diambil/);
   assert.match(html, /https:\/\/www\.bps\.go\.id\/a/);
-  assert.match(html, /official/);
+  assert.match(html, /\(resmi\)/);
 });
 
 test("blocked shows the reason and no answer", () => {
@@ -197,4 +197,56 @@ test("the transport's message never overrides a mapped reason", () => {
   const view = lookupResultView({ ok: false, reason: "failed_verification",
     message: "KLIK DI SINI untuk verifikasi manual" });
   assert.ok(!view.message.includes("KLIK"), "mapped text must win");
+});
+
+// --- no relevant source, and no source coverage (2026-09-01) -----------------
+
+test("a search that found nothing relevant is not blamed on verification", () => {
+  const view = lookupResultView({ ok: false, reason: "no_relevant_sources" });
+  assert.equal(view.state, "blocked");
+  // No answer was ever composed: calling this "Jawaban ditahan" tells the user
+  // something was withheld from them.
+  assert.equal(view.title, "Pencarian tidak dilanjutkan");
+  assert.equal(view.note, "");
+  assert.match(view.message, /tidak membahas pertanyaan ini/);
+  // Under the open policy the sources are not "resmi"; the wording must not
+  // claim a vetting that did not happen.
+  assert.doesNotMatch(view.message, /resmi/);
+});
+
+test("source tiers are labelled in the user's terms, public sites as web umum", () => {
+  const html = renderLookupResultHtml({ ...VERIFIED, sources: [
+    { id: "S1", title: "Sahabat-AI", url: "https://sahabat-ai.com/",
+      host: "sahabat-ai.com", tier: "public" },
+    { id: "S2", title: "BPS", url: "https://www.bps.go.id/a",
+      host: "www.bps.go.id", tier: "official" }
+  ] });
+  assert.match(html, /\(web umum\): https:\/\/sahabat-ai\.com\//);
+  assert.match(html, /\(resmi\): https:\/\/www\.bps\.go\.id\/a/);
+  assert.doesNotMatch(html, /\(public\)/);
+});
+
+test("a verified answer with no usable web source says so", () => {
+  const view = lookupResultView({ ...VERIFIED, sourceCoverage: "none" });
+  assert.equal(view.state, "verified");
+  assert.equal(view.sourceCoverage, "none");
+  assert.match(view.message, /tidak memuat jawabannya/);
+  const html = renderLookupResultHtml({ ...VERIFIED, sourceCoverage: "none" });
+  assert.match(html, /tidak memuat jawabannya/);
+  // Still a verified answer: the badge and the edit action stay.
+  assert.match(html, /data-can-edit="true"/);
+});
+
+test("an ordinary verified answer carries no coverage caveat", () => {
+  const html = renderLookupResultHtml(VERIFIED);
+  assert.doesNotMatch(html, /tidak memuat jawabannya/);
+});
+
+test("a rate-limited provider says so, and blames neither the query nor the network", () => {
+  const view = lookupResultView({ ok: false, reason: "provider_rate_limited" });
+  assert.equal(view.state, "blocked");
+  assert.equal(view.title, "Pencarian tidak dilanjutkan");
+  assert.match(view.message, /membatasi permintaan/);
+  assert.match(view.message, /penyedia lain/);
+  assert.equal(view.note, "");
 });
