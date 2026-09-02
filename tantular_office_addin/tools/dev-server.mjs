@@ -502,7 +502,9 @@ function handler(req, res) {
         });
         appendLookupAudit(auditRecord({
           key: lookupAuditKey, query, provider, approved: true,
-          outcome: composed.ok ? "verified" : `blocked_by_verifier:${composed.reason}`,
+          outcome: composed.ok ? "verified"
+            : composed.status === "no_coverage" ? "no_coverage"
+            : `blocked_by_verifier:${composed.reason}`,
           stage: "verify"
         }));
         // Same diagnosis as the single-host branch below. Without it a block
@@ -576,7 +578,9 @@ function handler(req, res) {
         appendLookupAudit(auditRecord({ key: lookupAuditKey,
           query: authorized.entry.query, host: authorized.entry.host,
           approved: true,
-          outcome: composed.ok ? "verified" : `blocked_by_verifier:${composed.reason}`
+          outcome: composed.ok ? "verified"
+            : composed.status === "no_coverage" ? "no_coverage"
+            : `blocked_by_verifier:${composed.reason}`
         }));
         debugBlocked(composed);
         if (!composed.ok) {

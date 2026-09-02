@@ -278,7 +278,13 @@ const NO_COVERAGE_ANSWER = "Pagu belanja modal Rp 1.750.000.000 dengan vendor "
   + "utama PT Sinar Mas, kontrak 11 Februari 2026, realisasi Rp 412.300.000 "
   + "atau 23,6 persen.";
 
-test("an honest no-coverage answer is verified, not blocked", async () => {
+// STRUCTURAL since 2026-09-02 16:55: a no-coverage answer's prose is never
+// shown. The model's document-only text was the escape hatch — "konten web
+// menjelaskan bahwa model open-weights ..." carried no new number or entity
+// and reached the user under a "hanya berdasarkan dokumen Anda" note. The
+// companion now answers that case itself, deterministically, and lists what
+// was fetched so the user can see what did not help.
+test("an honest no-coverage answer becomes the deterministic companion response", async () => {
   const sources = [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
                      host: "www.bps.go.id", tier: "official", contentHash: "abc" }];
   const result = await answerWithLookup({
@@ -286,12 +292,15 @@ test("an honest no-coverage answer is verified, not blocked", async () => {
     document: DOC, untrusted: PAGE,
     verifier: () => ({ ok: true, protected: [] }), sources
   });
-  assert.equal(result.ok, true);
-  assert.equal(result.status, "verified");
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "no_coverage");
+  assert.equal(result.reason, "no_coverage");
   assert.equal(result.sourceCoverage, "none");
-  // The marker is machinery, not prose: the user must never read it.
-  assert.doesNotMatch(result.answer, /TIDAK ADA SUMBER/);
-  assert.match(result.answer, /PT Sinar Mas/);
+  assert.equal(result.answer, undefined, "no model prose on this path");
+  assert.equal(result.canEdit, undefined);
+  assert.match(result.message, /tidak menyediakan informasi yang cukup/);
+  assert.equal(result.sources.length, 1);
+  assert.equal(result.sources[0].url, sources[0].url);
 });
 
 test("the sentinel cannot smuggle an uncited web claim through", async () => {
@@ -334,7 +343,8 @@ test("the no-coverage marker never reaches the verifier", async () => {
     verifier: ({ answer }) => { seen.push(answer); return { ok: true, protected: [] }; }
   });
   assert.doesNotMatch(seen[0], /TIDAK ADA SUMBER/);
-  assert.equal(result.ok, true);
+  // The verifier passed it; the structural no-coverage response then took over.
+  assert.equal(result.reason, "no_coverage");
   // And the real verifier agrees, rather than only the stub above.
   assert.equal(verify({ answer: seen[0], document: DOC, untrusted: PAGE }).ok, true);
 });
@@ -344,14 +354,14 @@ test("a no-coverage answer may repeat figures from the user's own question", () 
   // year came from the query, not from any page, but the guard only permitted
   // facts found in the document (measured live, 2026-09-01).
   return answerWithLookup({
-    complete: async () => `${NO_COVERAGE_ANSWER} Tidak ada data inflasi 2026 `
-      + `pada sumber yang diambil. ${NO_COVERAGE_MARKER}`,
+    complete: async () => `${NO_COVERAGE_ANSWER} Tidak ada data inflasi 2026. `
+      + `${NO_COVERAGE_MARKER}`,
     document: DOC, untrusted: PAGE, question: "inflasi indonesia 2026",
     verifier: () => ({ ok: true, protected: [] }),
     sources: [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
                 host: "www.bps.go.id", tier: "official", contentHash: "abc" }]
   }).then((result) => {
-    assert.equal(result.ok, true);
+    assert.equal(result.reason, "no_coverage", JSON.stringify(result.findings));
     assert.equal(result.sourceCoverage, "none");
   });
 });
@@ -480,4 +490,89 @@ test("a label-free answer with no source list is still verified", async () => {
   });
   assert.equal(result.ok, true);
   assert.equal(result.sourceCoverage, "sources");
+});
+
+// Word run, 2026-09-02 15:48: three pages fetched, none about the user's
+// internal project; the model answered from the document alone — correctly —
+// and simply omitted the marker, so the gate refused it as uncited. The rule
+// "HANYA JIKA ... tulis penanda" describes a condition; the model needs the
+// rule as a closing checklist: the LAST LINE is a citation-bearing answer or
+// the marker, and an answer with neither is refused.
+test("the prompt states the closing rule: cite or end with the marker, never neither", () => {
+  const prompt = buildLookupPrompt({ document: DOC, untrusted: PAGE, question: "q" });
+  const marker = NO_COVERAGE_MARKER.replace(/[[\]]/g, "\\$&");
+  assert.match(prompt, new RegExp(`(baris terakhir|sebelum selesai)[^\\n]*\\[S[^\\n]*${marker}`, "i"),
+    "the closing rule must name both endings on one line");
+  assert.match(prompt, /tanpa \[S#?\d?\][^.\n]*tanpa[^.\n]*DITOLAK/i,
+    "the rule must say an answer with neither is refused");
+});
+
+// --- the marker path must not admit a described page (Word run, 16:55) -------
+// One page about open-weight models was fetched. The model wrote the marker,
+// cited nothing, and then summarised the page in prose. newFacts found no new
+// number or named entity in that paraphrase, so the answer was SHOWN as
+// document-only. Two defences now: prose that refers to web material is a
+// citation failure, and clean no-coverage prose is never shown at all.
+
+const MEMO_DOC = `Memo Eksekutif: Analisis Kritis Proyek Model Bahasa Nasional
+Dokumen ini meninjau delapan program yang berkomitmen membangun model bahasa
+nasional dibandingkan satu proyek yang mengukur terlebih dahulu sebelum
+memutuskan tidak membangun. Model dasar mencapai skor 0,9500 terhadap ambang
+batas pra-daftar sebesar 0,95. Jumlah keluarga yang dilaporkan siap (260) dan
+jumlah dokumen sumber independen yang tersedia (78).`;
+const OPEN_WEIGHTS_PAGE = "[S1] Apa itu model open-weights\nURL: https://aihub.id/x\nTier: public\n"
+  + "Model open-weights adalah model yang bobot terlatihnya dipublikasikan sehingga "
+  + "pengguna dapat mengunduh bobot tersebut dan melakukan fine-tuning untuk "
+  + "menyesuaikan kebutuhan spesifik, misalnya analisis data keuangan atau "
+  + "peringkasan dokumen medis.";
+const MEMO_SOURCES = [{ id: "S1", url: "https://aihub.id/x", title: "Apa itu model open-weights",
+                        host: "aihub.id", tier: "public", contentHash: "h" }];
+const memoQuestion = "Apakah ada contoh AI model distilasi menggunakan open weight model data resmi";
+
+test("regression: the shown Word answer that described konten web is refused", async () => {
+  const shown = "Dokumen pengguna tidak menyebutkan contoh spesifik mengenai distilasi AI model. "
+    + "Dokumen ini berfokus pada analisis kritis keputusan untuk tidak membangun model bahasa "
+    + "nasional, metrik evaluasi seperti skor 0,9500 dan ambang batas pra-daftar. "
+    + "Sementara itu, konten web menjelaskan bahwa model open-weights memungkinkan pengguna "
+    + "mengunduh bobot terlatih untuk melakukan fine-tuning guna menyesuaikan kebutuhan spesifik "
+    + "seperti analisis data keuangan atau peringkasan dokumen medis, namun tidak memberikan "
+    + "contoh kasus distilasi model menggunakan data resmi secara eksplisit.";
+  const result = await answerWithLookup({
+    complete: async () => `${shown}\n${NO_COVERAGE_MARKER}`,
+    document: MEMO_DOC, untrusted: OPEN_WEIGHTS_PAGE, question: memoQuestion,
+    verifier: stub, sources: MEMO_SOURCES
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "source_citation_failed");
+  assert.match(result.findings.fail_closed[0], /no-coverage answer refers to the web/);
+  assert.equal(result.answer, undefined);
+});
+
+test("every way of naming web material in a no-coverage answer is a citation failure", async () => {
+  for (const phrase of ["konten web", "sumber web", "halaman tersebut", "artikel tersebut",
+                        "sumber yang diambil", "menurut situs", "hasil pencarian"]) {
+    const result = await answerWithLookup({
+      complete: async () => `Dokumen membahas model bahasa nasional. Namun ${phrase} tidak `
+        + `membahas hal ini. ${NO_COVERAGE_MARKER}`,
+      document: MEMO_DOC, untrusted: OPEN_WEIGHTS_PAGE, question: memoQuestion,
+      verifier: stub, sources: MEMO_SOURCES
+    });
+    assert.equal(result.reason, "source_citation_failed", phrase);
+    assert.match(result.findings.fail_closed[0], /refers to the web/, phrase);
+  }
+});
+
+test("clean no-coverage prose is replaced, never shown, and lists what was fetched", async () => {
+  const result = await answerWithLookup({
+    complete: async () => "Dokumen membahas delapan program yang membangun model bahasa nasional "
+      + `dibandingkan satu proyek yang mengukur dulu. ${NO_COVERAGE_MARKER}`,
+    document: MEMO_DOC, untrusted: OPEN_WEIGHTS_PAGE, question: memoQuestion,
+    verifier: stub, sources: MEMO_SOURCES
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "no_coverage");
+  assert.equal(result.answer, undefined);
+  assert.deepEqual(result.sources.map((x) => x.host), ["aihub.id"]);
+  assert.doesNotMatch(JSON.stringify(result), /delapan program/,
+    "the model's prose must not travel in any field");
 });

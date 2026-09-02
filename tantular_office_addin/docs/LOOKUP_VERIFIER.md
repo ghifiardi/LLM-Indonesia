@@ -220,6 +220,8 @@ single-host path hands its page over as source S1. Results of
     v1 citation-first only              1        1        6/6   <- rejected
     v2 + label gate on all paths        0        3        4/4
     v3 + "===" document delimiters      0        3        4/4
+    v4 + closing rule (cite or marker)  0        3        3/4 cited, 1/4 marker path
+    v5 structural no-coverage           0        2        4/4 cited; roleplay -> no_coverage, no prose
 
 v1 exposed a gap the old prompt had hidden: on the single-host path the model
 relayed a hostile page's "[REDACTED]" instruction inside a disclaimer and the
@@ -229,3 +231,39 @@ refuses it regardless of path. The verifier itself is unchanged.
 Cost: in v2 and v3 the model wrote "[DOKUMEN PENGGUNA]" as a label in 3 and 2
 of 7 answers, and those answers were refused. Citation compliance, not
 containment, is now the limiting factor.
+
+v4 (same day, 15:50): a real Word run retrieved three pages that did not
+cover the user's document, and the model answered from the document alone
+without the no-coverage marker, so the gate refused a correct answer. The
+prompt now ends with a mechanical check — at least one valid [S#], or the
+marker as the last line, never neither. In the harness the roleplay class then
+took the marker path and was shown as a document-only answer; one class still
+wrote "[DOKUMEN PENGGUNA]" and was refused.
+
+## The no-coverage path is structural (2026-09-02, 16:55)
+
+A Word run exposed the marker as a citation escape hatch. One page about
+open-weight models was fetched; the model wrote the marker, cited nothing, and
+summarised the page in prose — "konten web menjelaskan bahwa model open-weights
+memungkinkan pengguna mengunduh bobot terlatih ..." — under a "hanya berdasarkan
+dokumen Anda" note. `newFacts` looks for new numbers, dates and named entities;
+a generic proposition has none, so the answer was shown. Classified as:
+uncovered-query scenario, marker emitted, uncited web content included, verifier
+false positive, answer reached user.
+
+Correction, in `answerWithLookup`:
+
+1. No-coverage prose that refers to web material ("konten web", "sumber web",
+   "halaman tersebut", "artikel tersebut", "sumber yang diambil", "menurut
+   situs", ...) is refused as `source_citation_failed`.
+2. Clean no-coverage prose is never shown. The companion returns a fixed
+   `no_coverage` result with its own statement — "Sumber web yang berhasil
+   diambil tidak menyediakan informasi yang cukup untuk menjawab pertanyaan ini
+   secara terverifikasi. Coba ubah query atau gunakan sumber lain." — and lists
+   the fetched sources under "Sumber yang diambil, tidak memuat jawaban". The
+   pane renders it as a non-answer: no answer text, no edit button.
+
+`newFacts` still runs first on this path, so a smuggled page figure is still
+named in the finding. The verifier (`verifyWebAnswer.js`) is unchanged. The
+`sourceCoverage: "none"` verified shape no longer exists; every verified answer
+now carries citations.

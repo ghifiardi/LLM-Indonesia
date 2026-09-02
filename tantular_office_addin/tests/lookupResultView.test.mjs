@@ -250,3 +250,22 @@ test("a rate-limited provider says so, and blames neither the query nor the netw
   assert.match(view.message, /penyedia lain/);
   assert.equal(view.note, "");
 });
+
+test("a no-coverage result is a non-answer card with the fetched sources, no edit button", () => {
+  const response = { ok: false, status: "no_coverage", reason: "no_coverage",
+    message: "Sumber web yang berhasil diambil tidak menyediakan informasi yang cukup untuk "
+      + "menjawab pertanyaan ini secara terverifikasi. Coba ubah query atau gunakan sumber lain.",
+    sources: [{ id: "S1", title: "Apa itu model open-weights", url: "https://aihub.id/x",
+                host: "aihub.id", tier: "public" }] };
+  const view = lookupResultView(response);
+  assert.equal(view.state, "blocked");
+  assert.equal(view.canEdit, false);
+  assert.equal(view.answer, null);
+  assert.equal(view.title, "Sumber tidak memuat jawaban");
+  assert.match(view.message, /tidak menyediakan informasi yang cukup/);
+  assert.equal(view.note, "");
+  const html = renderLookupResultHtml(response);
+  assert.match(html, /Sumber yang diambil, tidak memuat jawaban/);
+  assert.match(html, /\(web umum\): https:\/\/aihub\.id\/x/);
+  assert.doesNotMatch(html, /lookup-edit/);
+});

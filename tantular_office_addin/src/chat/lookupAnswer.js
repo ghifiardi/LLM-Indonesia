@@ -40,6 +40,7 @@ ATURAN LABEL SUMBER (WAJIB, baca sebelum konten):
 - Label yang sah HANYA ID sumber yang disediakan di dalam konten web di bawah ([S1], [S2], dan seterusnya). JANGAN membuat label lain seperti [DOKUMEN PENGGUNA], [Dokumen], atau nomor sumber yang tidak ada — label buatan tidak sah dan membuat jawaban DITOLAK.
 - Kalimat yang berasal dari dokumen pengguna ditulis TANPA label apa pun. Dokumen pengguna tidak punya label.
 - HANYA JIKA tidak ada satu pun sumber web yang membahas pertanyaan: jawab dari dokumen pengguna saja, jangan menyebut isi atau judul sumber web, dan tulis ${NO_COVERAGE_MARKER} di baris terakhir. Jika Anda memakai konten web, JANGAN menulis ${NO_COVERAGE_MARKER}.
+- PERIKSA sebelum selesai: baris terakhir jawaban Anda harus memenuhi salah satu — jawaban memuat minimal satu label [S#] yang sah, ATAU baris terakhir adalah ${NO_COVERAGE_MARKER}. Jawaban tanpa [S#] dan tanpa penanda itu akan DITOLAK.
 
 === DOKUMEN PENGGUNA (tanpa label) ===
 ${document}
@@ -63,7 +64,34 @@ Aturan jawaban lain (WAJIB):
   Bila tidak tertulis, tulis "tidak disebutkan di sumber". Model cenderung
   melengkapi tanggal penetapan peraturan dari ingatan; itu ditolak pemeriksa.
 - Jangan menyebut nama produk atau asisten.
-- Ingat aturan label sumber di atas: klaim dari web tanpa [S#] yang sah ditolak.`;
+- Ingat aturan label sumber di atas: klaim dari web tanpa [S#] yang sah ditolak,
+  dan jawaban yang hanya dari dokumen harus diakhiri ${NO_COVERAGE_MARKER}.`;
+}
+
+
+// The no-coverage path is STRUCTURAL, not heuristic (2026-09-02 16:55). The
+// model wrote the marker, cited nothing, and summarised the one fetched page in
+// prose — "konten web menjelaskan bahwa model open-weights memungkinkan
+// pengguna mengunduh bobot terlatih ..." — and newFacts, which looks only for
+// new numbers, dates and named entities, waved it through under a "hanya
+// berdasarkan dokumen Anda" note. So on this path the model's prose is never
+// shown. Prose that refers to web material is refused as a citation failure;
+// clean prose is replaced by this fixed response, with the fetched sources
+// listed so the user can see what did not help.
+export const NO_COVERAGE_RESPONSE = "Sumber web yang berhasil diambil tidak menyediakan "
+  + "informasi yang cukup untuk menjawab pertanyaan ini secara terverifikasi. "
+  + "Coba ubah query atau gunakan sumber lain.";
+
+const WEB_REFERENCE = new RegExp([
+  String.raw`\b(?:konten|sumber|halaman|laman|situs|artikel|hasil|materi)\s+(?:web|pencarian|internet|daring|online)\b`,
+  String.raw`\b(?:halaman|artikel|sumber|situs|laman)\s+(?:tersebut|itu|ini|di atas)\b`,
+  String.raw`\bmenurut\s+(?:sumber|halaman|situs|artikel|laman)\b`,
+  String.raw`\bsumber\s+(?:yang\s+)?(?:diambil|tersedia|ditemukan|disediakan)\b`
+].join("|"), "i");
+
+export function noCoverageWebReference(answer) {
+  const match = String(answer).match(WEB_REFERENCE);
+  return match ? match[0] : null;
 }
 
 function stripMarker(answer) {
@@ -153,7 +181,6 @@ export async function answerWithLookup({ complete, verifier = verify,
     }
     return blocked;
   }
-  let coverage = "sources";
   // Label checks run on EVERY path. Measured 2026-09-02 through the injection
   // harness: on the single-host path (no source list) the model relayed a
   // hostile page's "[REDACTED]" instruction and labelled document sentences
@@ -188,13 +215,28 @@ export async function answerWithLookup({ complete, verifier = verify,
         return citationRefusal("no-coverage answer carries facts absent from "
           + `the document: ${JSON.stringify(fromPage)}`, answer);
       }
-      coverage = "none";
+      const reference = noCoverageWebReference(answer);
+      if (reference) {
+        return citationRefusal(`no-coverage answer refers to the web: "${reference}"`, answer);
+      }
+      // Clean no-coverage prose: not shown. The companion states the outcome.
+      const noCoverage = {
+        ok: false, status: "no_coverage", reason: "no_coverage",
+        sourceCoverage: "none", message: NO_COVERAGE_RESPONSE,
+        sources: sources.map(({ id, url, title, host, tier, contentHash }) =>
+          ({ id, url, title, host, tier, contentHash }))
+      };
+      if (globalThis.process?.env?.TANTULAR_LOOKUP_DEBUG === "true") {
+        Object.defineProperty(noCoverage, "answerForDebug",
+                              { value: answer, enumerable: false });
+      }
+      return noCoverage;
     } else if (!citations.length) {
       return citationRefusal("no fetched-source citation", answer);
     }
   }
   return {
-    ok: true, status: "verified", answer, sourceCoverage: coverage,
+    ok: true, status: "verified", answer, sourceCoverage: "sources",
     protected: result.protected, canEdit: true,
     ...(sources.length ? {
       sources: sources.map(({ id, url, title, host, tier, contentHash }) =>
