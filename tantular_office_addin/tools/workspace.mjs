@@ -100,7 +100,16 @@ export function handleWorkspaceRequest(store, req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/workspace") {
-    const since = Number(url.searchParams.get("since_rev"));
+    // searchParams.get() yields null when the parameter is absent, and
+    // Number(null) is 0 — which is finite. Coercing directly would therefore
+    // read an unconditional GET as "since_rev=0" and answer 304 against a
+    // pristine store (rev 0), so a clean checkout could never read the
+    // workspace at all. Absent and blank must stay distinct from revision 0.
+    const rawSince = url.searchParams.get("since_rev");
+    const since =
+      rawSince === null || rawSince.trim() === ""
+        ? Number.NaN
+        : Number(rawSince);
     if (Number.isFinite(since) && store.rev <= since) {
       res.writeHead(304, {
         "Cache-Control": "no-store",
