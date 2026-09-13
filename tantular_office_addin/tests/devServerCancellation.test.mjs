@@ -19,6 +19,59 @@ import net from "node:net";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 
+// Promise.race leaves the LOSING promise running. When the loser is a
+// setTimeout guard, its timer stays armed and ref'd, so the process cannot
+// exit until it fires -- these tests measured ~5s of dead time after the
+// assertions had already passed. Clear the guard when the race settles, so the
+// timer's lifecycle is explicit and the work is removed rather than merely
+// ignored. (timer.unref() would also drop the tail, but it leaves an armed
+// timer that can still fire, which is harder to reason about later.)
+function withDeadline(promise, ms, message) {
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
+// server.close() invokes its callback only once EVERY existing connection has
+// closed, and it does not close them itself. A fixture that only calls close()
+// therefore waits forever on a connection the test is deliberately holding
+// open. Today that is masked by ordering -- the dev-server child is killed
+// first, which drops the upstream socket -- so the unbounded wait is latent
+// rather than live. Track the connections, destroy them, and put a deadline on
+// the whole thing so the fixture cannot outlive the test that owns it.
+function trackConnections(server) {
+  const sockets = new Set();
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  return (timeoutMs = 5000) => new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`test server did not close within ${timeoutMs}ms`)),
+      timeoutMs);
+    server.close(() => { clearTimeout(timer); resolve(); });
+    for (const socket of sockets) socket.destroy();
+  });
+}
+
+// child.kill() only sends the signal; it does not wait. Waiting on a deadline
+// keeps a wedged dev-server from silently becoming the next test's problem.
+// No escalation beyond SIGTERM: a silent SIGKILL would hide exactly the state
+// worth reporting.
+function stopChild(child, timeoutMs = 5000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(
+        `dev-server (pid ${child.pid}) did not exit within ${timeoutMs}ms of SIGTERM`)),
+      timeoutMs);
+    child.once("exit", () => { clearTimeout(timer); resolve(); });
+    child.kill("SIGTERM");
+  });
+}
+
 function findFreePort() {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
@@ -46,6 +99,7 @@ function startFakeOllama() {
     req.socket.on("close", () => onClose());
     onRequest();
   });
+  const closeServer = trackConnections(server);
   return new Promise((resolve, reject) => {
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
@@ -54,15 +108,11 @@ function startFakeOllama() {
         port,
         requestReceived,
         waitForClose(timeoutMs) {
-          return Promise.race([
-            closed,
-            new Promise((_, rej) => setTimeout(
-              () => rej(new Error("fake Ollama's incoming connection was never closed")),
-              timeoutMs
-            ))
-          ]);
+          return withDeadline(
+            closed, timeoutMs,
+            "fake Ollama's incoming connection was never closed");
         },
-        stop: () => new Promise((resolveStop) => server.close(resolveStop))
+        stop: (timeoutMs = 5000) => closeServer(timeoutMs)
       });
     });
   });
@@ -131,13 +181,9 @@ test("client cancellation of /api/chat-completions closes the upstream Ollama co
     // Wait until dev-server has genuinely connected to (fake) Ollama before
     // cancelling — cancelling too early would only prove readJsonBody never
     // ran, not that an in-flight upstream request gets torn down.
-    await Promise.race([
-      fakeOllama.requestReceived,
-      new Promise((_, reject) => setTimeout(
-        () => reject(new Error("dev-server never forwarded the request to the fake Ollama upstream")),
-        5000
-      ))
-    ]);
+    await withDeadline(
+      fakeOllama.requestReceived, 5000,
+      "dev-server never forwarded the request to the fake Ollama upstream");
 
     // Simulate the browser's fetch() being aborted (Cancel button / pane
     // closed): destroy the client's connection to dev-server.
@@ -147,7 +193,7 @@ test("client cancellation of /api/chat-completions closes the upstream Ollama co
     // own connection with Ollama, not let it run to completion unattended.
     await fakeOllama.waitForClose(5000);
   } finally {
-    child.kill();
+    await stopChild(child);
     await fakeOllama.stop();
   }
 });
@@ -169,6 +215,7 @@ test("response_format.type=json_schema reaches Ollama's native /api/chat as a co
       res.end(JSON.stringify({ message: { content: '{"t":"x","s":[]}' }, done: true }));
     });
   });
+  const closeFakeOllama = trackConnections(fakeOllama);
   await new Promise((resolve, reject) => {
     fakeOllama.on("error", reject);
     fakeOllama.listen(0, "127.0.0.1", resolve);
@@ -237,8 +284,8 @@ test("response_format.type=json_schema reaches Ollama's native /api/chat as a co
     const payload = JSON.parse(clientResponse);
     assert.equal(payload.tantular_structured_mode, "schema");
   } finally {
-    child.kill();
-    await new Promise((resolveStop) => fakeOllama.close(resolveStop));
+    await stopChild(child);
+    await closeFakeOllama();
   }
 });
 
@@ -253,6 +300,7 @@ test("a normal, completed request is unaffected by the disconnect-handling chang
       res.end(JSON.stringify({ message: { content: "halo" }, done: true }));
     });
   });
+  const closeOkOllama = trackConnections(okOllama);
   await new Promise((resolve, reject) => {
     okOllama.on("error", reject);
     okOllama.listen(0, "127.0.0.1", resolve);
@@ -288,7 +336,44 @@ test("a normal, completed request is unaffected by the disconnect-handling chang
     const payload = JSON.parse(response.body);
     assert.ok(payload?.choices?.[0]?.message?.content, "a normal completed response must still reach the client");
   } finally {
-    child.kill();
-    await new Promise((resolveStop) => okOllama.close(resolveStop));
+    await stopChild(child);
+    await closeOkOllama();
   }
+});
+
+
+// The bug the bounded close exists to prevent, made reachable on purpose.
+// Without the socket-destroy loop this test times out: server.close() waits on
+// the held connection forever, and no assertion in this file would notice,
+// because the other three tests drop their upstream socket when the child dies.
+test("a fixture server closes within its deadline even with a connection held open", async () => {
+  const server = http.createServer((req) => { req.resume(); }); // never responds
+  const closeServer = trackConnections(server);
+  await new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = server.address();
+
+  const held = net.connect(port, "127.0.0.1");
+  await new Promise((resolve, reject) => {
+    held.once("connect", resolve);
+    held.once("error", reject);
+  });
+  held.on("error", () => {});                 // destroyed under us, by design
+  held.write("POST /api/chat HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n");
+  await new Promise((resolve) => setTimeout(resolve, 50)); // let it be accepted
+
+  const started = Date.now();
+  try {
+    await closeServer(2000);                  // must resolve, not reject
+  } finally {
+    // Release the held socket even when the assertion above fails. A test that
+    // hangs on its own failure is the exact pathology this file now guards
+    // against, and it would leave the server open for the rest of the run.
+    held.destroy();
+  }
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000,
+    `close must not wait out its deadline (took ${elapsed}ms)`);
 });
