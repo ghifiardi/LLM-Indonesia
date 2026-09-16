@@ -2,7 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createWorkspaceStore, handleWorkspaceRequest } from "./workspace.mjs";
 import { randomUUID } from "node:crypto";
 import {
@@ -18,6 +18,10 @@ import {
   auditRecord, resolveUrl, auditKey,
   discoveryAlphaEnabled, configuredSearchProvider
 } from "../src/chat/lookupPolicy.js";
+import {
+  prepareEdit, authorizeEdit, idempotencyKey, editAuditRecord,
+  documentVersion, targetDigest, editDigest
+} from "../src/chat/editApprovalPolicy.js";
 import { answerWithLookup } from "../src/chat/lookupAnswer.js";
 import { discoverAndRetrieve, sourcesAsUntrusted } from "../src/chat/discovery.js";
 import { sourcePolicy, classifyDomain } from "../src/chat/domainPolicy.js";
@@ -115,6 +119,73 @@ function appendLookupAudit(record) {
     throw new Error("audit log tidak dapat ditulis; permintaan dibatalkan");
   }
 }
+// Edit approvals, issued by /api/edit/prepare and consumed once by
+// /api/edit/execute. Same shape and same discipline as pendingLookups above:
+// the only differences are what is bound and that nothing here ever leaves the
+// machine -- an edit is applied TO the document rather than sent out.
+const pendingEdits = new Map();
+// Applied idempotency keys. One approval must produce at most one application,
+// so a repeated execute collides here instead of editing twice. Bounded: an
+// unbounded map is a leak in a long-lived companion, and an approval is spent
+// within its two-minute TTL anyway.
+const appliedEdits = new Map();
+const APPLIED_EDITS_MAX = 512;
+const EDIT_AUDIT = path.join(process.env.HOME || ".", ".tantular-edit-audit.jsonl");
+const EDIT_AUDIT_KEY = path.join(process.env.HOME || ".", ".tantular-edit-audit.key");
+const editAuditKey = auditKey(
+  process.env,
+  () => { try { return fs.readFileSync(EDIT_AUDIT_KEY, "utf8").trim(); } catch { return ""; } },
+  (value) => fs.writeFileSync(EDIT_AUDIT_KEY, value, { mode: 0o600 })
+);
+function appendEditAudit(record) {
+  try {
+    fs.appendFileSync(EDIT_AUDIT, JSON.stringify(record) + "\n");
+  } catch {
+    // Same rule the lookup audit follows: an unwritable log must not silently
+    // allow an unlogged document mutation. The caller treats a throw as a
+    // refusal, so the edit does not happen.
+    throw new Error("audit log edit tidak dapat ditulis; permintaan dibatalkan");
+  }
+}
+function rememberApplied(key, outcome) {
+  if (appliedEdits.size >= APPLIED_EDITS_MAX) {
+    appliedEdits.delete(appliedEdits.keys().next().value);
+  }
+  appliedEdits.set(key, outcome);
+}
+
+// The digest behind a model TAG. Ollama's /api/tags reports a digest per
+// installed model; the tag itself can be repointed at different weights
+// without the name changing, which is exactly the drift a receipt must be able
+// to detect. Read-only: this lists what is installed, it never loads or runs a
+// model.
+let servedModelCache = null;
+async function servedModelIdentity(requestedModel) {
+  const name = String(requestedModel || "").trim();
+  if (servedModelCache && servedModelCache.name === name) return servedModelCache;
+  try {
+    const response = await fetch(`http://127.0.0.1:${OLLAMA_PORT}/api/tags`);
+    if (!response.ok) return { name: name || null, digest: null,
+                               reason: `http_${response.status}` };
+    const payload = await response.json();
+    const models = Array.isArray(payload?.models) ? payload.models : [];
+    const match = name
+      ? models.find((m) => String(m?.name || m?.model || "").trim() === name)
+      : null;
+    const identity = {
+      name: name || null,
+      digest: match?.digest ? String(match.digest) : null,
+      modified_at: match?.modified_at ? String(match.modified_at) : null,
+      reason: match ? null : (name ? "model_not_installed" : "no_model_requested")
+    };
+    servedModelCache = identity;
+    return identity;
+  } catch (error) {
+    // Unreachable Ollama is not an identity claim of any kind.
+    return { name: name || null, digest: null, reason: "unreachable" };
+  }
+}
+
 const root = path.resolve(__dirname, "..");
 const port = Number(process.env.PORT || 3000);
 // Overridable only so tests can point this at a fake Ollama on a free port
@@ -606,6 +677,156 @@ function handler(req, res) {
     return;
   }
 
+  // --- approval-gated document edits -------------------------------------
+  //
+  // THREE routes, because authorising an edit and performing it happen in
+  // different processes. The companion has no Office access: only the task
+  // pane can touch the document. So the companion decides (prepare/execute)
+  // and the pane reports what actually happened (result). Collapsing these
+  // would mean the companion either claimed an outcome it cannot observe, or
+  // let the pane authorise itself -- and the whole point is that the thing
+  // performing the edit is not the thing permitting it.
+  if (url.pathname === "/api/edit/prepare"
+      || url.pathname === "/api/edit/execute"
+      || url.pathname === "/api/edit/result") {
+    if (!allowApiOrigin(req, res)) return;
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json", ...corsHeaders(req) });
+      res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+      return;
+    }
+    readJsonBody(req, async (bodyError, body) => {
+      const reply = (status, payload) => {
+        res.writeHead(status, {
+          "Content-Type": "application/json; charset=utf-8",
+          ...corsHeaders(req), "Cache-Control": "no-store"
+        });
+        res.end(JSON.stringify(payload));
+      };
+      if (bodyError) return reply(400, { ok: false, error: bodyError.message });
+
+      // An unwritable audit log throws, and that throw must refuse the request
+      // rather than escaping as a 500 that the pane might retry.
+      const audit = (record) => {
+        try {
+          appendEditAudit(editAuditRecord({ ...record, boot_id: COMPANION_BOOT_ID }));
+          return true;
+        } catch (error) {
+          reply(503, { ok: false, reason: "audit_unwritable",
+                       message: String(error?.message ?? error) });
+          return false;
+        }
+      };
+
+      if (url.pathname === "/api/edit/prepare") {
+        const prepared = prepareEdit({
+          edits: body?.edits,
+          documentText: body?.document,
+          located: body?.located
+        });
+        if (!prepared.ok) {
+          if (!audit({ approved: false, outcome: `refused:${prepared.reason}`,
+                       reason: prepared.reason })) return;
+          return reply(403, prepared);
+        }
+        pendingEdits.set(prepared.token, prepared);
+        if (!audit({ approved: false, outcome: "prepared",
+                     document_version: prepared.document_version,
+                     target_digest: prepared.target_digest,
+                     edit_digest: prepared.edit_digest,
+                     token: prepared.token, nonce: prepared.nonce,
+                     find_chars: String(prepared.disclosure.find).length,
+                     replace_chars: String(prepared.disclosure.replace).length })) {
+          pendingEdits.delete(prepared.token);
+          return;
+        }
+        // Nothing has touched the document at this point, and nothing does
+        // until the user reads `disclosure` and the pane calls execute.
+        return reply(200, {
+          ok: true, token: prepared.token, nonce: prepared.nonce,
+          protocol_version: prepared.protocol_version,
+          document_version: prepared.document_version,
+          target_digest: prepared.target_digest,
+          edit_digest: prepared.edit_digest,
+          disclosure: prepared.disclosure, expiresAt: prepared.expiresAt
+        });
+      }
+
+      if (url.pathname === "/api/edit/execute") {
+        // The client sends the MATERIAL, never the digests. If the pane could
+        // assert "this is document version X" the binding would be the pane's
+        // claim about itself, and a compromised or buggy pane could replay an
+        // approval against different text simply by repeating the old hash.
+        // Recomputing here from the re-read document is the whole point: the
+        // companion checks what is actually in front of the user now.
+        const computed = {
+          document_version: documentVersion(body?.document),
+          target_digest: targetDigest(body?.located?.matchedText,
+                                      body?.located?.ordinal),
+          edit_digest: editDigest(body?.edit)
+        };
+        const key = idempotencyKey(computed.edit_digest, body?.token);
+        // Checked BEFORE authorize, because a replayed execute would otherwise
+        // burn the token and report unknown_token -- a confusing refusal that
+        // hides the real cause.
+        if (appliedEdits.has(key)) {
+          if (!audit({ approved: false, outcome: "refused:duplicate",
+                       reason: "duplicate", idempotency_key: key,
+                       token: body?.token ?? null,
+                       edit_digest: computed.edit_digest })) return;
+          return reply(409, {
+            ok: false, reason: "duplicate",
+            message: "Edit ini sudah diterapkan dengan persetujuan yang sama.",
+            idempotency_key: key, previous: appliedEdits.get(key)
+          });
+        }
+        const authorized = authorizeEdit({
+          pending: pendingEdits,
+          token: body?.token,
+          ...computed
+        });
+        if (!authorized.ok) {
+          if (!audit({ approved: false, outcome: `refused:${authorized.reason}`,
+                       reason: authorized.reason, token: body?.token ?? null,
+                       document_version: computed.document_version,
+                       target_digest: computed.target_digest,
+                       edit_digest: computed.edit_digest })) return;
+          return reply(403, authorized);
+        }
+        rememberApplied(key, "authorized");
+        if (!audit({ approved: true, outcome: "authorized",
+                     document_version: authorized.entry.document_version,
+                     target_digest: authorized.entry.target_digest,
+                     edit_digest: authorized.entry.edit_digest,
+                     token: authorized.entry.token, nonce: authorized.entry.nonce,
+                     idempotency_key: key, approver: "local-user" })) return;
+        return reply(200, {
+          ok: true, idempotency_key: key, nonce: authorized.entry.nonce,
+          protocol_version: authorized.entry.protocol_version,
+          document_version: authorized.entry.document_version,
+          target_digest: authorized.entry.target_digest,
+          edit_digest: authorized.entry.edit_digest
+        });
+      }
+
+      // result: the pane reporting what Word actually did. It records; it
+      // cannot authorise, and an unknown key is not retro-authorised here.
+      const key = String(body?.idempotency_key || "");
+      if (!appliedEdits.has(key)) {
+        if (!audit({ approved: false, outcome: "refused:unknown_key",
+                     reason: "unknown_key", idempotency_key: key || null })) return;
+        return reply(403, { ok: false, reason: "unknown_key",
+                            message: "Hasil untuk persetujuan yang tidak dikenal." });
+      }
+      const status = String(body?.status || "unknown");
+      rememberApplied(key, status);
+      if (!audit({ approved: true, outcome: "result", status,
+                   idempotency_key: key })) return;
+      return reply(200, { ok: true, idempotency_key: key, status });
+    });
+    return;
+  }
+
   if (url.pathname === "/api/chat-completions") {
     proxyChatCompletions(req, res);
     return;
@@ -624,13 +845,23 @@ function handler(req, res) {
   // only, nothing sensitive (no model list, no settings, no keys).
   if (url.pathname === "/api/diagnostics") {
     if (!allowApiOrigin(req, res)) return;
+    // Resolved locally rather than by making handler() async: every other route
+    // here is synchronous, and changing the shared signature would change error
+    // handling for all of them to add one field to one response.
+    servedModelIdentity(url.searchParams.get("model")).then((served) => {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", ...corsHeaders(req) });
     res.end(JSON.stringify({
       ollamaOrigin: `http://127.0.0.1:${OLLAMA_PORT}`,
       companionBootId: COMPANION_BOOT_ID,
       bridgeRevision: BRIDGE_REVISION,
-      bridgeCapabilities: BRIDGE_CAPABILITIES
+      bridgeCapabilities: BRIDGE_CAPABILITIES,
+      // An id string is a name, not an identity: an Ollama tag is mutable and
+      // can be repointed under a running install. The digest is what a receipt
+      // can bind to. Null when it cannot be read -- never a guess, and a
+      // consumer that needs it must refuse rather than proceed.
+      servedModel: served
     }));
+    });
     return;
   }
 
@@ -1107,8 +1338,19 @@ server.on("error", (error) => {
 });
 
 // Listen on all local interfaces so both https://localhost (IPv6 ::1) and
+// Only listen when this file IS the process. Imported -- by a test that wants
+// to drive the routes without a real companion -- it must define the handler
+// and bind nothing: an import that seized port 3000 would collide with a
+// companion the developer is actually running, and a test that has to spawn a
+// child process to reach its own routes cannot inspect them.
+const RUNNING_AS_MAIN = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+export { handler, tracedHandler, COMPANION_BOOT_ID, servedModelIdentity };
+
 // https://127.0.0.1 (IPv4) resolve. macOS often maps localhost to ::1.
-server.listen(port, () => {
+if (RUNNING_AS_MAIN) server.listen(port, () => {
   const scheme = hasCert ? "https" : "http";
   // This file runs in two very different roots. In the repo, `root` holds src/
   // and manifest.xml and this really is a dev server. In the workshop package it
