@@ -2,7 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createWorkspaceStore, handleWorkspaceRequest } from "./workspace.mjs";
 import { randomUUID } from "node:crypto";
 import {
@@ -1338,8 +1338,19 @@ server.on("error", (error) => {
 });
 
 // Listen on all local interfaces so both https://localhost (IPv6 ::1) and
+// Only listen when this file IS the process. Imported -- by a test that wants
+// to drive the routes without a real companion -- it must define the handler
+// and bind nothing: an import that seized port 3000 would collide with a
+// companion the developer is actually running, and a test that has to spawn a
+// child process to reach its own routes cannot inspect them.
+const RUNNING_AS_MAIN = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+export { handler, tracedHandler, COMPANION_BOOT_ID, servedModelIdentity };
+
 // https://127.0.0.1 (IPv4) resolve. macOS often maps localhost to ::1.
-server.listen(port, () => {
+if (RUNNING_AS_MAIN) server.listen(port, () => {
   const scheme = hasCert ? "https" : "http";
   // This file runs in two very different roots. In the repo, `root` holds src/
   // and manifest.xml and this really is a dev server. In the workshop package it
