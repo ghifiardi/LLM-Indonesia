@@ -226,10 +226,12 @@ test("diagnostics reports the boot id and a served-model identity", async () => 
 });
 
 test("every audit row from this run carries digests and no content", async () => {
-  const before = auditTail(200).length;
   const token = (await prepared()).token;
   await post("/api/edit/execute", { token, edit: EDIT, document: DOC, located: LOCATED });
-  const rows = auditTail(200).slice(before);
+  // Selected by TOKEN, not by position. Test files run in parallel and share
+  // one audit log, so "the rows after the ones that were there before" is not
+  // a stable set -- which made this assertion flaky rather than wrong.
+  const rows = auditTail(500).filter((row) => row.token === token);
   assert.ok(rows.length >= 2, "prepare and execute must both be recorded");
   const serialized = JSON.stringify(rows);
   for (const secret of [DOC, EDIT.find, EDIT.replace]) {
