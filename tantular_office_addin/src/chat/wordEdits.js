@@ -1,10 +1,15 @@
 import { locateEdit, searchOrdinalAt } from "./editContract.js";
+import { applyIfCurrent, STALE_PREVIEW_MESSAGE } from "./staleGuard.js";
+import { getDocumentBodyText } from "../officeClient.js";
 
 function hasWordApi14() {
   return globalThis.Office?.context?.requirements?.isSetSupported?.("WordApi", "1.4") ?? false;
 }
 
-export function renderEditPreview({ container, edits, addBubble }) {
+export function renderEditPreview({
+  container, edits, addBubble,
+  expectedRevision, readBody = getDocumentBodyText, onApplied
+}) {
   const wrap = document.createElement("div");
   wrap.className = "chat-bubble assistant edit-preview";
   const resolvable = edits.filter((e) => !e.error);
@@ -45,8 +50,9 @@ export function renderEditPreview({ container, edits, addBubble }) {
   apply.type = "button";
   apply.className = "primary";
   let applying = false;
+  let stale = false;
   const refreshLabel = () => {
-    if (applying) return;
+    if (applying || stale) return;
     const n = rows.filter((r) => r.checkbox.checked).length;
     apply.textContent = `Terapkan (${n})`;
     apply.disabled = n === 0;
@@ -65,7 +71,18 @@ export function renderEditPreview({ container, edits, addBubble }) {
     rows.forEach(({ checkbox }) => { checkbox.disabled = true; });
     try {
       const chosen = rows.filter((r) => r.checkbox.checked).map((r) => r.item.edit);
-      const results = await applyTrackedEdits(chosen);
+      const gate = await applyIfCurrent({
+        expectedRevision, readBody, apply: () => applyTrackedEdits(chosen)
+      });
+      if (gate.stale) {
+        // Refuse a stale preview for good; a new proposal is required.
+        stale = true;
+        apply.textContent = "Usulan kedaluwarsa";
+        addBubble("error", STALE_PREVIEW_MESSAGE);
+        return;
+      }
+      const results = gate.results;
+      await onApplied?.(results.filter((r) => r.status === "applied").map((r) => r.edit));
       const lines = results.map((r) =>
         r.status === "applied" ? `✔ diterapkan: "${r.edit.find}"`
           : r.status === "not_found" ? `⚠ tidak ditemukan: "${r.edit.find}"`
@@ -75,7 +92,7 @@ export function renderEditPreview({ container, edits, addBubble }) {
       addBubble("error", String(error?.message ?? error));
     } finally {
       applying = false;
-      rows.forEach(({ checkbox, originalDisabled }) => { checkbox.disabled = originalDisabled; });
+      if (!stale) rows.forEach(({ checkbox, originalDisabled }) => { checkbox.disabled = originalDisabled; });
       refreshLabel();
     }
   });

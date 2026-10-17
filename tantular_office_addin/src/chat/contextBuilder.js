@@ -38,6 +38,20 @@ export function hashText(text) {
   return h.toString(16);
 }
 
+// Revision is an invalidation key, not a security digest or document ID.
+export function bodyRevision(body) {
+  const s = String(body ?? "");
+  return `${s.length}:${hashText(s)}`;
+}
+
+export class DocumentChangedError extends Error {
+  constructor(message = "Dokumen berubah saat diringkas. Coba lagi agar jawaban memakai versi terbaru.") {
+    super(message);
+    this.name = "DocumentChangedError";
+    this.code = "DOCUMENT_CHANGED";
+  }
+}
+
 export function normalizeSearchText(text) {
   return String(text ?? "")
     .normalize("NFKD")
@@ -127,30 +141,35 @@ export function selectRelevantContext(bodyText, query, { maxChars = RETRIEVAL_LI
 }
 
 // Cache shaped for future per-chunk invalidation (spec): v1 invalidates
-// wholesale when the body hash (docKey) changes.
-let cache = null; // { docKey, chunks: [{ hash, summary }] }
+// wholesale when the body changes. Exact comparison avoids treating a short
+// non-cryptographic hash as proof that the document is unchanged.
+let cache = null; // { body, chunks: [{ hash, summary }] }
 
 const SUMMARY_SYSTEM = "Anda peringkas dokumen Bahasa Indonesia. Ringkas bagian dokumen berikut menjadi 2-4 kalimat padat yang mempertahankan fakta, nama, dan angka. Balas hanya ringkasannya.";
 
-export async function buildDocumentContext({ emitProgress, signal, query = "" } = {}) {
-  const body = await getDocumentBodyText();
+export async function buildDocumentContextSnapshot({
+  emitProgress, signal, query = "",
+  readBody = getDocumentBodyText, summarize = runTantular
+} = {}) {
+  const body = await readBody();
   if (body.length > HARD_CAP) {
     throw new Error(`Dokumen terlalu panjang (${body.length} karakter; batas ${HARD_CAP}). Pilih bagian yang relevan lalu gunakan konteks Seleksi.`);
   }
+  const revision = bodyRevision(body);
+  const snapshot = (text) => ({ text, revision });
   const retrieved = selectRelevantContext(body, query);
-  if (retrieved) return retrieved;
-  if (body.length <= RAW_LIMIT) return body;
+  if (retrieved) return snapshot(retrieved);
+  if (body.length <= RAW_LIMIT) return snapshot(body);
 
-  const docKey = hashText(body);
-  if (cache?.docKey === docKey) {
-    return cache.chunks.map((c) => c.summary).join("\n\n");
+  if (cache?.body === body) {
+    return snapshot(cache.chunks.map((c) => c.summary).join("\n\n"));
   }
   const chunks = chunkText(body);
   const summarized = [];
   for (let i = 0; i < chunks.length; i++) {
     if (signal?.aborted) throw new Error("dihentikan");
     emitProgress?.(`Membaca dokumen… bagian ${i + 1}/${chunks.length}`);
-    const summary = await runTantular({
+    const summary = await summarize({
       system: SUMMARY_SYSTEM,
       user: chunks[i],
       maxTokens: 256,
@@ -159,8 +178,17 @@ export async function buildDocumentContext({ emitProgress, signal, query = "" } 
     });
     summarized.push({ hash: hashText(chunks[i]), summary });
   }
-  cache = { docKey, chunks: summarized };
-  return summarized.map((c) => c.summary).join("\n\n");
+  // Summarization may take minutes. Never serve or cache a summary of a
+  // document that changed while the model was working.
+  if (await readBody() !== body) {
+    throw new DocumentChangedError();
+  }
+  cache = { body, chunks: summarized };
+  return snapshot(summarized.map((c) => c.summary).join("\n\n"));
+}
+
+export async function buildDocumentContext(options = {}) {
+  return (await buildDocumentContextSnapshot(options)).text;
 }
 
 export function clearDocumentContextCache() { cache = null; }

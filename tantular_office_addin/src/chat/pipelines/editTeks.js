@@ -1,6 +1,7 @@
 import { runTantular } from "../../tantularClient.js";
 import { EDIT_SYSTEM_PROMPT, parseEditContract, resolveEdits } from "../editContract.js";
 import { getDocumentBodyText } from "../../officeClient.js";
+import { bodyRevision } from "../contextBuilder.js";
 import {
   closedVsOpenWeightEdit,
   isClosedVsOpenWeightTopic
@@ -12,7 +13,7 @@ export async function runEditTeks({ instruction, contextText, emit, signal }) {
     if (recipe) {
       emit?.("Menyusun usulan edit berbasis pola Tantular…");
       const body = await getDocumentBodyText();
-      return { kind: "edits", edits: resolveEdits(body, [recipe]) };
+      return { kind: "edits", edits: resolveEdits(body, [recipe]), revision: bodyRevision(body) };
     }
   }
   const scope = contextText
@@ -33,5 +34,5 @@ export async function runEditTeks({ instruction, contextText, emit, signal }) {
   });
   const { edits, skipped } = parseEditContract(raw);
   const body = await getDocumentBodyText();
-  return { kind: "edits", edits: resolveEdits(body, edits), skipped };
+  return { kind: "edits", edits: resolveEdits(body, edits), skipped, revision: bodyRevision(body) };
 }
