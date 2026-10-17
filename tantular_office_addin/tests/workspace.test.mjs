@@ -190,3 +190,50 @@ test("HTTP: unknown route beyond prefix is 404; wrong method is 405", async () =
     assert.equal(wrongMethod.status, 405);
   } finally { server.close(); }
 });
+
+// Clean-room regression: a pristine checkout has no data/workspace.json, so the
+// store starts at rev 0. Number(null) === 0 is finite, so coercing the absent
+// since_rev directly made an unconditional GET satisfy `store.rev <= since` and
+// return 304 — the workspace was unreadable on any machine that had never
+// written the file. Every developer tree masked this by already having one.
+test("pristine store: absent/blank since_rev reads unconditionally; explicit revisions still gate", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ws-pristine-"));
+  const filePath = path.join(dir, "workspace.json");
+
+  // 1. the file is genuinely absent — nothing seeds it.
+  assert.equal(fs.existsSync(filePath), false);
+
+  const store = createWorkspaceStore({ filePath });
+  assert.equal(store.rev, 0);
+
+  const { server, base } = await serve(store);
+  try {
+    // 2 + 3. unconditional GET reads, and reports revision zero.
+    const unconditional = await fetch(`${base}/api/workspace`);
+    assert.equal(unconditional.status, 200);
+    const snapshot = await unconditional.json();
+    assert.equal(snapshot.rev, 0);
+    assert.deepEqual(snapshot.items, []);
+
+    // 4. an explicit since_rev=0 is a real conditional request: still 304.
+    assert.equal((await fetch(`${base}/api/workspace?since_rev=0`)).status, 304);
+
+    // 5. an explicit older revision still reads.
+    assert.equal((await fetch(`${base}/api/workspace?since_rev=-1`)).status, 200);
+
+    // 6. a blank value carries no revision, so it behaves as absent.
+    assert.equal((await fetch(`${base}/api/workspace?since_rev=`)).status, 200);
+    assert.equal((await fetch(`${base}/api/workspace?since_rev=%20`)).status, 200);
+
+    // a read must not create the file: only writes persist.
+    assert.equal(fs.existsSync(filePath), false);
+  } finally {
+    server.close();
+    await new Promise((resolve) => server.on("close", resolve));
+  }
+
+  // 7. nothing is left behind.
+  assert.equal(fs.existsSync(filePath), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(fs.existsSync(dir), false);
+});
