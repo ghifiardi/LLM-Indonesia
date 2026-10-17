@@ -146,8 +146,12 @@ test("chatPane and wordEdits are wired to the guards", () => {
   assert.match(pane, /expectedRevision: result\.revision/);
   assert.match(pane, /error\?\.code === "DOCUMENT_CHANGED"/);
   assert.match(pane, /prepareTurn\(/);
-  assert.ok(edits.indexOf("applyIfCurrent(") < edits.indexOf("apply: () => applyTrackedEdits(chosen)"));
-  assert.doesNotMatch(edits.replace(/apply: \(\) => applyTrackedEdits\(chosen\)/, ""), /await applyTrackedEdits\(/);
+  // After the approval-protocol merge the gate wraps applyApprovedEdit (which
+  // itself ends in applyTrackedEdits); nothing may call either outside it.
+  const gated = "apply: () => applyApprovedEdit(chosen[0])";
+  assert.ok(edits.indexOf("applyIfCurrent(") !== -1 && edits.indexOf("applyIfCurrent(") < edits.indexOf(gated));
+  assert.doesNotMatch(edits.replace(gated, ""), /await applyApprovedEdit\(/);
+  assert.ok(edits.indexOf("chosen.length > 1") < edits.indexOf("applyIfCurrent("), "single-edit rule stays ahead of the gate");
 });
 
 test("an opener like 'sekarang' alone does not make a self-contained request a follow-up", async () => {
