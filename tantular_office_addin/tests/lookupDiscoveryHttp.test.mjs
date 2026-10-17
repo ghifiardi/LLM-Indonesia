@@ -53,6 +53,8 @@ test("discovery alpha status and prepare bind provider without fetching", async 
   const status = await request(port, "GET", "/api/lookup/status");
   assert.equal(status.body.discovery.enabled, true);
   assert.equal(status.body.discovery.provider, "duckduckgo-html");
+  // The pane shows what the companion will actually do with a result link.
+  assert.equal(status.body.discovery.sourcePolicy, "open");
 
   const prepared = await request(port, "POST", "/api/lookup/prepare", {
     query: "perkembangan pasar modal indonesia",
@@ -63,4 +65,24 @@ test("discovery alpha status and prepare bind provider without fetching", async 
   assert.equal(prepared.body.ok, true);
   assert.equal(prepared.body.disclosure.provider, "duckduckgo-html");
   assert.match(prepared.body.disclosure.host, /DuckDuckGo/);
+});
+
+test("the companion refuses to start on an invalid source policy", async () => {
+  const port = await freePort();
+  const child = spawn("node", ["tools/dev-server.mjs"], {
+    env: { ...process.env, PORT: String(port),
+           TANTULAR_LOOKUP_SOURCE_POLICY: "everything" },
+    stdio: ["ignore", "ignore", "pipe"]
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  // A server that STARTS is the failure this test exists to catch, so a hang
+  // must fail, not wait forever.
+  const code = await new Promise((resolve) => {
+    const timer = setTimeout(() => { child.kill("SIGKILL"); resolve("still_running"); }, 8000);
+    child.on("exit", (exitCode) => { clearTimeout(timer); resolve(exitCode); });
+  });
+  assert.notEqual(code, 0);
+  assert.notEqual(code, "still_running", "server started despite invalid policy");
+  assert.match(stderr, /invalid_source_policy:everything/);
 });

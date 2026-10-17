@@ -93,3 +93,91 @@ export function createRun({ budgetMs = REQUEST_BUDGET_MS, onTick = null,
     }
   };
 }
+
+// A Studio action (Document/Workbook/Deck) is not one short request — it reads
+// a source, then calls the model, then writes into Office, each its own
+// phase. withProgress() (the generic one) freezes the label at whatever
+// message the caller passed in when the run started, because its ticker
+// closes over that one string. A Studio run needs the label to follow
+// whichever phase is CURRENT, not the one it started in, or a user watching
+// "Membaca dokumen... 340 detik" has no idea the model has been running for
+// five of those minutes.
+//
+// This returns a `withStudioProgress(initialMessage, fn)` function, closed
+// over one Studio section's DOM elements, so each of Document/Workbook/Deck
+// Studio gets its own independently-wired instance (own progress element,
+// own Cancel button, own busy/cleanup) without repeating this wiring three
+// times. `fn` receives `(signal, setPhase)`: forward `signal` into every
+// model call so Cancel actually aborts the in-flight request, and call
+// `setPhase(nextMessage)` whenever the phase changes so the still-running
+// elapsed clock repaints against the new label on its very next tick.
+export function createStudioProgressRunner({
+  progressEl = null,
+  textEl = null,
+  cancelButton = null,
+  busyButtons = [],
+  budgetMs = DECK_BUDGET_MS,
+  report = null,
+  idleMessage = "",
+  now, setInterval: setIntervalFn, clearInterval: clearIntervalFn,
+  setTimeout: setTimeoutFn, clearTimeout: clearTimeoutFn
+} = {}) {
+  // Cancel starts disabled and stays that way whenever no run is active —
+  // there is nothing to cancel between runs, and a live button inviting a
+  // click that does nothing is its own small confusion.
+  if (cancelButton) cancelButton.disabled = true;
+
+  return async function withStudioProgress(initialMessage, fn) {
+    let phase = initialMessage;
+    const repaint = (elapsedMs) => {
+      if (textEl) textEl.textContent = progressLabel(phase, elapsedMs, budgetMs);
+    };
+    const run = createRun({
+      budgetMs,
+      onTick: repaint,
+      ...(now ? { now } : {}),
+      ...(setIntervalFn ? { setInterval: setIntervalFn } : {}),
+      ...(clearIntervalFn ? { clearInterval: clearIntervalFn } : {}),
+      ...(setTimeoutFn ? { setTimeout: setTimeoutFn } : {}),
+      ...(clearTimeoutFn ? { clearTimeout: clearTimeoutFn } : {})
+    });
+    // Exposed to `fn` so a multi-step Studio action (read source, call model,
+    // write to Office) can move the visible phase forward without waiting
+    // for the next tick — the elapsed clock keeps running against whatever
+    // phase was set most recently, never snapping back to `initialMessage`.
+    const setPhase = (next) => {
+      phase = String(next || "").trim() || phase;
+      repaint(run.elapsedMs());
+    };
+    const onCancel = () => run.cancel();
+
+    if (progressEl) progressEl.classList.toggle("hidden", false);
+    repaint(0);
+    if (cancelButton) {
+      cancelButton.disabled = false;
+      cancelButton.addEventListener("click", onCancel);
+    }
+    busyButtons.forEach((button) => { if (button) button.disabled = true; });
+
+    try {
+      await fn(run.signal, setPhase);
+    } catch (error) {
+      console.error(error);
+      const outcome = classifyOutcome(error, {
+        cancelled: run.cancelled, timedOut: run.timedOut
+      });
+      // A cancellation is the user's decision, not a failure — surfaced as a
+      // warning, never through the same channel as a real error.
+      if (report) report(outcome.message, outcome.status);
+    } finally {
+      run.finish();
+      if (cancelButton) {
+        cancelButton.removeEventListener("click", onCancel);
+        cancelButton.disabled = true;
+      }
+      busyButtons.forEach((button) => { if (button) button.disabled = false; });
+      if (progressEl) progressEl.classList.toggle("hidden", true);
+      if (textEl && idleMessage) textEl.textContent = idleMessage;
+    }
+  };
+}

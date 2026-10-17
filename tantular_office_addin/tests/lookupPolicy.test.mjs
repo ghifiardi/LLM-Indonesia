@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import {
   lookupEnabled, hostAllowed, prepareLookup, authorizeExecution,
   auditRecord, wrapUntrusted, DEFAULT_ALLOWED_HOSTS, adapterFor, resolveUrl,
-  queryLeakWarnings
+  queryLeakWarnings, configuredSearchProvider
 } from "../src/chat/lookupPolicy.js";
 
 const ON = { TANTULAR_LOOKUP_ENABLED: "true" };
@@ -206,4 +206,43 @@ test("query disclosure warns about PII, secrets, and copied document data", () =
   assert.ok(warnings.some((warning) => /email/.test(warning)));
   assert.ok(warnings.some((warning) => /secret/.test(warning)));
   assert.ok(warnings.some((warning) => /Sinar Mas/.test(warning)));
+});
+
+// The default provider follows the source policy: an open policy with a
+// two-host federated search would still dead-end on any topic those hosts do
+// not cover, which is the failure that led to the open policy in the first
+// place (Sahabat-AI, 2026-09-02).
+test("default search provider follows the source policy", () => {
+  assert.equal(configuredSearchProvider({}), "brave-html");
+  assert.equal(configuredSearchProvider({ TANTULAR_LOOKUP_SOURCE_POLICY: "open" }),
+    "brave-html");
+  assert.equal(configuredSearchProvider({ TANTULAR_LOOKUP_SOURCE_POLICY: "official" }),
+    "official-federated");
+  // An explicit provider always wins over the policy default.
+  assert.equal(configuredSearchProvider({
+    TANTULAR_LOOKUP_SOURCE_POLICY: "official", TANTULAR_SEARCH_PROVIDER: "SearXNG"
+  }), "searxng");
+  assert.throws(() => configuredSearchProvider({ TANTULAR_LOOKUP_SOURCE_POLICY: "all" }),
+    /invalid_source_policy:all/);
+});
+
+// The disclosure is what the user approves. It must describe the retrieval
+// that will actually happen under the current policy, not the stricter one.
+test("the disclosure describes retrieval honestly under each source policy", () => {
+  const base = { TANTULAR_LOOKUP_ENABLED: "true", TANTULAR_LOOKUP_DISCOVERY_ALPHA: "true" };
+  const open = prepareLookup({
+    query: "Sahabat-AI", provider: "brave-html", document: DOC,
+    env: { ...base, TANTULAR_LOOKUP_SOURCE_POLICY: "open" }
+  });
+  assert.equal(open.ok, true, JSON.stringify(open));
+  assert.match(open.disclosure.host, /Brave/);
+  assert.match(open.disclosure.host, /web umum/);
+  assert.doesNotMatch(open.disclosure.host, /hanya domain resmi/);
+
+  const official = prepareLookup({
+    query: "Sahabat-AI", provider: "official-federated", document: DOC,
+    env: { ...base, TANTULAR_LOOKUP_SOURCE_POLICY: "official" }
+  });
+  assert.equal(official.ok, true, JSON.stringify(official));
+  assert.match(official.disclosure.host, /hanya domain resmi\/tepercaya/);
 });

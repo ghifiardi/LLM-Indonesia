@@ -40,7 +40,29 @@ const REASON_MESSAGES = Object.freeze({
   mismatch: "Query berubah setelah disetujui.",
   expired: "Persetujuan kedaluwarsa.",
   unknown_token: "Permintaan tidak dikenal atau sudah dipakai.",
-  declined: "Dibatalkan. Tidak ada yang dikirim keluar."
+  declined: "Dibatalkan. Tidak ada yang dikirim keluar.",
+  // Discovery ran and came back empty-handed. Three different empty hands, and
+  // the first is the one users hit: the adapters always return SOMETHING, and
+  // an off-topic page is now discarded before the model ever sees it.
+  no_relevant_sources: "Sumber yang ditemukan tidak membahas pertanyaan "
+    + "ini. Coba ubah query agar lebih spesifik.",
+  no_fetchable_sources: "Sumber yang ditemukan tidak dapat diambil.",
+  no_allowed_results: "Tidak ada hasil dari domain yang diizinkan.",
+  provider_error: "Provider pencarian tidak dapat dihubungi.",
+  provider_rate_limited: "Penyedia pencarian sedang membatasi permintaan. Coba lagi "
+    + "beberapa saat atau gunakan penyedia lain.",
+  // The companion's own statement for the no-coverage path. Model prose never
+  // travels on this path (2026-09-02: a "document-only" answer that summarised
+  // the page reached the pane), so this is the only text the user sees.
+  no_coverage: "Sumber web yang berhasil diambil tidak menyediakan informasi yang cukup "
+    + "untuk menjawab pertanyaan ini secara terverifikasi. Coba ubah query atau "
+    + "gunakan sumber lain."
+});
+
+// Titles for outcomes that are neither "the search stopped" nor "an answer was
+// withheld": the search ran, pages came back, and the companion is reporting.
+const OUTCOME_TITLES = Object.freeze({
+  no_coverage: "Sumber tidak memuat jawaban"
 });
 
 // Refusals that happen BEFORE any answer exists. Rendering these as "the
@@ -51,8 +73,25 @@ const NO_ANSWER_REASONS = new Set([
   "declined", "empty_query", "empty_selection", "empty_document",
   "host_unavailable", "unsupported_host", "read_failed", "disabled",
   "cloud_session", "not_local", "companion_unreachable", "no_document",
-  "host_not_allowed", "no_adapter", "busy"
+  "host_not_allowed", "no_adapter", "busy",
+  // No source was retrieved, so no answer was ever composed. Rendering these
+  // as "the answer failed verification" would blame the user's document for a
+  // search that found nothing.
+  "no_relevant_sources", "no_fetchable_sources", "no_allowed_results",
+  "provider_error", "provider_rate_limited", "no_coverage"
 ]);
+
+// A source's tier in the user's terms. "public" is a site nobody vouched for;
+// the label says so plainly rather than leaking the machine name.
+const TIER_LABELS = Object.freeze({
+  official: "resmi",
+  "trusted-reference": "referensi tepercaya",
+  public: "web umum"
+});
+
+export function tierLabel(tier) {
+  return TIER_LABELS[String(tier || "")] || String(tier || "");
+}
 
 export function explainFindings(findings) {
   if (!findings || typeof findings !== "object") return [];
@@ -86,7 +125,14 @@ export function lookupResultView(response) {
     return {
       state: "verified", canEdit: true, answer: String(response.answer),
       title: "Jawaban terverifikasi",
-      message: "Jawaban ini sudah dicocokkan dengan dokumen Anda.",
+      // A verified answer built with NO usable web source is still verified —
+      // against the document. Saying so keeps the badge honest: the user must
+      // not read "terverifikasi" as "the web confirmed this".
+      message: response.sourceCoverage === "none"
+        ? "Sumber web yang diambil tidak memuat jawabannya. Teks ini hanya "
+          + "berdasarkan dokumen Anda."
+        : "Jawaban ini sudah dicocokkan dengan dokumen Anda.",
+      sourceCoverage: response.sourceCoverage === "none" ? "none" : "sources",
       findings: [], host,
       // What was checked, so "terverifikasi" is inspectable rather than a badge.
       protectedStrings: Array.isArray(response.protected)
@@ -105,7 +151,8 @@ export function lookupResultView(response) {
   const preFlight = NO_ANSWER_REASONS.has(reason);
   return {
     state: "blocked", canEdit: false, answer: null,
-    title: preFlight ? "Pencarian tidak dilanjutkan" : "Jawaban ditahan",
+    title: OUTCOME_TITLES[reason]
+      || (preFlight ? "Pencarian tidak dilanjutkan" : "Jawaban ditahan"),
     // The mapped text wins; the transport's own message is the fallback so an
     // unmapped reason still explains itself instead of blaming verification.
     message: REASON_MESSAGES[reason]
@@ -114,6 +161,15 @@ export function lookupResultView(response) {
     reason,
     findings: explainFindings(response.findings),
     host,
+    // What was fetched and did not help, so "tidak memuat jawaban" is
+    // inspectable rather than a verdict to take on faith.
+    sources: Array.isArray(response.sources) ? response.sources.map((source) => ({
+      id: String(source?.id || ""),
+      title: String(source?.title || source?.host || ""),
+      url: String(source?.url || ""),
+      host: String(source?.host || ""),
+      tier: String(source?.tier || "")
+    })).filter((source) => source.id && source.url) : [],
     note: preFlight ? ""
       : "Teks jawaban tidak ditampilkan karena tidak lolos pemeriksaan."
   };
@@ -142,12 +198,17 @@ export function renderLookupResultHtml(response) {
       ? `<div class="lookup-sources"><strong>Sumber yang benar-benar diambil:</strong><ul>`
         + view.sources.map((source) =>
           `<li>${escapeHtml(source.id)} — ${escapeHtml(source.title)} `
-          + `(${escapeHtml(source.tier)}): ${escapeHtml(source.url)}</li>`).join("")
+          + `(${escapeHtml(tierLabel(source.tier))}): ${escapeHtml(source.url)}</li>`).join("")
         + `</ul></div>`
       : "";
+    // The one case where a verified answer needs a caveat on screen: it passed
+    // against the DOCUMENT, and the web sources contributed nothing.
+    const coverageNote = view.sourceCoverage === "none"
+      ? `<div class="lookup-note">${escapeHtml(view.message)}</div>` : "";
     return `<div class="lookup-result lookup-verified" data-state="verified">`
       + `<div class="lookup-title">✅ ${escapeHtml(view.title)}</div>`
       + hostLine
+      + coverageNote
       + `<div class="lookup-answer">${escapeHtml(view.answer)}</div>`
       + sources
       + checked
@@ -163,6 +224,13 @@ export function renderLookupResultHtml(response) {
             : "")
         + `</li>`).join("") + `</ul>`
     : "";
+  const fetched = view.sources?.length
+    ? `<div class="lookup-sources"><strong>Sumber yang diambil, tidak memuat jawaban:</strong><ul>`
+      + view.sources.map((source) =>
+        `<li>${escapeHtml(source.id)} — ${escapeHtml(source.title)} `
+        + `(${escapeHtml(tierLabel(source.tier))}): ${escapeHtml(source.url)}</li>`).join("")
+      + `</ul></div>`
+    : "";
   // No answer element and no edit button exist in this branch at all — not
   // hidden ones. A hidden button is one CSS mistake away from being a live one.
   return `<div class="lookup-result lookup-blocked" data-state="blocked">`
@@ -170,6 +238,7 @@ export function renderLookupResultHtml(response) {
     + hostLine
     + `<div class="lookup-message">${escapeHtml(view.message)}</div>`
     + findings
+    + fetched
     + (view.note ? `<div class="lookup-note">${escapeHtml(view.note)}</div>` : "")
     + `</div>`;
 }

@@ -21,6 +21,8 @@
     "sideload:powerpoint": "./tools/sideload-mac-powerpoint.sh",
     "release:workshop-web": "node tools/build-workshop-web.mjs",
     "doctor": "node tools/doctor.mjs",
+    "record": "node tools/record-demo.mjs",
+    "trace": "node tools/trace-report.mjs",
     "start": "node tools/start.mjs",
     "release:workshop": "node tools/release-workshop.mjs"
   },

@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { sourcePolicy } from "../src/chat/domainPolicy.js";
+import { configuredSearchProvider } from "../src/chat/lookupPolicy.js";
 
 export const COMPANION_CONFIG_NAME = "companion.json";
 
@@ -46,6 +48,13 @@ export function companionEnvironment({
       && config?.lookup?.searxngUrl) {
     env.TANTULAR_SEARXNG_URL = String(config.lookup.searxngUrl).trim();
   }
+  if (!Object.hasOwn(baseEnv, "TANTULAR_LOOKUP_SOURCE_POLICY")
+      && config?.lookup?.sourcePolicy) {
+    env.TANTULAR_LOOKUP_SOURCE_POLICY = String(config.lookup.sourcePolicy).trim().toLowerCase();
+  }
+  // Validated here, at startup, so a misspelt policy stops the companion with
+  // the offending value in the error instead of quietly selecting one.
+  const policy = sourcePolicy(env);
 
   return {
     env,
@@ -54,7 +63,8 @@ export function companionEnvironment({
     lookupHosts: String(env.TANTULAR_LOOKUP_HOSTS || "")
       .split(",").map((host) => host.trim()).filter(Boolean),
     discoveryAlpha: String(env.TANTULAR_LOOKUP_DISCOVERY_ALPHA || "").toLowerCase() === "true",
-    searchProvider: String(env.TANTULAR_SEARCH_PROVIDER || "official-federated"),
+    searchProvider: configuredSearchProvider(env),
+    sourcePolicy: policy,
     searxngUrl: String(env.TANTULAR_SEARXNG_URL || ""),
     warning
   };

@@ -49,3 +49,28 @@ test("explicit environment false overrides a persisted opt-in", () => {
   assert.equal(result.lookupEnabled, false);
   assert.equal(result.env.TANTULAR_LOOKUP_ENABLED, "false");
 });
+
+test("local config carries the source policy and the provider default follows it", () => {
+  const official = companionEnvironment({
+    root, baseEnv: {},
+    readFile: () => JSON.stringify({ lookup: {
+      enabled: true, discoveryAlpha: true, sourcePolicy: "official" } })
+  });
+  assert.equal(official.env.TANTULAR_LOOKUP_SOURCE_POLICY, "official");
+  assert.equal(official.sourcePolicy, "official");
+  assert.equal(official.searchProvider, "official-federated");
+
+  const open = companionEnvironment({
+    root, baseEnv: {},
+    readFile: () => JSON.stringify({ lookup: { enabled: true, discoveryAlpha: true } })
+  });
+  assert.equal(open.sourcePolicy, "open");
+  assert.equal(open.searchProvider, "brave-html");
+});
+
+test("an invalid source policy is a startup error, not a silent open", () => {
+  assert.throws(() => companionEnvironment({
+    root, baseEnv: { TANTULAR_LOOKUP_SOURCE_POLICY: "offical" },
+    readFile: () => "{}"
+  }), /invalid_source_policy:offical/);
+});

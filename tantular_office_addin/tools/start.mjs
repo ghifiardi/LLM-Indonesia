@@ -120,7 +120,9 @@ async function launch() {
     : "nonaktif (default fail-closed)");
   if (companion.discoveryAlpha) {
     log("lookup", `discovery alpha aktif; provider=${companion.searchProvider}; `
-      + "retrieval default-deny via domain policy");
+      + (companion.sourcePolicy === "official"
+        ? "retrieval default-deny via domain policy (official)"
+        : "retrieval web umum; pemblokiran keras tetap berlaku (open)"));
     if (companion.searchProvider === "searxng") {
       log("lookup", companion.searxngUrl
         ? `searxng instance: ${companion.searxngUrl}`

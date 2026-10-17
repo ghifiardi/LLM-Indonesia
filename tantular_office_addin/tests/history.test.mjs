@@ -33,3 +33,23 @@ test("clear empties history", () => {
   h.clear();
   assert.deepEqual(h.toMessages(), []);
 });
+
+test("a changed source scope removes stale turns, but an unchanged scope preserves them", () => {
+  const h = createHistory();
+  h.setScope("document:v1");
+  h.add("assistant", "Anggaran lama: 100");
+  assert.equal(h.setScope("document:v1"), false);
+  assert.equal(h.toMessages().length, 1);
+  assert.equal(h.setScope("document:v2"), true);
+  assert.deepEqual(h.toMessages(), []);
+  h.add("user", "Berapa anggaran sekarang?");
+  assert.deepEqual(h.toMessages(), [{ role: "user", content: "Berapa anggaran sekarang?" }]);
+});
+
+test("changing from document context to no context does not carry document claims", () => {
+  const h = createHistory();
+  h.setScope("document:v1");
+  h.add("assistant", "Klaim dari dokumen");
+  h.setScope("none");
+  assert.deepEqual(h.toMessages(), []);
+});

@@ -339,6 +339,13 @@ def xlsx_cell_text(cell: ET.Element, shared: list[str]) -> str:
 
 
 def extract_pdf(data: bytes) -> str:
+    # Tracks whether any reader actually ran (no ImportError, no missing
+    # binary) even if it came back with zero characters — that distinguishes
+    # "nothing here can read a PDF" from "something read it, but the PDF has
+    # no text layer" (a scan/screenshot flattened to images), which need
+    # different, actionable error messages below.
+    a_reader_ran = False
+
     # Try Python libraries if installed.
     for module_name in ("pypdf", "PyPDF2"):
         try:
@@ -347,6 +354,7 @@ def extract_pdf(data: bytes) -> str:
             else:
                 from PyPDF2 import PdfReader  # type: ignore
             reader = PdfReader(io.BytesIO(data))
+            a_reader_ran = True
             pages = []
             for i, page in enumerate(reader.pages):
                 txt = ""
@@ -376,9 +384,21 @@ def extract_pdf(data: bytes) -> str:
             out_path = Path(td) / "output.txt"
             pdf_path.write_bytes(data)
             subprocess.run([pdftotext, "-layout", str(pdf_path), str(out_path)], check=True, timeout=60)
+            a_reader_ran = True
             text = out_path.read_text(errors="replace").strip()
             if text:
                 return text
+
+    if a_reader_ran:
+        # A real reader parsed this PDF successfully and still got no text
+        # from any page — installing a library won't fix that, so don't
+        # suggest it. This is the scanned/screenshot-PDF case: point the
+        # user at the OCR path that actually handles it instead.
+        raise ValueError(
+            "PDF ini tampaknya berisi hasil scan/gambar tanpa teks yang bisa dibaca "
+            "otomatis. Unggah tiap halaman sebagai gambar (PNG/JPG) di kolom "
+            "'Sumber gambar/screenshot' untuk OCR, atau tempel teksnya secara manual."
+        )
 
     raise ValueError(
         "PDF extraction requires pypdf/PyPDF2 or the pdftotext command. "

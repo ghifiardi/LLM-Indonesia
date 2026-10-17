@@ -1,8 +1,19 @@
 export function createHistory({ maxChars = 6000 } = {}) {
   let turns = [];
+  let scopeKey = null;
   return {
     add(role, content) {
       turns.push({ role, content: String(content ?? "") });
+    },
+    // A prior answer about a different document/selection is not evidence for
+    // the current request. Keep the chat transcript in the UI, but never send
+    // its old turns to the model after the source context changes.
+    setScope(key) {
+      const next = String(key ?? "none");
+      if (scopeKey === next) return false;
+      turns = [];
+      scopeKey = next;
+      return true;
     },
     toMessages() {
       const result = [];
@@ -21,6 +32,7 @@ export function createHistory({ maxChars = 6000 } = {}) {
     },
     clear() {
       turns = [];
+      scopeKey = null;
     }
   };
 }

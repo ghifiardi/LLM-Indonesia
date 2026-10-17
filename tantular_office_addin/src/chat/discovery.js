@@ -1,4 +1,4 @@
-import { classifyDomain, filterAllowedResults } from "./domainPolicy.js";
+import { classifyDomain, filterAllowedResults, isFetchAllowed, sourcePolicy } from "./domainPolicy.js";
 import { extractFetchedText } from "./contentExtract.js";
 import { safeFetchUrl } from "./safeFetch.js";
 import { searchProvider } from "./searchProviders.js";
@@ -108,24 +108,128 @@ export function queryRequiresOfficial(query) {
     .test(String(query || ""));
 }
 
-export function rankDiscoveryResults(results, query) {
-  const allowed = filterAllowedResults(results);
-  const officialOnly = queryRequiresOfficial(query);
+// --- relevance ---------------------------------------------------------------
+//
+// Both federated adapters ALWAYS return something: a keyword search with no
+// real match still hands back its best guess. On 2026-09-01 the query
+// "perbandingan proyek distillation data resmi" retrieved a Pacitan e-mail
+// regulation and the Wikipedia article on Astatin, and the run then failed at
+// the citation gate — the model, correctly, had nothing to cite. Tier told us
+// the page was ALLOWED; nothing asked whether it was ABOUT the question.
+//
+// Words that carry no topic. Dropping them matters more than it looks: the
+// refine chips append "data resmi" and "terbaru 2026" to the query, so a page
+// titled "Pedoman Penggunaan Email Resmi" otherwise scores a match on "resmi".
+const QUERY_STOPWORDS = new Set([
+  // Two-letter words are kept out by name rather than by length: "AI", "UU"
+  // and "PDB" are exactly the terms a query is ABOUT, and dropping every short
+  // token scored "data AI model di dunia" against {model, dunia} alone.
+  "di", "ke", "ya", "se", "yg", "dg", "tsb", "utk", "dll", "dsb",
+  "dan", "yang", "untuk", "dari", "pada", "dengan", "atau", "adalah", "itu",
+  "ini", "apa", "tentang", "sebagai", "akan", "oleh", "serta", "para", "juga",
+  "bagaimana", "berapa", "kapan", "siapa", "mana", "saja", "the", "of", "in"
+]);
+const QUERY_GENERIC_TERMS = new Set([
+  "data", "resmi", "terbaru", "informasi", "laporan", "sumber", "ringkasan",
+  "dokumen", "angka", "statistik", "perbandingan", "daftar", "update",
+  "berita", "terkini", "lengkap", "nasional"
+]);
+
+// Measured on real adapter output, 2026-09-01: relevant pages scored 0.67-1.00,
+// clearly off-topic ones 0.00, borderline ones 0.50. The floor sits AT the
+// borderline rather than above it, because the two sides are not symmetric: a
+// marginal source is recoverable — the model answers from the document and
+// marks NO_COVERAGE_MARKER — while an empty source set is a dead end that
+// tells the user only to rephrase. A short query makes every step coarse
+// (with two terms the score can only be 0, 0.5 or 1), and 0.6 turned every
+// two-term query into "both terms or nothing". See tests/discovery.test.mjs.
+export const RELEVANCE_FLOOR = 0.5;
+// Host diversity is worth keeping, but not at one page per host: with two
+// allowed hosts that capped every lookup at two candidates.
+const MAX_PER_HOST = 3;
+// A long article mentions almost any common word somewhere — the Astatin page
+// contains "proyek" once in 30k characters. Only the opening counts, which is
+// where a page says what it is about.
+const LEAD_CHARS = 1200;
+
+function normaliseForMatch(value) {
+  return ` ${String(value || "").toLowerCase().normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, " ").trim()} `;
+}
+
+export function queryTopicalTerms(query) {
+  const terms = new Set();
+  for (const token of normaliseForMatch(query).trim().split(" ")) {
+    if (token.length < 2 || /^\d+$/.test(token)) continue;
+    if (QUERY_STOPWORDS.has(token) || QUERY_GENERIC_TERMS.has(token)) continue;
+    terms.add(token);
+  }
+  return [...terms];
+}
+
+// A query of nothing but generic words ("data resmi terbaru") has no topical
+// term to score against. Judging it by an empty set would reject every page,
+// so fall back to whatever non-stopword terms it does have.
+function scoringTerms(query) {
+  const topical = queryTopicalTerms(query);
+  if (topical.length) return topical;
+  return [...new Set(normaliseForMatch(query).trim().split(" ")
+    .filter((token) => token.length >= 2 && !QUERY_STOPWORDS.has(token)))];
+}
+
+function coverage(haystack, terms) {
+  if (!terms.length) return 0;
+  const hay = normaliseForMatch(haystack);
+  // Prefix match, so Indonesian affixes ("proyeknya") still count.
+  return terms.filter((term) => hay.includes(` ${term}`)).length / terms.length;
+}
+
+// The title or the opening of the page must be about the question. Either is
+// enough: a search result's title is often generic ("Data BPS") while its lead
+// is on point, and a precise title can front a page whose lead is boilerplate.
+export function relevanceScore({ title, text } = {}, query) {
+  const terms = scoringTerms(query);
+  if (!terms.length) return 1;
+  return Math.max(coverage(title, terms),
+                  coverage(String(text || "").slice(0, LEAD_CHARS), terms));
+}
+
+export function rankDiscoveryResults(results, query,
+  { maxPerHost = MAX_PER_HOST, env = process.env } = {}) {
+  // Every allowed result, not one per host: the per-host cap is applied below,
+  // once the results have been SCORED, so a host contributes its best pages
+  // rather than whichever one the search engine happened to list first.
+  const allowed = filterAllowedResults(results, { maxPerHost: Infinity, env });
+  // Under the official policy a legal question is answered from official
+  // sources only, and official pages outrank reference ones. The open policy
+  // has no such preference: the owner's call (2026-09-02) was "no official
+  // preference", so the title match alone decides the order.
+  const officialPolicy = sourcePolicy(env) === "official";
+  const officialOnly = officialPolicy && queryRequiresOfficial(query);
   const filtered = officialOnly
     ? allowed.filter((result) => result.tier === "official")
     : allowed;
-  return filtered.sort((a, b) => {
-    const rank = (item) => item.tier === "official" ? 0 : 1;
-    return rank(a) - rank(b);
+  const terms = scoringTerms(query);
+  const ordered = filtered.map((result) => ({
+    result, score: coverage(result.title, terms)
+  })).sort((a, b) => {
+    const rank = (item) => officialPolicy && item.result.tier !== "official" ? 1 : 0;
+    return rank(a) - rank(b) || b.score - a.score;
   });
+  const taken = new Map();
+  const kept = [];
+  for (const { result } of ordered) {
+    const count = taken.get(result.host) || 0;
+    if (count >= maxPerHost) continue;
+    taken.set(result.host, count + 1);
+    kept.push(result);
+  }
+  return kept;
 }
 
-export function domainDecision(url) {
+export function domainDecision(url, env = process.env) {
   const classified = classifyDomain(url);
-  return {
-    ...classified,
-    allowed: classified.tier === "official" || classified.tier === "trusted-reference"
-  };
+  return { ...classified, allowed: isFetchAllowed(url, { env }) };
 }
 
 export async function discoverAndRetrieve({
@@ -133,11 +237,22 @@ export async function discoverAndRetrieve({
   providerId = DEFAULT_DISCOVERY_PROVIDER,
   fetchUrl = safeFetchUrl,
   maxSources = 3,
+  maxPages,
+  maxRetrievalCandidates,
   audit = () => {},
   env = process.env
 }) {
   const provider = searchProvider(providerId, env);
   if (!provider) return { ok: false, reason: "provider_unavailable", sources: [] };
+
+  // How many search-result pages to pull, and how many of the ranked candidates
+  // to actually retrieve. Pagination widens the POOL the ranker sees; the
+  // retrieval cap still bounds how many real pages get fetched. Env overrides so
+  // an operator can trade latency for breadth without a code change.
+  const pages = Math.max(1,
+    Number(maxPages ?? env.TANTULAR_LOOKUP_MAX_PAGES ?? 3) || 1);
+  const fetchLimit = Math.max(maxSources,
+    Number(maxRetrievalCandidates ?? env.TANTULAR_LOOKUP_MAX_FETCH ?? 8) || 8);
 
   let rawCandidates;
   if (provider.kind === "federated-adapters") {
@@ -145,46 +260,90 @@ export async function discoverAndRetrieve({
       query, env, fetchUrl, audit
     });
   } else {
-    const request = provider.buildRequest(query);
-    let search;
-    try {
-      search = await fetchUrl(request.url, {
-        headers: request.headers,
-        timeoutMs: 8_000,
-        maxBytes: 750_000,
-        allowHttp: provider.allowLocalProvider === true,
-        allowPrivateHost: provider.allowLocalProvider === true,
-        allowContentTypes: provider.searchContentTypes,
-        policy: (url) => {
-          const host = new URL(url).hostname.toLowerCase();
-          return { allowed: host === provider.host, host, tier: "search-provider",
-                   reason: host === provider.host ? "fixed_provider_host" : "provider_redirect_blocked" };
+    // Page through the provider, accumulating results across pages. Dedupe by
+    // URL so an overlap between adjacent pages does not double-count, and stop
+    // early the moment a page adds nothing new — that is the end of results, and
+    // fetching further empty pages only burns latency.
+    rawCandidates = [];
+    const seenUrls = new Set();
+    const providerPolicy = (url) => {
+      const host = new URL(url).hostname.toLowerCase();
+      return { allowed: host === provider.host, host, tier: "search-provider",
+               reason: host === provider.host ? "fixed_provider_host" : "provider_redirect_blocked" };
+    };
+    for (let page = 1; page <= pages; page += 1) {
+      const request = provider.buildRequest(query, { page });
+      let search;
+      try {
+        search = await fetchUrl(request.url, {
+          headers: request.headers,
+          timeoutMs: 8_000,
+          maxBytes: 750_000,
+          allowHttp: provider.allowLocalProvider === true,
+          allowPrivateHost: provider.allowLocalProvider === true,
+          allowContentTypes: provider.searchContentTypes,
+          policy: providerPolicy
+        });
+      } catch (error) {
+        audit({ stage: "search", provider: provider.id, page, outcome: "error",
+                reason: String(error?.message || error) });
+        // A first-page failure is a real provider outage; report it. A later
+        // page failing just ends pagination — keep whatever earlier pages gave.
+        if (page === 1) return { ok: false, reason: "provider_error", sources: [] };
+        break;
+      }
+      // A refused search is a provider failure even though a body came back.
+      // Brave answered 429 with a captcha page after a burst (2026-09-02); it
+      // parsed to zero results and the user was told to rephrase.
+      if (search.status < 200 || search.status >= 300) {
+        audit({ stage: "search", provider: provider.id, page, outcome: "error",
+                requestedUrl: search.requestedUrl, finalUrl: search.finalUrl,
+                status: search.status, reason: `search HTTP ${search.status}` });
+        if (page === 1) {
+          // 429 is the provider saying "not now", not an outage: the user's
+          // remedy is to wait or switch provider, so it gets its own reason.
+          return { ok: false, sources: [],
+                   reason: search.status === 429 ? "provider_rate_limited" : "provider_error" };
         }
-      });
-    } catch (error) {
-      audit({ stage: "search", provider: provider.id, outcome: "error",
-              reason: String(error?.message || error) });
-      return { ok: false, reason: "provider_error", sources: [] };
+        break;
+      }
+      const pageResults = provider.parse(search.body.toString("utf8"));
+      let added = 0;
+      for (const result of pageResults) {
+        if (!result?.url || seenUrls.has(result.url)) continue;
+        seenUrls.add(result.url);
+        rawCandidates.push(result);
+        added += 1;
+      }
+      audit({ stage: "search", provider: provider.id, page, outcome: "ok",
+              requestedUrl: search.requestedUrl, finalUrl: search.finalUrl,
+              contentHash: search.contentHash,
+              resultCount: pageResults.length, newResults: added,
+              totalResults: rawCandidates.length });
+      if (added === 0) break;
     }
-    rawCandidates = provider.parse(search.body.toString("utf8"));
-    audit({ stage: "search", provider: provider.id, outcome: "ok",
-            requestedUrl: search.requestedUrl, finalUrl: search.finalUrl,
-            contentHash: search.contentHash, resultCount: rawCandidates.length });
   }
-  const candidates = rankDiscoveryResults(rawCandidates, query);
+  const candidates = rankDiscoveryResults(rawCandidates, query, { env });
+  // One door decision for both the initial URL and every redirect hop, bound
+  // to the same policy the ranker used.
+  const door = (url) => domainDecision(url, env);
 
   const sources = [];
-  for (const candidate of candidates.slice(0, 8)) {
-    const initialPolicy = domainDecision(candidate.url);
+  let rejectedAsIrrelevant = false;
+  for (const candidate of candidates.slice(0, fetchLimit)) {
+    const initialPolicy = door(candidate.url);
     try {
       const fetched = await fetchUrl(candidate.url, {
         timeoutMs: 8_000,
-        maxBytes: 1_000_000,
+        // 1 MB rejected id.wikipedia.org/wiki/Indonesia outright — the single
+        // most relevant page for any query about the country, discarded as
+        // "response_too_large" with no trace the user could see.
+        maxBytes: 3_000_000,
         headers: {
           "User-Agent": "TantularOffice/0.1 (official-source retrieval alpha)",
           "Accept": "text/html,application/xhtml+xml,text/plain,application/pdf"
         },
-        policy: domainDecision
+        policy: door
       });
       const extracted = extractFetchedText(fetched);
       audit({
@@ -202,6 +361,23 @@ export async function discoverAndRetrieve({
         outcome: extracted.ok ? "usable" : extracted.reason
       });
       if (!extracted.ok || fetched.status < 200 || fetched.status >= 300) continue;
+      // An allowed page is not a relevant page. Handing the model an off-topic
+      // source produces an answer it cannot cite, which the citation gate then
+      // refuses — a refusal the user reads as the feature being broken.
+      const score = relevanceScore(
+        { title: candidate.title, text: extracted.text }, query);
+      if (score < RELEVANCE_FLOOR) {
+        rejectedAsIrrelevant = true;
+        audit({
+          stage: "retrieve", provider: provider.id,
+          requestedUrl: fetched.requestedUrl, finalUrl: fetched.finalUrl,
+          domain: fetched.policy.host, domainTier: fetched.policy.tier,
+          policyReason: fetched.policy.reason, status: fetched.status,
+          contentHash: fetched.contentHash, outcome: "irrelevant",
+          reason: `relevance ${score.toFixed(2)} < ${RELEVANCE_FLOOR}`
+        });
+        continue;
+      }
       sources.push({
         id: `S${sources.length + 1}`,
         url: fetched.finalUrl,
@@ -227,8 +403,13 @@ export async function discoverAndRetrieve({
     }
   }
   if (!sources.length) {
-    return { ok: false, reason: candidates.length ? "no_fetchable_sources" : "no_allowed_results",
-             sources: [], provider: provider.id };
+    // Three distinct dead ends, and they mean different things to the user:
+    // nothing allowed came back, nothing could be fetched, or what was fetched
+    // was not about the question. The last one is the common case and must not
+    // masquerade as a network problem.
+    const reason = !candidates.length ? "no_allowed_results"
+      : rejectedAsIrrelevant ? "no_relevant_sources" : "no_fetchable_sources";
+    return { ok: false, reason, sources: [], provider: provider.id };
   }
   return { ok: true, provider: provider.id, sources };
 }

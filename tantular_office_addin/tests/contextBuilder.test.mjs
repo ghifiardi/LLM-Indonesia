@@ -4,7 +4,10 @@ import {
   chunkText,
   hashText,
   normalizeSearchText,
-  selectRelevantContext
+  selectRelevantContext,
+  buildDocumentContextSnapshot,
+  clearDocumentContextCache,
+  DocumentChangedError
 } from "../src/chat/contextBuilder.js";
 
 test("short text is a single chunk", () => {
@@ -64,4 +67,45 @@ test("finds a relevant section late in a long document without summarizing it aw
   );
   assert.match(result, /Arsitektur Model Terbuka/);
   assert.match(result, /exit plan/);
+});
+
+test("document snapshot changes revision when the source changes", async () => {
+  const a = await buildDocumentContextSnapshot({ readBody: async () => "Anggaran: 100" });
+  const b = await buildDocumentContextSnapshot({ readBody: async () => "Anggaran: 200" });
+  assert.notEqual(a.revision, b.revision);
+  assert.equal(b.text, "Anggaran: 200");
+});
+
+test("a document edited during summarization is neither served nor cached", async () => {
+  clearDocumentContextCache();
+  let body = "Kalimat tanpa kata kunci. ".repeat(300);
+  const oldBody = body;
+  let calls = 0;
+  const readBody = async () => body;
+  const summarize = async () => {
+    calls += 1;
+    body = "Dokumen telah berubah. ".repeat(300);
+    return "Ringkasan lama";
+  };
+  await assert.rejects(
+    buildDocumentContextSnapshot({ readBody, summarize }),
+    (error) => {
+      assert.ok(error instanceof DocumentChangedError);
+      assert.equal(error.code, "DOCUMENT_CHANGED");
+      assert.match(error.message, /^Dokumen berubah saat diringkas\. Coba lagi/);
+      return true;
+    }
+  );
+  assert.notEqual(body, oldBody);
+  const fresh = await buildDocumentContextSnapshot({
+    readBody,
+    summarize: async () => { calls += 1; return "Ringkasan baru"; }
+  });
+  const expectedChunks = chunkText(body).length;
+  assert.ok(expectedChunks > 1, "fixture must span several chunks");
+  // The rejected run summarized every chunk of the OLD body; the fresh run
+  // summarizes exactly one per chunk of the NEW body.
+  assert.equal(calls, chunkText(oldBody).length + expectedChunks);
+  assert.equal(fresh.text, Array(expectedChunks).fill("Ringkasan baru").join("\n\n"));
+  clearDocumentContextCache();
 });
