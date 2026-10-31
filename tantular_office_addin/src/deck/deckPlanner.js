@@ -564,6 +564,12 @@ export function isThinContent(text) {
   return value.length < 220 && (lines.length <= 2 || words.length < 28);
 }
 
+// A deliberately requested multi-slide deck must reach the deck planner even
+// when its source is short; the title-only shortcut ignores slide count.
+export function shouldUseTitleSlide(text, { countWasExplicit = false } = {}) {
+  return !countWasExplicit && isThinContent(text);
+}
+
 export function looksLikePresentationBrief(text) {
   const value = String(text || "").toLowerCase();
   const presentationSignal = /\b(deck|slide|slides|presentasi|powerpoint|pptx|keynote)\b/i.test(value);

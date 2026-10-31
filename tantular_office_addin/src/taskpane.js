@@ -42,7 +42,7 @@ import { styleOptions } from "./deck/deckStyles.js";
 import {
   planDeck,
   buildTitleSlideSpec,
-  isThinContent,
+  shouldUseTitleSlide,
   looksLikePresentationBrief,
   inferRequestedSlideCount,
   summarizeDeckSections
@@ -1765,7 +1765,7 @@ async function resolveDeckSpec(signal, setPhase = (text) => { els.deckProgressTe
     renderDeckPreview(state.deckSpec, "capability map");
     return "capability map";
   }
-  if (isThinContent(content) && !looksLikePresentationBrief(content)) {
+  if (shouldUseTitleSlide(content, { countWasExplicit: state.deckCountManual || requestedCount > 0 })) {
     state.deckSpec = applyProjectOutputFormat(buildTitleSlideSpec(content), content);
     state.deckSpecFingerprint = fingerprint;
     state.deckSpecLabel = "judul rapi";

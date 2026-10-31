@@ -4,6 +4,7 @@ import {
   expandSlidesToCount,
   inferRequestedSlideCount,
   isThinContent,
+  shouldUseTitleSlide,
   looksLikePresentationBrief,
   planDeck,
   summarizeDeckSections,
@@ -19,6 +20,13 @@ test("long instruction-style deck brief is not mistaken for a title", () => {
 
 test("plain short title remains thin content", () => {
   assert.equal(isThinContent("Sovereign AI Indonesia"), true);
+});
+
+test("an explicit slide count bypasses the single-title shortcut for a short brief", () => {
+  const brief = "Rencana taman komunitas: pilih lokasi, tanam pohon, jadwalkan perawatan.";
+  assert.equal(shouldUseTitleSlide(brief), true);
+  assert.equal(shouldUseTitleSlide(brief, { countWasExplicit: true }), false);
+  assert.equal(shouldUseTitleSlide("Buat presentasi slide untuk audiens direksi."), false);
 });
 
 test("infers numeric and Indonesian-word slide counts", () => {
