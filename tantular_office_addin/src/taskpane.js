@@ -686,13 +686,14 @@ function setUpLookup() {
       const question = refined.question
         ? `<p class="lookup-refine-question"><strong>${escapeHtml(refined.question)}</strong></p>`
         : "";
+      // Each candidate is one option row: the query to pick, and the reason
+      // beneath it. The leak warning stays on the query line, where the eye is.
       area.innerHTML = question + refined.candidates.map((c, i) =>
-        `<button type="button" class="secondary full-width-button lookup-candidate"
-                 data-index="${i}">
-           ${escapeHtml(c.query)}${c.containsDocumentData
-             ? ` <span class="lookup-leak-warning">⚠ memuat data dokumen</span>` : ""}
-         </button>
-         <p class="hint">${escapeHtml(c.why || "")}</p>`).join("");
+        `<button type="button" class="lookup-candidate" data-index="${i}">
+           <span class="lookup-candidate-query">${escapeHtml(c.query)}${c.containsDocumentData
+             ? ` <span class="lookup-leak-warning">⚠ memuat data dokumen</span>` : ""}</span>
+           ${c.why ? `<span class="lookup-candidate-why">${escapeHtml(c.why)}</span>` : ""}
+         </button>`).join("");
       area.querySelectorAll(".lookup-candidate").forEach((btn) => {
         btn.addEventListener("click", () => {
           const chosen = refined.candidates[Number(btn.dataset.index)];
