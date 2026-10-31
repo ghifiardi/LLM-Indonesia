@@ -60,6 +60,16 @@ Then sideload `manifest.xml` in Word, Excel, or PowerPoint and open **Home → T
 
 Chat mode is available in Word only. The context selector cycles through four options: **Otomatis** (automatic context), **Seleksi** (user selection), **Dokumen (isi utama)** (main body only—headers, footers, footnotes, text boxes, and comments are excluded), and **Tanpa konteks** (no document context). On Word versions without tracked-changes API support (WordApi < 1.4), edits are applied directly with an Undo hint instead of as tracked changes. Edit requests show a preview before applying; changes are applied as Word tracked changes when you click **Terapkan**. Run `npm test` to verify the complete unit test suite (32 tests).
 
+## Voice chat (local only)
+
+The chat in Word, Excel, and PowerPoint has a push-to-talk button (**🎙 Tahan untuk bicara**). Hold it, speak Bahasa Indonesia or English, release: the companion transcribes with whisper.cpp, the transcript runs through the normal chat flow (same intent routing, stale-context guard, and click-to-apply edit review), and the reply is shown and read aloud with macOS `say` (Damayanti / Samantha). Audio, transcript, model, and speech all stay on the Mac:
+
+- `/api/voice/*` on the dev server answers loopback peers only and never forwards anything; recordings are written to a private temp dir and deleted after transcription.
+- The pane refuses voice in Mode Cloud, in the browser portal, or when the chat endpoint in Settings is not a localhost URL, and re-checks before every send.
+- If Word's webview refuses `getUserMedia`, the companion records the Mac's default input with ffmpeg instead (microphone permission then belongs to the terminal app running `npm run dev`).
+
+Requirements: `brew install whisper-cpp ffmpeg` and a multilingual ggml model. By default the model is read from `../tantular-distillation/agent_service/voice-models/ggml-base.bin`; override with `TANTULAR_WHISPER_MODEL`. Other overrides: `TANTULAR_WHISPER_BIN`, `TANTULAR_SAY_BIN`, `TANTULAR_VOICE_ID`, `TANTULAR_VOICE_EN`, `TANTULAR_VOICE_INPUT` (ffmpeg avfoundation input, default `:default`).
+
 ## Development model API
 
 The add-in expects an OpenAI-compatible chat-completions endpoint:

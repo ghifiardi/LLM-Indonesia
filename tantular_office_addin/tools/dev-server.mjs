@@ -4,6 +4,18 @@ import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createWorkspaceStore, handleWorkspaceRequest } from "./workspace.mjs";
+import {
+  MAX_VOICE_AUDIO_BYTES,
+  cancelRecording,
+  finishRecording,
+  isLoopbackAddress,
+  speakText,
+  startRecording,
+  stopSpeaking,
+  transcribeWav,
+  voiceConfig,
+  voiceStatus
+} from "./voice.mjs";
 import { randomUUID } from "node:crypto";
 import {
   ollamaLineToOpenAiEvent,
@@ -606,6 +618,11 @@ function handler(req, res) {
     return;
   }
 
+  if (url.pathname.startsWith("/api/voice/")) {
+    handleVoice(req, res, url);
+    return;
+  }
+
   if (url.pathname === "/api/chat-completions") {
     proxyChatCompletions(req, res);
     return;
@@ -680,6 +697,150 @@ function handler(req, res) {
       "Access-Control-Allow-Origin": "*"
     });
     res.end(body);
+  });
+}
+
+// --- local push-to-talk voice (see tools/voice.mjs) ------------------------
+//
+// Loopback peers only, on top of the usual origin check: the server listens
+// on every interface, and these routes drive this Mac's microphone pipeline
+// and speakers. Audio and transcripts are never forwarded anywhere; the
+// transcript goes back to the pane, which sends it through the normal chat
+// flow to /api/chat-completions (local Ollama).
+const VOICE_CONFIG = voiceConfig(process.env, root);
+const VOICE_CONVERSATION_MODEL = process.env.TANTULAR_VOICE_MODEL || "tantular-office:0.5-9b";
+
+function handleVoice(req, res, url) {
+  const reply = (status, payload) => {
+    if (res.writableEnded || res.destroyed) return;
+    res.writeHead(status, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...corsHeaders(req)
+    });
+    res.end(JSON.stringify(payload));
+  };
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "Suara hanya tersedia dari komputer ini." }));
+    return;
+  }
+  if (!allowApiOrigin(req, res)) return;
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      ...corsHeaders(req),
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Private-Network": "true"
+    });
+    res.end();
+    return;
+  }
+  const route = url.pathname.slice("/api/voice/".length);
+  const fail = (error) => reply(error?.status || 500, { ok: false, error: String(error?.message || error) });
+
+  if (route === "status" && req.method === "GET") {
+    Promise.all([voiceStatus(VOICE_CONFIG), ollamaHasModel(VOICE_CONVERSATION_MODEL)])
+      .then(([status, installed]) => reply(200, {
+        ...status,
+        conversationModel: { name: VOICE_CONVERSATION_MODEL, installed }
+      }))
+      .catch(fail);
+    return;
+  }
+  if (req.method !== "POST") {
+    reply(405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  if (route === "transcribe") {
+    readRawBody(req, MAX_VOICE_AUDIO_BYTES, (error, buffer) => {
+      if (error) return fail(error);
+      transcribeWav(VOICE_CONFIG, buffer, url.searchParams.get("lang"))
+        .then((result) => reply(200, { ok: true, ...result }))
+        .catch(fail);
+    });
+    return;
+  }
+  if (route === "speak") {
+    readJsonBody(req, (error, body) => {
+      if (error) return fail(error);
+      const playback = speakText(VOICE_CONFIG, body?.text, body?.language);
+      // A pane that closes mid-sentence should not leave the Mac talking.
+      res.on("close", () => { if (!res.writableEnded) stopSpeaking(); });
+      playback.then((result) => reply(200, { ok: true, ...result })).catch(fail);
+    });
+    return;
+  }
+  if (route === "stop") {
+    reply(200, { ok: true, stopped: stopSpeaking() });
+    return;
+  }
+  if (route === "record/start") {
+    try {
+      reply(200, { ok: true, ...startRecording(VOICE_CONFIG) });
+    } catch (error) {
+      fail(error);
+    }
+    return;
+  }
+  if (route === "record/stop") {
+    finishRecording()
+      .then((buffer) => transcribeWav(VOICE_CONFIG, buffer, url.searchParams.get("lang")))
+      .then((result) => reply(200, { ok: true, ...result }))
+      .catch(fail);
+    return;
+  }
+  if (route === "record/cancel") {
+    cancelRecording();
+    reply(200, { ok: true });
+    return;
+  }
+  reply(404, { ok: false, error: "Not found" });
+}
+
+function readRawBody(req, limit, callback) {
+  const chunks = [];
+  let size = 0;
+  let finished = false;
+  req.on("data", (chunk) => {
+    if (finished) return;
+    size += chunk.length;
+    if (size > limit) {
+      finished = true;
+      callback(Object.assign(new Error("Rekaman terlalu panjang."), { status: 413 }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on("end", () => {
+    if (finished) return;
+    finished = true;
+    callback(null, Buffer.concat(chunks));
+  });
+  req.on("error", (error) => {
+    if (finished) return;
+    finished = true;
+    callback(error);
+  });
+}
+
+function ollamaHasModel(name) {
+  return new Promise((resolve) => {
+    const request = http.get({ hostname: "127.0.0.1", port: OLLAMA_PORT, path: "/api/tags", timeout: 3_000 }, (response) => {
+      collectResponse(response, (error, raw) => {
+        if (error) return resolve(null);
+        try {
+          const models = JSON.parse(raw)?.models || [];
+          resolve(models.some((model) => model?.name === name || model?.model === name));
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    // null = unknown (Ollama not running), distinct from "not installed".
+    request.on("timeout", () => request.destroy());
+    request.on("error", () => resolve(null));
   });
 }
 

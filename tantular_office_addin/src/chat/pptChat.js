@@ -80,6 +80,10 @@ export function mountPptChatPane() {
   els.pill.addEventListener("click", () => reloadDeck());
   renderChips();
 
+  import("./voiceControls.js")
+    .then(({ mountVoiceControls }) => mountVoiceControls({ card, send, isBusy: () => state.busy, addBubble }))
+    .catch((error) => console.warn("[TantularVoice] not available:", error));
+
   els.send.addEventListener("click", () => send());
   els.stop.addEventListener("click", () => state.abort?.abort());
   els.input.addEventListener("keydown", (event) => {
@@ -236,16 +240,17 @@ export function mountPptChatPane() {
     }
   }
 
-  async function send() {
-    const message = els.input.value.trim();
+  async function send(spokenText = null, { voice = false } = {}) {
+    const message = (spokenText ?? els.input.value).trim();
     if (!message || state.busy) return;
-    els.input.value = "";
-    addBubble("user", message);
+    if (!voice) els.input.value = "";
+    addBubble(voice ? "user voice" : "user", message);
     const answer = addBubble("assistant", "Membaca deck aktif...");
     state.busy = true;
     state.abort = new AbortController();
     els.stop.classList.remove("hidden");
 
+    let spoken = "";
     try {
       const ctx = await getDeckContext();
       els.pill.textContent = `Konteks: deck aktif (${ctx.source})`;
@@ -297,6 +302,7 @@ export function mountPptChatPane() {
 
       history.add("user", message);
       history.add("assistant", parsed.reply);
+      spoken = answer.textContent;
     } catch (error) {
       console.error("[TantularChat/PPT]", error, error?.debugInfo);
       // tantularClient turns any AbortError into a "model terlalu lama" timeout
@@ -313,5 +319,6 @@ export function mountPptChatPane() {
       state.abort = null;
       els.stop.classList.add("hidden");
     }
+    return { spoken: voice ? spoken : "" };
   }
 }

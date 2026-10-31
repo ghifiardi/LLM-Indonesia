@@ -52,6 +52,12 @@ export function mountChatPane({ host }) {
 
   renderChips();
   setPill(null);
+  // Push-to-talk rides on send() below, so a spoken turn gets the same
+  // routing, stale-context guard, and click-to-apply edit review as a typed
+  // one. Loaded lazily: if voice fails to load, typed chat is unaffected.
+  import("./voiceControls.js")
+    .then(({ mountVoiceControls }) => mountVoiceControls({ card, send, isBusy: () => state.busy, addBubble }))
+    .catch((error) => console.warn("[TantularVoice] not available:", error));
 
   els.send.addEventListener("click", () => send());
   els.stop.addEventListener("click", () => state.abort?.abort());
@@ -357,16 +363,21 @@ export function mountChatPane({ host }) {
     busyNote.textContent = text;
   }
 
-  async function send() {
-    const typed = els.input.value.trim();
-    if (!typed || state.busy) return;
+  // spokenText: a local Whisper transcript from voiceControls.js. It goes
+  // through exactly the same flow as typed text; the only differences are that
+  // the textarea is left alone and the reply text is returned so it can be
+  // read aloud. Returns { spoken } (or null when nothing was sent).
+  async function send(spokenText = null, { voice = false } = {}) {
+    const typed = String(spokenText ?? els.input.value).trim();
+    if (!typed || state.busy) return null;
     state.busy = true;
-    els.input.value = "";
+    if (spokenText === null) els.input.value = "";
     els.send.classList.add("hidden");
     els.stop.classList.remove("hidden");
-    addBubble("user", typed);
+    addBubble(voice ? "user voice" : "user", typed);
     const answer = addBubble("assistant", "");
     state.abort = new AbortController();
+    let replyText = "";
     try {
       // A short reply ("yang kedua") to a pending "which one?" answers it: run
       // the ORIGINAL request, with its original intent, on the chosen span.
@@ -451,6 +462,7 @@ export function mountChatPane({ host }) {
         // complete response is available.
         answer.replaceChildren(tag);
         renderChatMarkdown(answer, result.text);
+        replyText = result.text;
         // RINGKAS results had no way to reach the document at all — the user
         // could read a summary in the chat pane but never insert it, unlike
         // TANYA_DOKUMEN (full action set) or DRAFT_TEKS (single insert
@@ -525,5 +537,14 @@ export function mountChatPane({ host }) {
       els.send.classList.remove("hidden");
       els.stop.classList.add("hidden");
     }
+    return { spoken: voice ? (replyText || visibleAnswerText(answer)) : "" };
+  }
+
+  // What the user can read in the answer bubble, minus the intent tag and the
+  // insert buttons — e.g. "Usulan edit siap…" or a clarifying question.
+  function visibleAnswerText(answer) {
+    const copy = answer.cloneNode(true);
+    copy.querySelectorAll(".intent-tag, .chat-answer-actions").forEach((node) => node.remove());
+    return copy.textContent.trim();
   }
 }

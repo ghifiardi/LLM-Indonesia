@@ -126,6 +126,24 @@
           <button id="chat-stop" class="secondary hidden" type="button">Stop</button>
         </div>
       </div>
+      <!-- Push-to-talk. Audio, transcription, the model, and speech all stay
+           on this Mac (src/chat/voiceControls.js); hidden until the chat
+           mounts it, and disabled in Mode Cloud. -->
+      <div id="chat-voice-row" class="chat-voice-row hidden">
+        <button id="chat-mic" class="secondary chat-mic" type="button" aria-pressed="false"
+                title="Tahan sambil berbicara, lepas untuk mengirim. Diproses lokal di Mac ini.">🎙 Tahan untuk bicara</button>
+        <div class="chat-voice-options">
+          <label>Bahasa
+            <select id="chat-voice-lang">
+              <option value="auto">Otomatis</option>
+              <option value="id">Bahasa Indonesia</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <label><input id="chat-voice-speak" type="checkbox" checked> Bacakan jawaban</label>
+        </div>
+        <small id="chat-voice-status" class="chat-voice-status" role="status"></small>
+      </div>
     </section>
 
     <section class="card settings" aria-labelledby="settings-title">
