@@ -322,3 +322,57 @@ test("chat-completions never forwards stream:true to the upstream", async () => 
     globalThis.fetch = originalFetch;
   }
 });
+
+
+async function captureGatewayLogs(run) {
+  const previous = { log: console.log, warn: console.warn, error: console.error };
+  const events = [];
+  for (const method of Object.keys(previous)) console[method] = (...args) => events.push({ method, args });
+  try { await run(events); } finally { Object.assign(console, previous); }
+}
+function assertSafeEvent(events, category, status) {
+  assert.equal(events.length, 1);
+  const event = JSON.parse(events[0].args[0]);
+  assert.deepEqual(Object.keys(event).sort(), ["category", "event", "requestId", "status", "timestamp"].sort());
+  assert.equal(event.event, "tantular_gateway");
+  assert.equal(event.category, category);
+  assert.equal(event.status, status);
+  assert.match(event.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.ok(!Number.isNaN(Date.parse(event.timestamp)));
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE_PROMPT|PRIVATE_COMPLETION|SECRET_TOKEN|example.test|SENSITIVE_HEADER/);
+}
+test("upstream error logs safe metadata only and does not read its body", async () => {
+  const originalFetch = globalThis.fetch;
+  let read = false;
+  globalThis.fetch = async () => ({ ok: false, status: 429, text: async () => { read = true; return "PRIVATE_PROMPT SECRET_TOKEN"; } });
+  try {
+    await withEnv({ TANTULAR_UPSTREAM_URL: "https://example.test", TANTULAR_UPSTREAM_KEY: "SECRET_TOKEN" }, () => captureGatewayLogs(async (events) => {
+      const response = mockResponse();
+      await handler({ method: "POST", headers: { "x-request-id": "SENSITIVE_HEADER" }, body: { messages: [{ role: "user", content: "PRIVATE_PROMPT" }] } }, response);
+      assert.equal(response.statusCode, 429); assert.equal(read, false); assertSafeEvent(events, "upstream_http_error", 429);
+      assert.doesNotMatch(JSON.stringify(response.body), /PRIVATE_PROMPT|SECRET_TOKEN/);
+    }));
+  } finally { globalThis.fetch = originalFetch; }
+});
+test("network exceptions log no message, credentials or content", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("PRIVATE_PROMPT SECRET_TOKEN https://example.test"); };
+  try {
+    await withEnv({ TANTULAR_UPSTREAM_URL: "https://example.test", TANTULAR_UPSTREAM_KEY: "SECRET_TOKEN" }, () => captureGatewayLogs(async (events) => {
+      const response = mockResponse();
+      await handler({ method: "POST", body: { messages: [{ role: "user", content: "PRIVATE_PROMPT" }] } }, response);
+      assert.equal(response.statusCode, 502); assertSafeEvent(events, "upstream_request_failed", 502);
+    }));
+  } finally { globalThis.fetch = originalFetch; }
+});
+test("successful requests log metadata but no prompt or completion", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, text: async () => JSON.stringify({ choices: [{ message: { content: "PRIVATE_COMPLETION" } }] }) });
+  try {
+    await withEnv({ TANTULAR_UPSTREAM_URL: "https://example.test", TANTULAR_UPSTREAM_KEY: "SECRET_TOKEN" }, () => captureGatewayLogs(async (events) => {
+      const response = mockResponse();
+      await handler({ method: "POST", body: { messages: [{ role: "user", content: "PRIVATE_PROMPT" }] } }, response);
+      assert.equal(response.statusCode, 200); assert.match(response.body, /PRIVATE_COMPLETION/); assertSafeEvent(events, "success", 200);
+    }));
+  } finally { globalThis.fetch = originalFetch; }
+});
