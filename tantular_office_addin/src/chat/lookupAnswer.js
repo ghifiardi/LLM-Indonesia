@@ -10,7 +10,9 @@
 // a hostile page in 3 of 7 injection classes. The untrusted label does not stop
 // it. This module assumes the model WILL be fooled and checks the output.
 
-import { verify, newFacts } from "./verifyWebAnswer.js";
+import { verifyResearch, newFacts, hasInstructionCues, instructionGateCues } from "./verifyWebAnswer.js";
+import { sourcesAsUntrusted } from "./discovery.js";
+import { recoverResearchAnswer, validateSourceLabels } from "./researchAnswerRecovery.js";
 
 // What the model must write when the fetched sources do not answer the
 // question. Before this existed the prompt asked for exactly that answer in one
@@ -99,35 +101,28 @@ function stripMarker(answer) {
     .replace(/\s+/g, " ").trim();
 }
 
-function citationRefusal(finding, answer) {
-  const blocked = {
-    ok: false, status: "blocked_by_verifier",
-    reason: "source_citation_failed",
-    message: "Jawaban tidak mengutip sumber yang benar-benar diambil.",
-    findings: { fail_closed: [finding] }
-  };
-  // Same non-enumerable debug channel as the verifier refusal above: this is
-  // the block that fired in the field, and without the text there was nothing
-  // to diagnose it with.
-  if (globalThis.process?.env?.TANTULAR_LOOKUP_DEBUG === "true") {
-    Object.defineProperty(blocked, "answerForDebug",
-                          { value: answer, enumerable: false });
-  }
-  return blocked;
-}
-
-// Every refusal shape the pane can receive. `answer` is present ONLY on
-// success — a blocked answer is not returned at all, so no pane bug can
-// display it, and no edit path can reach it.
-export async function answerWithLookup({ complete, verifier = verify,
+// The result shapes the pane can receive (true Open Research Mode, 2026-09-04).
+//
+//   research_answer        ok:true   answer + sources, canEdit:false
+//   research_partial       ok:true   answer + omittedClaims + sources, canEdit:false
+//   research_sources_only  ok:false  sources + reason, NO answer — retrieval
+//                                    succeeded but no safe synthesis remains
+//   no_coverage            ok:false  structural: the model declared the pages
+//                                    do not answer; sources listed, no prose
+//   blocked_by_verifier    ok:false  hard block: no sources, model/verifier
+//                                    failure, malformed result
+//
+// Web research is not a document-verification operation. The document is
+// optional context, not a truth boundary: display gates on citation-label
+// integrity and verifyResearch() (no `preserves`). Strict verify() is
+// untouched and reserved for the future write workflow; no research result
+// carries edit permission and `answer` is present ONLY on the two readable
+// states, so no pane bug can display withheld prose.
+export async function answerWithLookup({ complete, researchVerifier = verifyResearch,
+                                         recover = recoverResearchAnswer,
                                          document, untrusted, question,
                                          sources = [] }) {
-  if (!String(document || "").trim()) {
-    return { ok: false, status: "blocked_by_verifier", reason: "no_document",
-             message: "Tidak ada dokumen pengguna untuk diperiksa.",
-             findings: { fail_closed: ["no document"] } };
-  }
-  if (typeof complete !== "function" || typeof verifier !== "function") {
+  if (typeof complete !== "function" || typeof researchVerifier !== "function") {
     // A missing verifier is the dangerous case: without this the answer would
     // sail through unchecked, which reads as a pass.
     return { ok: false, status: "blocked_by_verifier", reason: "verifier_unavailable",
@@ -135,112 +130,218 @@ export async function answerWithLookup({ complete, verifier = verify,
              findings: { fail_closed: ["verifier or model unavailable"] } };
   }
 
+  const fetched = Array.isArray(sources) ? sources : [];
+  // Per-source gate, BEFORE composing (acceptance run, 2026-09-04): a page
+  // that carries an injection shape is excluded from the model input and from
+  // the citable set; the safely fetched pages are still synthesised. Only when
+  // the sources carry no text (older callers) is the whole blob gated.
+  const perSource = fetched.length > 0 && fetched.every((src) => typeof src?.text === "string");
+  const excluded = perSource
+    ? fetched.filter((src) => instructionGateCues(src.text))
+        .map((src) => ({ id: src.id, host: src.host, reason: "instruction_like_content" }))
+    : [];
+  const excludedIds = new Set(excluded.map((e) => e.id));
+  const list = perSource ? fetched.filter((src) => !excludedIds.has(src.id)) : fetched;
+  const composeUntrusted = perSource ? sourcesAsUntrusted(list) : untrusted;
+
+  const allPublic = fetched.map(({ id, url, title, host, tier, contentHash }) =>
+    ({ id, url, title, host, tier, contentHash }));
+  if (perSource && !list.length) {
+    // Every page carried an injection shape: no synthesis, sources still shown.
+    return { ok: false, status: "research_sources_only", reason: "instruction_like_content",
+             canEdit: false, message: SOURCES_ONLY_MESSAGES.instruction_like_content,
+             sources: allPublic, excludedSources: excluded };
+  }
+  if (!fetched.length) {
+    // Research needs fetched pages. The retrieval stages report their own
+    // refusals before this point; a composer call with nothing fetched is a
+    // hard block, never a readable result.
+    return { ok: false, status: "blocked_by_verifier", reason: "no_sources",
+             message: "Tidak ada sumber web yang berhasil diambil.",
+             findings: { fail_closed: ["no fetched sources"] } };
+  }
+
   let answer;
   try {
-    answer = await complete(buildLookupPrompt({ document, untrusted, question }));
+    answer = await complete(buildLookupPrompt({ document, untrusted: composeUntrusted, question }));
   } catch (error) {
     return { ok: false, status: "blocked_by_verifier", reason: "model_error",
              message: "Model gagal menjawab; hasil tidak ditampilkan.",
              findings: { fail_closed: [String(error?.message || error)] } };
   }
+  answer = String(answer ?? "");
+
+  const publicSources = list.map(({ id, url, title, host, tier, contentHash }) =>
+    ({ id, url, title, host, tier, contentHash }));
+  const debugAttach = (payload) => {
+    if (globalThis.process?.env?.TANTULAR_LOOKUP_DEBUG === "true") {
+      // Never enumerable in the HTTP response path: the server reads it for
+      // the local debug file and does not forward it.
+      Object.defineProperty(payload, "answerForDebug", { value: answer, enumerable: false });
+    }
+    return payload;
+  };
+  // Retrieval succeeded but the synthesis cannot be shown. The user still gets
+  // what the research produced — the sources — and a plain reason. No model
+  // prose and no page text travel on this shape.
+  const sourcesOnly = (reason, extra = {}) => debugAttach({
+    ok: false, status: "research_sources_only", reason, canEdit: false,
+    message: SOURCES_ONLY_MESSAGES[reason] || "Ringkasan tidak dapat ditampilkan.",
+    sources: allPublic, ...(excluded.length ? { excludedSources: excluded } : {}), ...extra
+  });
+  const withExcluded = (payload) => (excluded.length ? { ...payload, excludedSources: excluded } : payload);
+  const allowedIds = list.map((src) => src.id);
 
   // The marker is OUR machinery, not a claim the model made, and it must be
-  // gone before the verifier sees it: "[TIDAK ADA SUMBER]" is all-caps, so the
-  // entity check read it as an invented organisation and blocked the very
-  // answer the marker exists to permit (measured against the real model,
-  // 2026-09-01: no_new_facts entities ["tidak ada"]).
-  const declaredNoCoverage = String(answer).includes(NO_COVERAGE_MARKER);
+  // gone before any check sees it: "[TIDAK ADA SUMBER]" is all-caps, so the
+  // entity check read it as an invented organisation (measured 2026-09-01).
+  const declaredNoCoverage = answer.includes(NO_COVERAGE_MARKER);
   if (declaredNoCoverage) answer = stripMarker(answer);
 
-  let result;
+  // Label integrity first. A bracketed label is a supplied source ID or it is
+  // invented; a citation with no source behind it is invalid. Either is a
+  // composer/injection integrity failure: the prose is withheld whole, never
+  // trimmed down to its remaining sentences.
+  const labels = validateSourceLabels(answer, allowedIds);
+  if (labels.invented.length) {
+    return sourcesOnly("source_citation_failed", { findings: { fail_closed: [
+      `invented source label: ${labels.invented.map((l) => `[${l}]`).join(", ")}`] } });
+  }
+  if (labels.invalid.length) {
+    return sourcesOnly("source_citation_failed", { findings: { fail_closed: ["invalid fetched-source citation"] } });
+  }
+  const citations = labels.citations;
+
+  // A page that carries instruction-like text is treated as hostile for
+  // synthesis: the prose is withheld, the safely fetched source metadata is
+  // not (injection harness class quiet_instruction silently dropped a
+  // document fact while every other check passed).
+  if (!perSource && hasInstructionCues(untrusted)) return sourcesOnly("instruction_like_content");
+
+  if (declaredNoCoverage && !citations.length) {
+    // Structural no-coverage path, unchanged: the marker asserts the answer
+    // owes nothing to the web, so every fact must trace to document ∪ the
+    // user's own question, and the prose must not refer to the web. Clean
+    // prose is still never shown; the companion states the outcome.
+    const fromPage = newFacts(answer, `${document || ""}\n${question || ""}`);
+    if (Object.keys(fromPage).length) {
+      return sourcesOnly("source_citation_failed", { findings: { fail_closed: [
+        `no-coverage answer carries facts absent from the document: ${JSON.stringify(fromPage)}`] } });
+    }
+    const reference = noCoverageWebReference(answer);
+    if (reference) {
+      return sourcesOnly("source_citation_failed", { findings: { fail_closed: [
+        `no-coverage answer refers to the web: "${reference}"`] } });
+    }
+    return debugAttach({
+      ok: false, status: "no_coverage", reason: "no_coverage",
+      sourceCoverage: "none", message: NO_COVERAGE_RESPONSE, sources: allPublic
+    });
+  }
+  if (!citations.length) {
+    return sourcesOnly("source_citation_failed", { findings: { fail_closed: ["no fetched-source citation"] } });
+  }
+
+  let research;
   try {
-    result = verifier({ answer, document, untrusted });
+    research = researchVerifier({ answer, document: String(document || ""), untrusted: String(composeUntrusted || "") });
   } catch (error) {
     return { ok: false, status: "blocked_by_verifier", reason: "verifier_error",
              message: "Pemeriksa jawaban gagal dijalankan; hasil tidak ditampilkan.",
              findings: { fail_closed: [String(error?.message || error)] } };
   }
-  if (!result || typeof result.ok !== "boolean") {
+  if (!research || typeof research.ok !== "boolean") {
     return { ok: false, status: "blocked_by_verifier", reason: "verifier_error",
              message: "Pemeriksa jawaban mengembalikan hasil tidak valid.",
              findings: { fail_closed: ["verifier returned a malformed result"] } };
   }
 
-  if (!result.ok) {
-    // Findings travel; the answer does not. The user is told the check failed
-    // and why, and cannot act on text that failed verification.
-    const blocked = { ok: false, status: "blocked_by_verifier", reason: result.reason,
-             message: "Jawaban tidak lolos pemeriksaan terhadap dokumen Anda "
-                      + "dan tidak ditampilkan sebagai hasil tepercaya.",
-             findings: result.findings, protected: result.protected };
-    if (globalThis.process?.env?.TANTULAR_LOOKUP_DEBUG === "true") {
-      // Never enumerable in the HTTP response path: the server reads it for
-      // the local debug file and does not forward it.
-      Object.defineProperty(blocked, "answerForDebug",
-                            { value: answer, enumerable: false });
+  if (research.ok) {
+    return withExcluded({ ok: true, status: "research_answer", answer, sourceCoverage: "sources",
+             canEdit: false, sources: publicSources });
+  }
+  if (research.reason !== "failed_verification") {
+    return { ok: false, status: "blocked_by_verifier", reason: research.reason,
+             message: "Pemeriksa jawaban gagal dijalankan; hasil tidak ditampilkan.",
+             findings: research.findings };
+  }
+  const kinds = Object.keys(research.findings || {});
+  if (kinds.includes("untrusted_echo")) {
+    return sourcesOnly("untrusted_echo", { findings: { untrusted_echo: research.findings.untrusted_echo } });
+  }
+  if (!kinds.every((kind) => kind === "no_new_facts")) return sourcesOnly("synthesis_failed");
+
+  // Only unsupported facts. Remove the sentence units that carry them —
+  // deterministically, no second model call — and re-validate what is left.
+  let recovered;
+  try {
+    recovered = typeof recover === "function" ? recover({ answer, document, untrusted: composeUntrusted, sources: list }) : null;
+  } catch (error) {
+    return debugAttach({ ok: false, status: "blocked_by_verifier", reason: "recovery_error",
+      message: "Pemulihan jawaban riset gagal; hasil tidak ditampilkan.",
+      findings: { fail_closed: [String(error?.message || error)] } });
+  }
+  if (!recovered || typeof recovered.ok !== "boolean") {
+    return { ok: false, status: "blocked_by_verifier", reason: "recovery_error",
+             message: "Pemulihan jawaban riset mengembalikan hasil tidak valid.",
+             findings: { fail_closed: ["recovery returned a malformed result"] } };
+  }
+  if (recovered.ok) {
+    const afterLabels = validateSourceLabels(recovered.answer, allowedIds);
+    // Review fix 2 (2026-09-04): the revalidation call must fail closed too. A
+    // verifier that returns findings on its first call and throws on the
+    // second previously escaped this function as an exception.
+    let again;
+    try {
+      again = researchVerifier({ answer: recovered.answer, document: String(document || ""), untrusted: String(composeUntrusted || "") });
+    } catch (error) {
+      return { ok: false, status: "blocked_by_verifier", reason: "verifier_error",
+               message: "Pemeriksa jawaban gagal dijalankan; hasil tidak ditampilkan.",
+               findings: { fail_closed: [String(error?.message || error)] } };
     }
-    return blocked;
-  }
-  // Label checks run on EVERY path. Measured 2026-09-02 through the injection
-  // harness: on the single-host path (no source list) the model relayed a
-  // hostile page's "[REDACTED]" instruction and labelled document sentences
-  // "[DOKUMEN PENGGUNA]", and nothing looked at either because this block was
-  // gated on `sources.length`. A bracketed label is a supplied source ID or it
-  // is invented; a citation with no source behind it is invalid.
-  const invented = [...String(answer).matchAll(/\[([^\[\]\n]{1,40})\]/g)]
-    .map((match) => match[1]).filter((label) => !/^S\d+$/.test(label));
-  if (invented.length) {
-    return citationRefusal(
-      `invented source label: ${invented.map((l) => `[${l}]`).join(", ")}`, answer);
-  }
-  const citations = [...String(answer).matchAll(/\[S(\d+)\]/g)]
-    .map((match) => Number(match[1]));
-  const invalid = citations.some((id) => id < 1 || id > sources.length);
-  if (invalid) {
-    return citationRefusal("invalid fetched-source citation", answer);
-  }
-  if (sources.length) {
-    if (declaredNoCoverage && !citations.length) {
-      // The marker asserts one thing: this answer owes nothing to the web. So
-      // hold it to exactly that — every number, date and entity must trace to
-      // the DOCUMENT ALONE. Without this the marker would be the way to smuggle
-      // an uncited page fact through, since no_new_facts permits document ∪
-      // page and would wave it past.
-      // Document ∪ QUESTION, not document alone. The question is the user's
-      // own approved text, so a figure it contains is not smuggled web
-      // content — and "inflasi indonesia 2026" blocked its own honest
-      // no-coverage answer for containing "2026" (measured live, 2026-09-01).
-      const fromPage = newFacts(answer, `${document}\n${question || ""}`);
-      if (Object.keys(fromPage).length) {
-        return citationRefusal("no-coverage answer carries facts absent from "
-          + `the document: ${JSON.stringify(fromPage)}`, answer);
-      }
-      const reference = noCoverageWebReference(answer);
-      if (reference) {
-        return citationRefusal(`no-coverage answer refers to the web: "${reference}"`, answer);
-      }
-      // Clean no-coverage prose: not shown. The companion states the outcome.
-      const noCoverage = {
-        ok: false, status: "no_coverage", reason: "no_coverage",
-        sourceCoverage: "none", message: NO_COVERAGE_RESPONSE,
-        sources: sources.map(({ id, url, title, host, tier, contentHash }) =>
-          ({ id, url, title, host, tier, contentHash }))
-      };
-      if (globalThis.process?.env?.TANTULAR_LOOKUP_DEBUG === "true") {
-        Object.defineProperty(noCoverage, "answerForDebug",
-                              { value: answer, enumerable: false });
-      }
-      return noCoverage;
-    } else if (!citations.length) {
-      return citationRefusal("no fetched-source citation", answer);
+    if (!afterLabels.ok || !afterLabels.citations.length || !again?.ok
+        || typeof recovered.answer !== "string" || !recovered.answer.trim()
+        || !Number.isInteger(recovered.omittedClaims) || recovered.omittedClaims < 1) {
+      return sourcesOnly("synthesis_failed");
     }
+    return withExcluded({ ok: true, status: "research_partial", answer: recovered.answer,
+             omittedClaims: recovered.omittedClaims, sourceCoverage: "sources",
+             canEdit: false, sources: publicSources });
   }
-  return {
-    ok: true, status: "verified", answer, sourceCoverage: "sources",
-    protected: result.protected, canEdit: true,
-    ...(sources.length ? {
-      sources: sources.map(({ id, url, title, host, tier, contentHash }) =>
-        ({ id, url, title, host, tier, contentHash }))
-    } : {})
-  };
+  if (recovered.reason === "nothing_left") {
+    return sourcesOnly("no_supported_claims", { omittedClaims: Number(recovered.omittedClaims) || 0 });
+  }
+  return sourcesOnly("synthesis_failed");
+}
+
+const SOURCES_ONLY_MESSAGES = Object.freeze({
+  source_citation_failed: "Ringkasan model tidak mengutip sumber dengan benar, jadi tidak ditampilkan.",
+  instruction_like_content: "Halaman yang diambil berisi teks berbentuk instruksi, jadi ringkasan model tidak ditampilkan.",
+  untrusted_echo: "Ringkasan model mengikuti teks dari halaman, bukan dari Anda, jadi tidak ditampilkan.",
+  no_supported_claims: "Semua klaim dalam ringkasan tidak didukung sumber yang diambil, jadi tidak ditampilkan.",
+  synthesis_failed: "Ringkasan model tidak lolos pemeriksaan, jadi tidak ditampilkan."
+});
+
+// What the companion audit records for a composed result. `research_partial`
+// is recorded distinctly with counts only: no answer text and no source text,
+// so the plaintext-audit privacy default is untouched.
+export function describeLookupOutcome(composed) {
+  const sourceCount = Array.isArray(composed?.sources) ? composed.sources.length : 0;
+  if (composed?.ok === true && composed.status === "research_partial") {
+    return {
+      outcome: "research_partial",
+      omittedClaims: Number(composed.omittedClaims) || 0,
+      sourceCount,
+      citationsRemaining: /\[S\d+\]/.test(String(composed.answer || ""))
+    };
+  }
+  if (composed?.ok === true && composed.status === "research_answer") {
+    return { outcome: "research_answer", sourceCount };
+  }
+  if (composed?.status === "research_sources_only") {
+    return { outcome: `research_sources_only:${composed.reason || "unknown"}`, sourceCount };
+  }
+  if (composed?.ok === true) return { outcome: "verified" };
+  if (composed?.status === "no_coverage") return { outcome: "no_coverage" };
+  return { outcome: `blocked_by_verifier:${composed?.reason || "unknown"}` };
 }

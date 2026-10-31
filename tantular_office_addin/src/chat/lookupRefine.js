@@ -109,12 +109,16 @@ export function refineResult(modelText, document) {
 // intent, never document text, then pass through the same leak-screening
 // contract as model suggestions.
 export function deterministicRefineResult(intent, document, {
-  year = new Date().getFullYear()
+  year = new Date().getFullYear(),
+  sourcePolicy = "official"
 } = {}) {
-  const base = String(intent || "").replace(/\s+/g, " ").trim()
+  const typed = String(intent || "").replace(/\s+/g, " ").trim()
     .replace(/[?.!,;:]+$/g, "").slice(0, MAX_QUERY_CHARS);
-  if (!base) return { ok: false, reason: "empty_intent" };
+  if (!typed) return { ok: false, reason: "empty_intent" };
 
+  if (String(sourcePolicy) === "open") return openPolicyRefine(typed, document);
+
+  const base = typed;
   const raw = [
     { query: base, why: "Mempertahankan maksud pencarian Anda tanpa menambah data dokumen." },
     {
@@ -136,6 +140,38 @@ export function deterministicRefineResult(intent, document, {
   return {
     ok: true,
     question: "Pilih query dasar, perkembangan terbaru, atau fokus data resmi.",
+    candidates: screenCandidates(candidates, document)
+  };
+}
+
+// Open source policy (2026-09-04): the base query is the user's own words
+// with any official/latest suffix removed; "terbaru" carries no year unless
+// the user typed one; and the official focus is an explicit THIRD option,
+// never appended to the base. Suffixes already present are not duplicated.
+const OFFICIAL_SUFFIX_RE = /\s+(?:data resmi|dari sumber resmi|sumber resmi|resmi)$/i;
+const LATEST_SUFFIX_RE = /\s+terbaru(?:\s+\d{4})?$/i;
+
+function openPolicyRefine(typed, document) {
+  let core = typed;
+  for (let i = 0; i < 2; i += 1) {
+    core = core.replace(OFFICIAL_SUFFIX_RE, "").replace(LATEST_SUFFIX_RE, "").trim();
+  }
+  if (!core) core = typed;
+  const raw = [
+    { query: core, why: "Mempertahankan maksud pencarian Anda tanpa menambah data dokumen." },
+    { query: `${core} terbaru`.slice(0, MAX_QUERY_CHARS), why: "Memfokuskan hasil pada perkembangan terbaru." },
+    { query: `${core} dari sumber resmi`.slice(0, MAX_QUERY_CHARS), why: "Fokus eksplisit pada sumber resmi; pilih hanya jika Anda menginginkannya." }
+  ];
+  const seen = new Set();
+  const candidates = raw.filter(({ query }) => {
+    const key = query.toLowerCase();
+    if (!query || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return {
+    ok: true,
+    question: "Pilih query dasar, perkembangan terbaru, atau fokus sumber resmi.",
     candidates: screenCandidates(candidates, document)
   };
 }

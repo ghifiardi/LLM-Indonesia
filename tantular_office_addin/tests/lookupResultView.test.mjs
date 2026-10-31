@@ -265,7 +265,122 @@ test("a no-coverage result is a non-answer card with the fetched sources, no edi
   assert.match(view.message, /tidak menyediakan informasi yang cukup/);
   assert.equal(view.note, "");
   const html = renderLookupResultHtml(response);
+  // Neutral outcome, neutral card: not the red of a withheld answer.
+  assert.match(html, /class="lookup-result lookup-blocked lookup-no-coverage"/);
+  assert.match(html, /ℹ️ Sumber tidak memuat jawaban/);
+  assert.doesNotMatch(html, /⛔/);
   assert.match(html, /Sumber yang diambil, tidak memuat jawaban/);
   assert.match(html, /\(web umum\): https:\/\/aihub\.id\/x/);
   assert.doesNotMatch(html, /lookup-edit/);
+});
+
+// --- research_partial: a third state, read-only, amber (2026-09-04) ------------
+const PARTIAL = {
+  ok: true, status: "research_partial", host: "example.org",
+  answer: "Sahabat-AI dirilis pada 14 November 2024 [S1]. Bobot model tersedia di Hugging Face [S3].",
+  omittedClaims: 1, sourceCoverage: "sources", canEdit: false, protected: [],
+  sources: [
+    { id: "S1", title: "Rilis", url: "https://example.org/rilis", host: "example.org", tier: "public" },
+    { id: "S3", title: "Bobot", url: "https://example.org/bobot", host: "example.org", tier: "public" }
+  ]
+};
+
+test("research_partial maps to its own state: answer shown, never editable", () => {
+  const view = lookupResultView(PARTIAL);
+  assert.equal(view.state, "research_partial");
+  assert.equal(view.canEdit, false);
+  assert.equal(view.answer, PARTIAL.answer);
+  assert.equal(view.title, "Hasil riset web — sebagian");
+  assert.equal(view.message, "1 klaim tidak ditampilkan karena dukungan sumber tidak ditemukan.");
+  assert.equal(view.sources.length, 2);
+  assert.equal(lookupResultView({ ...PARTIAL, omittedClaims: 3 }).message, "3 klaim tidak ditampilkan karena dukungan sumber tidak ditemukan.");
+  assert.equal(lookupResultView({ ...PARTIAL, omittedClaims: 0 }).message, "Jawaban ini berasal dari sumber web dan belum dicocokkan sebagai edit dokumen.");
+  // a partial response with no text is not a partial result
+  assert.equal(lookupResultView({ ...PARTIAL, answer: "" }).state, "blocked");
+});
+
+test("research_partial renders amber, with answer, sources, omitted count, research-only note, and NO edit control", () => {
+  const html = renderLookupResultHtml(PARTIAL);
+  assert.match(html, /data-state="research_partial"/);
+  assert.match(html, /class="lookup-result lookup-partial"/);
+  assert.ok(!html.includes("lookup-verified") && !html.includes("lookup-blocked"));
+  assert.match(html, /Hasil riset web — sebagian/);
+  assert.match(html, /1 klaim tidak ditampilkan/);
+  assert.match(html, /Hugging Face \[S3\]/);
+  assert.match(html, /https:\/\/example\.org\/rilis/);
+  assert.match(html, /hasil riset/);
+  assert.match(html, /belum disetujui sebagai edit dokumen|susun ulang sebagai edit terverifikasi/);
+  assert.ok(!html.includes("lookup-edit"), "no edit button, not even hidden");
+  assert.ok(!html.includes("data-can-edit"));
+  assert.ok(!html.includes("Terapkan sebagai edit"));
+});
+
+test("mountLookupResult attaches no edit handler for research_partial", () => {
+  const listeners = [];
+  const container = {
+    innerHTML: "",
+    querySelector: () => ({ addEventListener: (_e, fn) => listeners.push(fn) })
+  };
+  const view = mountLookupResult(container, PARTIAL, { onEdit: () => { throw new Error("must not be wired"); } });
+  assert.equal(view.state, "research_partial");
+  assert.deepEqual(listeners, []);
+  assert.match(container.innerHTML, /lookup-partial/);
+});
+
+// --- research_answer and research_sources_only (true Open Research, 2026-09-04) ----
+const RESEARCH = { ...PARTIAL, status: "research_answer", omittedClaims: undefined };
+const SOURCES_ONLY = {
+  ok: false, status: "research_sources_only", reason: "source_citation_failed", canEdit: false,
+  message: "Ringkasan tidak mengutip sumber dengan benar.", sources: PARTIAL.sources
+};
+
+test("research_answer: neutral research card with answer and sources, no edit control", () => {
+  const view = lookupResultView(RESEARCH);
+  assert.equal(view.state, "research_answer");
+  assert.equal(view.canEdit, false);
+  assert.equal(view.title, "Hasil riset web");
+  assert.equal(view.answer, RESEARCH.answer);
+  assert.equal(view.sources.length, 2);
+  const html = renderLookupResultHtml(RESEARCH);
+  assert.match(html, /data-state="research_answer"/);
+  assert.match(html, /class="lookup-result lookup-research"/);
+  assert.match(html, /Hasil riset web/);
+  assert.match(html, /Hugging Face \[S3\]/);
+  assert.match(html, /https:\/\/example\.org\/rilis/);
+  assert.doesNotMatch(html, /Jawaban terverifikasi|dicocokkan dengan dokumen/);
+  assert.ok(!html.includes("lookup-edit") && !html.includes("Terapkan sebagai edit"));
+});
+
+test("research_sources_only: grey card, sources listed, explanation, NO answer and NO edit control", () => {
+  const view = lookupResultView(SOURCES_ONLY);
+  assert.equal(view.state, "research_sources_only");
+  assert.equal(view.canEdit, false);
+  assert.equal(view.answer, null);
+  assert.equal(view.title, "Sumber ditemukan — ringkasan tidak ditampilkan");
+  assert.match(view.message, /tidak mengutip sumber/);
+  assert.equal(view.sources.length, 2);
+  const html = renderLookupResultHtml(SOURCES_ONLY);
+  assert.match(html, /data-state="research_sources_only"/);
+  assert.match(html, /class="lookup-result lookup-sources-only"/);
+  assert.match(html, /https:\/\/example\.org\/bobot/);
+  assert.ok(!html.includes("lookup-answer"), "no answer element at all");
+  assert.ok(!html.includes("lookup-edit"));
+  assert.doesNotMatch(html, /⛔/);
+  // reason-specific explanations, never model prose or page text
+  for (const [reason, re] of [["instruction_like_content", /berbentuk instruksi/], ["untrusted_echo", /mengikuti teks dari halaman/], ["no_supported_claims", /tidak didukung/]]) {
+    assert.match(lookupResultView({ ...SOURCES_ONLY, reason }).message, re, reason);
+  }
+});
+
+test("mountLookupResult attaches no edit handler for any research state, and the states are host-independent", () => {
+  for (const response of [RESEARCH, PARTIAL, SOURCES_ONLY]) {
+    const listeners = [];
+    const container = { innerHTML: "", querySelector: () => ({ addEventListener: (_e, fn) => listeners.push(fn) }) };
+    mountLookupResult(container, response, { onEdit: () => { throw new Error("must not be wired"); } });
+    assert.deepEqual(listeners, [], response.status);
+    // Word, Excel and PowerPoint all render through this one function: the
+    // host is not an input, so the states cannot differ between them.
+    assert.equal(renderLookupResultHtml({ ...response, host: "Word" }).replace(/Sumber: Word/, ""),
+                 renderLookupResultHtml({ ...response, host: "Excel" }).replace(/Sumber: Excel/, ""));
+  }
 });

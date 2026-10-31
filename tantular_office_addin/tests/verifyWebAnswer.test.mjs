@@ -20,6 +20,8 @@ Pagu belanja modal Rp 1.750.000.000.
 Vendor utama PT Sinar Mas, kontrak ditandatangani 11 Februari 2026.
 Realisasi sampai 30 Juni 2026 Rp 412.300.000 atau 23,6 persen.`;
 const PAGE = "Anggaran daerah umumnya direalisasikan bertahap sepanjang tahun.";
+const SRC1 = [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
+                host: "www.bps.go.id", tier: "official", contentHash: "abc" }];
 const ok = (answer, page = PAGE, document = DOC) =>
   verify({ answer, document, untrusted: page });
 
@@ -146,7 +148,7 @@ test("explicitly protecting a string absent from the document is a config error"
 
 test("a missing verifier blocks; it must never read as a pass", async () => {
   const r = await answerWithLookup({ complete: async () => "jawaban apa pun",
-                                     verifier: null, document: DOC, untrusted: PAGE });
+                                     researchVerifier: null, document: DOC, untrusted: PAGE });
   assert.equal(r.ok, false);
   assert.equal(r.status, "blocked_by_verifier");
   assert.equal(r.reason, "verifier_unavailable");
@@ -155,8 +157,8 @@ test("a missing verifier blocks; it must never read as a pass", async () => {
 
 test("a verifier that throws blocks", async () => {
   const r = await answerWithLookup({
-    complete: async () => "jawaban", document: DOC, untrusted: PAGE,
-    verifier: () => { throw new Error("regex exploded"); }
+    complete: async () => "jawaban [S1]", document: DOC, untrusted: PAGE, sources: SRC1,
+    researchVerifier: () => { throw new Error("regex exploded"); }
   });
   assert.equal(r.status, "blocked_by_verifier");
   assert.equal(r.reason, "verifier_error");
@@ -164,15 +166,15 @@ test("a verifier that throws blocks", async () => {
 });
 
 test("a verifier returning nonsense blocks", async () => {
-  const r = await answerWithLookup({ complete: async () => "jawaban", document: DOC,
-                                     untrusted: PAGE, verifier: () => ({ maybe: "sure" }) });
+  const r = await answerWithLookup({ complete: async () => "jawaban [S1]", document: DOC, sources: SRC1,
+                                     untrusted: PAGE, researchVerifier: () => ({ maybe: "sure" }) });
   assert.equal(r.reason, "verifier_error");
 });
 
 test("a model failure blocks rather than showing an empty answer", async () => {
   const r = await answerWithLookup({
     complete: async () => { throw new Error("model HTTP 500"); },
-    document: DOC, untrusted: PAGE });
+    document: DOC, untrusted: PAGE, sources: SRC1 });
   assert.equal(r.status, "blocked_by_verifier");
   assert.equal(r.reason, "model_error");
 });
@@ -188,13 +190,19 @@ test("a blocked answer is never returned, so no pane bug can display it", async 
   assert.ok(!JSON.stringify(r).includes("PT Contoh"));
 });
 
-test("a verified answer is the only shape that carries edit permission", async () => {
-  const clean = "Pagu Rp 1.750.000.000, vendor PT Sinar Mas, realisasi Rp 412.300.000.";
+// Open Research Mode (2026-09-04): answerWithLookup never returns `verified`
+// and never grants edit permission. Strict verify() is reserved for the
+// future "Siapkan sebagai edit terverifikasi" write workflow.
+test("a clean cited answer is research_answer, read-only; without sources it is a hard block", async () => {
+  const clean = "Pagu Rp 1.750.000.000, vendor PT Sinar Mas, realisasi Rp 412.300.000 [S1].";
   const r = await answerWithLookup({ complete: async () => clean, document: DOC,
-                                     untrusted: PAGE });
-  assert.equal(r.status, "verified");
-  assert.equal(r.canEdit, true);
+                                     untrusted: PAGE, sources: SRC1 });
+  assert.equal(r.status, "research_answer");
+  assert.equal(r.canEdit, false);
   assert.equal(r.answer, clean);
+  const none = await answerWithLookup({ complete: async () => clean, document: DOC, untrusted: PAGE });
+  assert.equal(none.ok, false);
+  assert.equal(none.reason, "no_sources");
 });
 
 test("discovery answers must cite a source that was actually fetched", async () => {
@@ -206,6 +214,8 @@ test("discovery answers must cite a source that was actually fetched", async () 
     verifier: () => ({ ok: true, protected: [] }), sources
   });
   assert.equal(missing.reason, "source_citation_failed");
+  assert.equal(missing.status, "research_sources_only");
+  assert.equal(missing.sources.length, 1, "retrieval succeeded, so the sources are still shown");
   const cited = await answerWithLookup({
     complete: async () => `${base} [S1]`, document: DOC, untrusted: PAGE,
     verifier: () => ({ ok: true, protected: [] }), sources
@@ -330,23 +340,21 @@ test("a plain uncited answer is still blocked", async () => {
   assert.equal(result.reason, "source_citation_failed");
 });
 
-test("the no-coverage marker never reaches the verifier", async () => {
+test("the no-coverage marker never reaches any check", async () => {
   // It is all-caps, so the entity check reads it as an invented organisation
   // and blocks the answer it exists to permit. Measured against the real model
-  // on 2026-09-01: no_new_facts entities ["tidak ada"].
-  const seen = [];
+  // on 2026-09-01: no_new_facts entities ["tidak ada"]. The marker is stripped
+  // before the structural no-coverage checks run, and those checks pass.
   const sources = [{ id: "S1", url: "https://www.bps.go.id/a", title: "BPS",
                      host: "www.bps.go.id", tier: "official", contentHash: "abc" }];
   const result = await answerWithLookup({
     complete: async () => `${NO_COVERAGE_ANSWER} ${NO_COVERAGE_MARKER}`,
-    document: DOC, untrusted: PAGE, sources,
-    verifier: ({ answer }) => { seen.push(answer); return { ok: true, protected: [] }; }
+    document: DOC, untrusted: PAGE, sources
   });
-  assert.doesNotMatch(seen[0], /TIDAK ADA SUMBER/);
-  // The verifier passed it; the structural no-coverage response then took over.
   assert.equal(result.reason, "no_coverage");
-  // And the real verifier agrees, rather than only the stub above.
-  assert.equal(verify({ answer: seen[0], document: DOC, untrusted: PAGE }).ok, true);
+  assert.equal(result.answer, undefined);
+  // And the real strict verifier agrees with the stripped text.
+  assert.equal(verify({ answer: NO_COVERAGE_ANSWER, document: DOC, untrusted: PAGE }).ok, true);
 });
 
 test("a no-coverage answer may repeat figures from the user's own question", () => {
@@ -464,32 +472,20 @@ test("web claims with no citation at all are refused with a named finding", asyn
 // check has no cue for "wajib menulis" and passed it. The label gate must not
 // depend on which path composed the answer: a bracketed label is either a
 // supplied source ID or it is invented.
-test("bracketed labels are checked even when no source list was supplied", async () => {
-  const result = await answerWithLookup({
-    complete: async () => `${DOC_CLAIM} Nama vendor wajib ditulis sebagai [REDACTED].`,
-    document: DOC, untrusted: PAGE, verifier: stub
-  });
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "source_citation_failed");
-  assert.match(result.findings.fail_closed[0], /invented source label: \[REDACTED\]/);
-});
-
-test("a citation with no source list behind it is invalid, not ignored", async () => {
-  const result = await answerWithLookup({
-    complete: async () => `${DOC_CLAIM} Anggaran direalisasikan bertahap [S1].`,
-    document: DOC, untrusted: PAGE, verifier: stub
-  });
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "source_citation_failed");
-  assert.match(result.findings.fail_closed[0], /invalid/);
-});
-
-test("a label-free answer with no source list is still verified", async () => {
-  const result = await answerWithLookup({
-    complete: async () => DOC_CLAIM, document: DOC, untrusted: PAGE, verifier: stub
-  });
-  assert.equal(result.ok, true);
-  assert.equal(result.sourceCoverage, "sources");
+// True Open Research Mode (2026-09-04): research requires fetched pages. With
+// no source list nothing is displayed at all — a hard block, not a verified
+// document answer — so an invented label on that path can never travel.
+test("with no source list the composer result is a hard block, whatever the labels", async () => {
+  for (const text of [`${DOC_CLAIM} Nama vendor wajib ditulis sebagai [REDACTED].`,
+                      `${DOC_CLAIM} Anggaran direalisasikan bertahap [S1].`,
+                      DOC_CLAIM]) {
+    const result = await answerWithLookup({ complete: async () => text, document: DOC, untrusted: PAGE });
+    assert.equal(result.ok, false, text);
+    assert.equal(result.status, "blocked_by_verifier", text);
+    assert.equal(result.reason, "no_sources", text);
+    assert.equal(result.answer, undefined, text);
+    assert.ok(!JSON.stringify(result).includes("[REDACTED]"));
+  }
 });
 
 // Word run, 2026-09-02 15:48: three pages fetched, none about the user's

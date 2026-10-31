@@ -338,9 +338,18 @@ export function auditRecord({ query, host, provider = null, approved, at = new D
                               reason = null, env = process.env, key = "",
                               requestedUrl = null, finalUrl = null,
                               domainTier = null, policyReason = null,
-                              contentHash = null, status = null, stage = null }) {
+                              contentHash = null, status = null, stage = null,
+                              omittedClaims, sourceCount, citationsRemaining }) {
   const auditTarget = provider ? `provider:${provider}` : host;
+  // Research-mode counters (Open Research Mode, 2026-09-04): present only
+  // when the caller supplies them, so every existing record shape is unchanged.
+  const research = {
+    ...(omittedClaims !== undefined ? { omitted_claims: Number(omittedClaims) || 0 } : {}),
+    ...(sourceCount !== undefined ? { source_count: Number(sourceCount) || 0 } : {}),
+    ...(citationsRemaining !== undefined ? { citations_remaining: Boolean(citationsRemaining) } : {})
+  };
   const record = {
+    ...research,
     at: at.toISOString(),
     host: host || null,
     provider,

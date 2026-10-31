@@ -95,3 +95,36 @@ test("deterministic refinement still applies document leak screening", () => {
   const out = deterministicRefineResult("profil PT Sinar Mas", DOC, { year: 2026 });
   assert.equal(out.candidates[0].containsDocumentData, true);
 });
+
+// --- open source policy (2026-09-04) ------------------------------------------
+test("open policy: base stays as typed minus an official/latest suffix, latest adds no year, official focus is an explicit third option", () => {
+  const out = deterministicRefineResult("Perkembangan Sahabat-AI data resmi", DOC, { year: 2026, sourcePolicy: "open" });
+  assert.deepEqual(out.candidates.map((c) => c.query), [
+    "Perkembangan Sahabat-AI",
+    "Perkembangan Sahabat-AI terbaru",
+    "Perkembangan Sahabat-AI dari sumber resmi"
+  ]);
+  const plain = deterministicRefineResult("Perkembangan Sahabat-AI", DOC, { year: 2026, sourcePolicy: "open" });
+  assert.deepEqual(plain.candidates.map((c) => c.query), [
+    "Perkembangan Sahabat-AI",
+    "Perkembangan Sahabat-AI terbaru",
+    "Perkembangan Sahabat-AI dari sumber resmi"
+  ]);
+  // no duplicated suffix when the user already asked for the latest or official
+  const latest = deterministicRefineResult("Perkembangan Sahabat-AI terbaru", DOC, { sourcePolicy: "open" });
+  assert.ok(latest.candidates.every((c) => !/terbaru terbaru|resmi resmi/.test(c.query)));
+  assert.ok(latest.candidates.every((c) => !/data resmi/.test(c.query)), "data resmi is never appended in open policy");
+  // a year is kept only when the user typed one
+  const withYear = deterministicRefineResult("Perkembangan Sahabat-AI 2025", DOC, { year: 2026, sourcePolicy: "open" });
+  assert.ok(withYear.candidates.every((c) => !c.query.includes("2026")));
+  assert.ok(withYear.candidates[0].query.includes("2025"));
+});
+
+test("official policy refinement is unchanged", () => {
+  const out = deterministicRefineResult("perkembangan pasar modal indonesia", DOC, { year: 2026, sourcePolicy: "official" });
+  assert.deepEqual(out.candidates.map((c) => c.query), [
+    "perkembangan pasar modal indonesia",
+    "perkembangan pasar modal indonesia terbaru 2026",
+    "perkembangan pasar modal indonesia data resmi"
+  ]);
+});

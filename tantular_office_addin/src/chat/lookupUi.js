@@ -12,15 +12,16 @@ export const MODE_LOCAL_SEARCH = "local+search";
 
 export const MODE_LABELS = Object.freeze({
   [MODE_LOCAL]: "Mode Lokal",
-  [MODE_LOCAL_SEARCH]: "Mode Lokal + Pencarian",
+  [MODE_LOCAL_SEARCH]: "Mode Lokal + Riset Web",
 });
 
 export const MODE_BANNERS = Object.freeze({
   [MODE_LOCAL]:
     "🔒 Mode Lokal — teks dokumen Anda tidak keluar dari komputer ini.",
   [MODE_LOCAL_SEARCH]:
-    "🌐 Mode Lokal + Pencarian — dokumen tetap lokal; hanya query yang Anda "
-    + "setujui yang dikirim keluar.",
+    "🌐 Mode Lokal + Riset Web — dokumen tetap lokal; hanya query yang Anda "
+    + "setujui yang dikirim keluar. Hasil riset dirangkum dari sumber web dan "
+    + "dilengkapi rujukan.",
 });
 
 // Default off. Anything unrecognised falls back to local rather than search:

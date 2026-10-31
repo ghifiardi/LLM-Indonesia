@@ -30,7 +30,7 @@ import {
   auditRecord, resolveUrl, auditKey,
   discoveryAlphaEnabled, configuredSearchProvider
 } from "../src/chat/lookupPolicy.js";
-import { answerWithLookup } from "../src/chat/lookupAnswer.js";
+import { answerWithLookup, describeLookupOutcome } from "../src/chat/lookupAnswer.js";
 import { discoverAndRetrieve, sourcesAsUntrusted } from "../src/chat/discovery.js";
 import { sourcePolicy, classifyDomain } from "../src/chat/domainPolicy.js";
 import {
@@ -79,7 +79,10 @@ function debugBlocked(composed) {
 // lands in one NDJSON file, each entry stamped with the wall clock. The
 // recorder writes a session_start entry the moment capture begins, so an
 // entry's offset from it is the timecode to scrub to in the video.
-const tracePath = process.env.TANTULAR_TRACE === "1"
+// Also switchable by a marker file (data/trace.on) so a supervised companion
+// can be traced after a child respawn without restarting the supervisor.
+const traceFlagFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "data", "trace.on");
+const tracePath = process.env.TANTULAR_TRACE === "1" || fs.existsSync(traceFlagFile)
   ? (process.env.TANTULAR_TRACE_FILE || path.join(process.env.HOME || ".", ".tantular-trace.ndjson"))
   : null;
 
@@ -361,7 +364,7 @@ function handler(req, res) {
       // experiment only; normal users get deterministic local suggestions.
       if (String(process.env.TANTULAR_LOOKUP_REFINE_MODEL || "").toLowerCase() !== "true") {
         return reply(200, {
-          ...deterministicRefineResult(intent, document),
+          ...deterministicRefineResult(intent, document, { sourcePolicy: SOURCE_POLICY }),
           mode: "deterministic"
         });
       }
@@ -371,14 +374,14 @@ function handler(req, res) {
         const result = refineResult(raw, document);
         if (!result.ok) {
           return reply(200, {
-            ...deterministicRefineResult(intent, document),
+            ...deterministicRefineResult(intent, document, { sourcePolicy: SOURCE_POLICY }),
             mode: "deterministic_fallback"
           });
         }
         return reply(200, { ...result, mode: "model" });
       } catch (error) {
         return reply(200, {
-          ...deterministicRefineResult(intent, document),
+          ...deterministicRefineResult(intent, document, { sourcePolicy: SOURCE_POLICY }),
           mode: "deterministic_fallback"
         });
       }
@@ -514,9 +517,7 @@ function handler(req, res) {
         });
         appendLookupAudit(auditRecord({
           key: lookupAuditKey, query, provider, approved: true,
-          outcome: composed.ok ? "verified"
-            : composed.status === "no_coverage" ? "no_coverage"
-            : `blocked_by_verifier:${composed.reason}`,
+          ...describeLookupOutcome(composed),
           stage: "verify"
         }));
         // Same diagnosis as the single-host branch below. Without it a block
@@ -590,9 +591,7 @@ function handler(req, res) {
         appendLookupAudit(auditRecord({ key: lookupAuditKey,
           query: authorized.entry.query, host: authorized.entry.host,
           approved: true,
-          outcome: composed.ok ? "verified"
-            : composed.status === "no_coverage" ? "no_coverage"
-            : `blocked_by_verifier:${composed.reason}`
+          ...describeLookupOutcome(composed)
         }));
         debugBlocked(composed);
         if (!composed.ok) {
@@ -1029,6 +1028,22 @@ function proxyChatCompletions(req, res) {
           }
           if (res.writableEnded || res.destroyed) return; // client already gone
           const payload = parseOllamaResponse(raw, proxyRes.statusCode || 502, structuredModeUsed);
+          // Diagnosis only (trace is off by default): the exact model exchange
+          // for a non-streaming call, so a "slide tidak diubah" can be traced
+          // to what the model actually answered.
+          if (tracePath) {
+            const messages = Array.isArray(body?.messages) ? body.messages : [];
+            trace({
+              kind: "chat",
+              model: ollamaBody.model,
+              structured: structuredModeUsed,
+              options: ollamaBody.options || null,
+              systemHead: String(messages[0]?.content || "").slice(0, 160),
+              userTail: String(messages[messages.length - 1]?.content || "").slice(-1400),
+              finishReason: payload?.choices?.[0]?.finish_reason ?? null,
+              content: String(payload?.choices?.[0]?.message?.content || "").slice(0, 4000)
+            });
+          }
           res.writeHead(proxyRes.statusCode || 502, {
             "Content-Type": "application/json; charset=utf-8",
             ...corsHeaders(req),

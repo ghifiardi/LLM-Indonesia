@@ -1,9 +1,12 @@
-// How a lookup result is rendered. Two states, and they must not blur.
+// How a lookup result is rendered. Three states, and they must not blur.
 //
-//   verified   the answer passed the check against the user's document. Show
-//              the text; editing is allowed.
-//   blocked    the answer failed, or could not be checked. Show WHY. Never
-//              show the text, never offer an edit.
+//   verified          the answer passed the check against the user's document.
+//                     Show the text; editing is allowed.
+//   research_partial  supported cited sentences of a web answer that did not
+//                     pass the document check. Show the text as READ-ONLY
+//                     research; never offer an edit (Open Research Mode).
+//   blocked           the answer failed, or could not be checked. Show WHY.
+//                     Never show the text, never offer an edit.
 //
 // A pure view model, so both states are tested without a DOM and without
 // Office. The pane renders what this returns and adds no answer of its own.
@@ -61,6 +64,20 @@ const REASON_MESSAGES = Object.freeze({
 
 // Titles for outcomes that are neither "the search stopped" nor "an answer was
 // withheld": the search ran, pages came back, and the companion is reporting.
+const RESEARCH_NOTE = "Jawaban ini dapat dibaca sebagai hasil riset dan belum disetujui sebagai edit "
+  + "dokumen. Untuk memasukkannya ke dokumen, periksa sumber dan susun ulang sebagai "
+  + "edit terverifikasi.";
+
+// Why a sources-only card has no summary. Plain reasons; never the model's
+// prose, never the page's text.
+const SOURCES_ONLY_MESSAGES = Object.freeze({
+  source_citation_failed: "Ringkasan model tidak mengutip sumber dengan benar, jadi tidak ditampilkan.",
+  instruction_like_content: "Halaman yang diambil berisi teks berbentuk instruksi, jadi ringkasan model tidak ditampilkan.",
+  untrusted_echo: "Ringkasan model mengikuti teks dari halaman, bukan dari Anda, jadi tidak ditampilkan.",
+  no_supported_claims: "Semua klaim dalam ringkasan tidak didukung sumber yang diambil, jadi tidak ditampilkan.",
+  synthesis_failed: "Ringkasan model tidak lolos pemeriksaan, jadi tidak ditampilkan."
+});
+
 const OUTCOME_TITLES = Object.freeze({
   no_coverage: "Sumber tidak memuat jawaban"
 });
@@ -147,6 +164,57 @@ export function lookupResultView(response) {
     };
   }
 
+  const excludedNote = Array.isArray(response.excludedSources) && response.excludedSources.length
+    ? `${response.excludedSources.length} sumber dikecualikan karena berisi teks berbentuk instruksi: `
+      + response.excludedSources.map((e) => `${String(e?.id || "")} (${String(e?.host || "")})`).join(", ")
+    : "";
+  const mapSources = (raw) => (Array.isArray(raw) ? raw.map((source) => ({
+    id: String(source?.id || ""),
+    title: String(source?.title || source?.host || ""),
+    url: String(source?.url || ""),
+    host: String(source?.host || ""),
+    tier: String(source?.tier || "")
+  })).filter((source) => source.id && source.url) : []);
+
+  // True Open Research Mode (2026-09-04). Three research states, all
+  // READ-ONLY and none called verified. Only these exact shapes.
+  if (response.ok === true && response.status === "research_answer"
+      && String(response.answer || "").trim()) {
+    return {
+      state: "research_answer", canEdit: false, answer: String(response.answer),
+      title: "Hasil riset web",
+      message: "Dirangkum dari sumber web di bawah dan dilengkapi rujukan.",
+      note: RESEARCH_NOTE, excludedNote, sourceCoverage: "sources", findings: [], host,
+      sources: mapSources(response.sources)
+    };
+  }
+  if (response.ok === true && response.status === "research_partial"
+      && String(response.answer || "").trim()) {
+    const omitted = Number(response.omittedClaims) || 0;
+    return {
+      state: "research_partial", canEdit: false, answer: String(response.answer),
+      title: "Hasil riset web — sebagian",
+      message: omitted === 0
+        ? "Jawaban ini berasal dari sumber web dan belum dicocokkan sebagai edit dokumen."
+        : `${omitted} klaim tidak ditampilkan karena dukungan sumber tidak ditemukan.`,
+      omittedClaims: omitted, note: RESEARCH_NOTE, excludedNote,
+      sourceCoverage: "sources", findings: [], host,
+      sources: mapSources(response.sources)
+    };
+  }
+  if (response.status === "research_sources_only") {
+    const reason = String(response.reason || "synthesis_failed");
+    return {
+      state: "research_sources_only", canEdit: false, answer: null,
+      title: "Sumber ditemukan — ringkasan tidak ditampilkan",
+      message: SOURCES_ONLY_MESSAGES[reason] || String(response.message || "").trim()
+        || "Ringkasan model tidak dapat ditampilkan.",
+      reason, omittedClaims: Number(response.omittedClaims) || 0, excludedNote,
+      findings: [], host, sources: mapSources(response.sources),
+      note: "Hanya daftar sumber yang ditampilkan. Tidak ada teks model dan tidak ada isi halaman yang diteruskan."
+    };
+  }
+
   const reason = String(response.reason || "unknown");
   const preFlight = NO_ANSWER_REASONS.has(reason);
   return {
@@ -216,6 +284,39 @@ export function renderLookupResultHtml(response) {
       + `Terapkan sebagai edit</button></div>`;
   }
 
+  const sourceList = (heading) => (view.sources?.length
+    ? `<div class="lookup-sources"><strong>${heading}</strong><ul>`
+      + view.sources.map((source) =>
+        `<li>${escapeHtml(source.id)} — ${escapeHtml(source.title)} `
+        + `(${escapeHtml(tierLabel(source.tier))}): ${escapeHtml(source.url)}</li>`).join("")
+      + `</ul></div>`
+    : "");
+
+  // Research states: readable, never editable. No edit button exists in any
+  // of these branches at all — not a hidden one.
+  if (view.state === "research_answer" || view.state === "research_partial") {
+    const cls = view.state === "research_answer" ? "lookup-research" : "lookup-partial";
+    return `<div class="lookup-result ${cls}" data-state="${view.state}">`
+      + `<div class="lookup-title">🔎 ${escapeHtml(view.title)}</div>`
+      + hostLine
+      + `<div class="lookup-message">${escapeHtml(view.message)}</div>`
+      + `<div class="lookup-answer">${escapeHtml(view.answer)}</div>`
+      + sourceList("Sumber yang benar-benar diambil:")
+      + (view.excludedNote ? `<div class="lookup-note">${escapeHtml(view.excludedNote)}</div>` : "")
+      + `<div class="lookup-note">${escapeHtml(view.note)}</div>`
+      + `</div>`;
+  }
+  if (view.state === "research_sources_only") {
+    return `<div class="lookup-result lookup-sources-only" data-state="research_sources_only">`
+      + `<div class="lookup-title">ℹ️ ${escapeHtml(view.title)}</div>`
+      + hostLine
+      + `<div class="lookup-message">${escapeHtml(view.message)}</div>`
+      + sourceList("Sumber yang diambil:")
+      + (view.excludedNote ? `<div class="lookup-note">${escapeHtml(view.excludedNote)}</div>` : "")
+      + `<div class="lookup-note">${escapeHtml(view.note)}</div>`
+      + `</div>`;
+  }
+
   const findings = view.findings.length
     ? `<ul class="lookup-findings">` + view.findings.map((f) =>
         `<li><strong>${escapeHtml(f.label)}</strong>`
@@ -231,10 +332,14 @@ export function renderLookupResultHtml(response) {
         + `(${escapeHtml(tierLabel(source.tier))}): ${escapeHtml(source.url)}</li>`).join("")
       + `</ul></div>`
     : "";
+  // A no-coverage outcome is neutral — the search ran, the pages did not
+  // help — so it gets its own class and icon rather than the red of an
+  // answer that was withheld. Still the blocked branch: no answer, no edit.
+  const neutral = view.reason === "no_coverage";
   // No answer element and no edit button exist in this branch at all — not
   // hidden ones. A hidden button is one CSS mistake away from being a live one.
-  return `<div class="lookup-result lookup-blocked" data-state="blocked">`
-    + `<div class="lookup-title">⛔ ${escapeHtml(view.title)}</div>`
+  return `<div class="lookup-result lookup-blocked${neutral ? " lookup-no-coverage" : ""}" data-state="blocked">`
+    + `<div class="lookup-title">${neutral ? "ℹ️" : "⛔"} ${escapeHtml(view.title)}</div>`
     + hostLine
     + `<div class="lookup-message">${escapeHtml(view.message)}</div>`
     + findings
@@ -255,6 +360,7 @@ export function mountLookupResult(container, response, { onEdit } = {}) {
   if (!container) return null;
   const view = lookupResultView(response);
   container.innerHTML = renderLookupResultHtml(response);
+  // Every research state returns here with the blocked states: no handler exists.
   if (view.state !== "verified") return view;
 
   const button = container.querySelector?.(".lookup-edit");
