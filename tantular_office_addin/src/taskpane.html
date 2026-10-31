@@ -471,29 +471,40 @@
       </div>
       <div id="deck-preview" class="deck-preview hidden" aria-live="polite"></div>
       <p id="deck-status" class="status" role="status" aria-live="polite"></p>
-    </section>
 
-    <section id="deck-refine" class="card deck-refine hidden" aria-labelledby="refine-title">
-      <div class="section-title-row">
-        <h2 id="refine-title">🛠 Improve Existing Deck</h2>
-        <span class="pill" id="refine-host-note">PowerPoint</span>
+      <div id="deck-refine" class="deck-refine">
+        <button class="card-toggle refine-toggle" id="refine-toggle" type="button" aria-expanded="false" aria-controls="refine-body">
+          <span id="refine-title">🛠 Perbaiki slide terpilih — Lanjutan</span>
+          <span aria-hidden="true">▾</span>
+        </button>
+        <div id="refine-body" class="refine-body hidden">
+          <p class="hint">Cara termudah: pilih satu slide, lalu tulis di <strong>Tantular Chat</strong> — “Perbaiki slide ini” atau “Buat lebih visual”. Bagian ini adalah kontrol manualnya: pipeline yang sama, memakai Tone, Gaya desain, dan Project/output instructions di atas. Tidak menambah angka/fakta baru.</p>
+          <label class="prompt-label">
+            Instruksi (opsional)
+            <input id="refine-instruction" type="text" placeholder="Contoh: jadikan lebih executive, bandingkan hanya jika datanya ada." />
+          </label>
+          <label>
+            Mode visual
+            <select id="refine-visual-mode">
+              <option value="auto">Otomatis</option>
+              <option value="concise">Lebih ringkas</option>
+              <option value="cards">Kartu</option>
+              <option value="columns">Kolom</option>
+              <option value="chart">Chart jika ada angka</option>
+            </select>
+          </label>
+          <div class="button-row">
+            <button id="refine-run" class="primary deck-build" type="button">🛠 Perbaiki slide</button>
+            <button id="refine-download" class="secondary" type="button">Download hasil</button>
+          </div>
+          <div id="refine-progress" class="progress hidden" role="status" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="refine-progress-text">Menyiapkan...</span>
+          </div>
+          <div id="refine-preview" class="deck-preview hidden" aria-live="polite"></div>
+          <p id="refine-status" class="status" role="status" aria-live="polite"></p>
+        </div>
       </div>
-      <p class="hint">Untuk deck yang sudah kompleks: pilih satu slide, lalu Tantular membuat <strong>versi slide yang lebih jelas</strong> memakai style guide Deck Studio. Output dijaga agar tetap berbasis teks slide: tidak menambah angka/fakta baru.</p>
-      <label class="prompt-label">
-        Apa yang perlu diperbaiki? (opsional)
-        <input id="refine-instruction" type="text" placeholder="Contoh: jadikan lebih executive, bandingkan SOC vs best practice hanya jika datanya ada." />
-      </label>
-      <p class="hint">Menggunakan Tone, Gaya desain, dan Project/output instructions dari Deck Studio di atas. Jika slide tidak punya data numerik, Tantular tidak akan membuat chart palsu.</p>
-      <div class="button-row">
-        <button id="refine-run" class="primary deck-build" type="button">🛠 Improve selected slide</button>
-        <button id="refine-download" class="secondary" type="button">Download improved slide</button>
-      </div>
-      <div id="refine-progress" class="progress hidden" role="status" aria-live="polite">
-        <span class="spinner" aria-hidden="true"></span>
-        <span id="refine-progress-text">Menyiapkan...</span>
-      </div>
-      <div id="refine-preview" class="deck-preview hidden" aria-live="polite"></div>
-      <p id="refine-status" class="status" role="status" aria-live="polite"></p>
     </section>
 
     <section class="card" aria-labelledby="actions-title">

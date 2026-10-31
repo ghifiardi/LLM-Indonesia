@@ -979,3 +979,12 @@ test("the retry instruction is blunt, numeric, and keeps the original intent", (
   assert.ok(retry.indexOf("PERCOBAAN KEDUA") < retry.indexOf("buat lebih ringkas"));
   assert.match(composeImproveRetryInstruction("", 0), /minimal 1 poin/);
 });
+
+test("countSpecUnits does not count an EMPTY column title as kept content", () => {
+  // Grounding blanks a paraphrased column title; the box then renders empty,
+  // so it must not pad the kept side of the content-loss check.
+  const named = { type: "columns", columns: [{ title: "A", points: ["1", "2"] }, { title: "B", points: ["3", "4"] }] };
+  const blank = { type: "columns", columns: [{ title: "", points: ["1", "2"] }, { title: "", points: ["3", "4"] }] };
+  assert.equal(countSpecUnits(named), 6);
+  assert.equal(countSpecUnits(blank), 4);
+});
