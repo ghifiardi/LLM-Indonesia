@@ -7,13 +7,34 @@
 
 import { runTantular } from "../tantularClient.js";
 import { extractJsonObject } from "../deck/deckPlanner.js";
+import { describeSlideStructure, getSelectedSlideTextContext, readSlideShapeTexts } from "../officeClient.js";
+import { describeSuggestion, requestSuggestions, wantsSuggestions } from "./pptSuggest.js";
+import { parseFormatRequest } from "./pptFormat.js";
 import { createHistory } from "./history.js";
+import {
+  SELECT_ONE_SLIDE_MESSAGE,
+  DECK_SETTINGS_NOTE,
+  mentionsSelectedSlide,
+  groundActionIntent,
+  pinActionsToSlide,
+  pptQuickChips,
+  resolveSelectedSlideIndex,
+  rewriteSelectedSlideMessage,
+  wantsLayoutTidy
+} from "./pptSelectedSlide.js";
 import {
   deckContextToPromptText,
   executeConfirmedPptPlan,
   executePptActions,
+  executeSuggestionPlan,
+  executeRelayout,
+  executeFormat,
+  extractRequestedSlideIndex,
+  resolveActionTarget,
   getDeckContext,
   needsPptConfirmation,
+  preferImproveOverReplace,
+  resolveImproveIntent,
   sanitizePptActions,
   summarizePendingChanges
 } from "./pptTools.js";
@@ -28,9 +49,8 @@ Anda menerima snapshot deck aktif (daftar slide beserta teksnya) dan permintaan 
 Aksi yang tersedia di "actions" (kosongkan jika pengguna hanya bertanya):
 - {"op":"improve_slide","slideIndex":4}  → perbaiki slide yang sudah ada; JANGAN sertakan konten, Tantular yang menyusunnya dari teks slide asli.
   SELALU sertakan "instruction" (maksimal 200 karakter) berisi maksud pengguna untuk slide itu — hanya niat, bukan konten slide.
-  Jika pengguna menulis "perbaiki slide 4 supaya lebih ringkas", maka instruction-nya "supaya lebih ringkas".
-  Contoh: {"op":"improve_slide","slideIndex":4,"instruction":"buat lebih ringkas"}
-  Jika pengguna tidak menyebut maksud khusus, tulis instruction singkat yang menggambarkan permintaannya, misalnya "rapikan dan perjelas".
+  instruction WAJIB diambil dari kata-kata pengguna sendiri. Jika pengguna hanya menulis "perbaiki slide 4" tanpa maksud khusus, KOSONGKAN instruction — jangan mengarang maksud (misalnya jangan menambahkan "lebih ringkas" kalau pengguna tidak memintanya).
+  Contoh: {"op":"improve_slide","slideIndex":4,"instruction":"<maksud pengguna, atau kosong>"}
 - {"op":"replace_slide","slideIndex":3,"slide":{...}}  → ganti slide dengan konten yang Anda tulis sendiri.
 - {"op":"add_slide","afterIndex":5,"slide":{...}}  → sisipkan slide baru setelah slide 5.
 - {"op":"delete_slide","slideIndex":7}  → usulkan penghapusan.
@@ -104,31 +124,25 @@ export function mountPptChatPane() {
   }
 
   function renderChips() {
-    // Chips are READ-ONLY on purpose. They are one click away for someone who
-    // has not yet worked out what this pane does, and a deck has no undo here —
-    // so nothing that mutates slides belongs in them. Writing stays available by
-    // typing, which takes a deliberate sentence.
-    // They also must not hardcode a slide number: it is arbitrary against the
-    // user's real deck, and "slide 2" reads as "two slides" in Indonesian —
-    // ambiguity handed straight to a weak local model as its instruction.
-    // Phrase every chip as a QUESTION, never an imperative. "Ringkas isi deck
-    // ini" reads in Indonesian as "condense this deck" — an instruction to edit
-    // — and a model holding slide-editing tools acted on it: one click once
-    // rewrote seven slides. Whether it answers or edits is otherwise a coin
-    // flip. A question has no such second reading.
-    const prompts = [
-      "Apa isi deck ini?",
-      "Apa pesan utama deck ini?",
-      "Apa yang kurang dari deck ini?"
-    ];
-    for (const prompt of prompts) {
+    // Two kinds of chip, both defined as data in pptSelectedSlide.js:
+    //  - The question chips are READ-ONLY on purpose: they fill the box and
+    //    the user still has to press send. A deck has no undo here, so
+    //    nothing that mutates slides belongs one click away — and they are
+    //    phrased as QUESTIONS, never imperatives: "Ringkas isi deck ini" once
+    //    rewrote seven slides under a model holding slide-editing tools.
+    //  - The two improve chips DO send. Sending only produces a PLAN: the
+    //    confirmation row below is still the only thing that writes, and the
+    //    request names "slide terpilih", so with no single selected slide the
+    //    turn ends in a message and zero actions.
+    for (const item of pptQuickChips("PowerPoint")) {
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "chat-chip";
-      chip.textContent = prompt;
+      chip.textContent = item.label;
       chip.addEventListener("click", () => {
-        els.input.value = prompt;
-        els.input.focus();
+        els.input.value = item.message;
+        if (item.submit) send();
+        else els.input.focus();
       });
       els.chips.appendChild(chip);
     }
@@ -228,6 +242,147 @@ export function mountPptChatPane() {
     els.messages.scrollTop = els.messages.scrollHeight;
   }
 
+  // "Usulkan perbaikan slide ini": a checklist of concrete, grounded changes.
+  // Nothing is written until the user ticks items and clicks apply; the apply
+  // runs executeSuggestionPlan, which re-reads the live slide and writes only
+  // the ticked items into the slide's own shapes.
+  function addSuggestionChecklist(list, bubble, target, turnSignal) {
+    bubble.textContent = `Usulan perbaikan untuk slide ${target.slideIndex} (desain slide dipertahankan). `
+      + "Centang yang ingin diterapkan, lalu klik Terapkan:";
+    const base = bubble.textContent;
+
+    const form = document.createElement("div");
+    form.className = "chat-checklist";
+    const boxes = [];
+    for (const s of list) {
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = s.id;
+      const text = document.createElement("span");
+      text.textContent = describeSuggestion(s);
+      label.appendChild(box);
+      label.appendChild(text);
+      form.appendChild(label);
+      boxes.push(box);
+    }
+
+    const row = document.createElement("div");
+    row.className = "chat-actions";
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "primary";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = "Batal";
+    const selected = () => boxes.filter((b) => b.checked).map((b) => b.value);
+    const refresh = () => {
+      const n = selected().length;
+      apply.textContent = `Terapkan ${n} perubahan`;
+      apply.disabled = n === 0;
+    };
+    boxes.forEach((b) => b.addEventListener("change", refresh));
+    refresh();
+
+    apply.addEventListener("click", async () => {
+      if (state.busy) {
+        bubble.textContent = `${base}\n⏳ Tunggu sampai proses yang sedang berjalan selesai, lalu klik lagi.`;
+        return;
+      }
+      const ids = selected();
+      if (!ids.length) return;
+      if (turnSignal?.aborted) {
+        bubble.textContent = `${base}\n⏹ Giliran ini dihentikan; tidak ada yang ditulis ke deck.`;
+        return;
+      }
+      apply.disabled = true;
+      cancel.disabled = true;
+      boxes.forEach((b) => { b.disabled = true; });
+      row.remove();
+      state.busy = true;
+      state.abort = new AbortController();
+      els.stop.classList.remove("hidden");
+      let lines;
+      try {
+        const result = await executeSuggestionPlan(
+          { slideId: target.slideId, slideIndex: target.slideIndex, suggestions: list, selectedIds: ids },
+          { signal: state.abort.signal, onProgress: (text) => { bubble.textContent = `${base}\n${text}`; } }
+        );
+        lines = result.lines;
+      } catch (error) {
+        console.error("[TantularChat/PPT] usulan gagal diterapkan", error);
+        lines = [`❌ Perubahan gagal dijalankan: ${error?.message || error}`];
+      } finally {
+        state.busy = false;
+        state.abort = null;
+        els.stop.classList.add("hidden");
+      }
+      form.remove();
+      bubble.textContent = [base, "", ...lines].join("\n").trim();
+      els.messages.scrollTop = els.messages.scrollHeight;
+    });
+    cancel.addEventListener("click", () => {
+      row.remove();
+      form.remove();
+      bubble.textContent = `${base}\n⏹ Dibatalkan. Tidak ada slide yang diubah.`;
+    });
+
+    row.appendChild(apply);
+    row.appendChild(cancel);
+    els.messages.appendChild(form);
+    els.messages.appendChild(row);
+    els.messages.scrollTop = els.messages.scrollHeight;
+  }
+
+  // One confirm row for the deterministic slide actions (re-layout, format):
+  // the runner is called only from the click, with a fresh abort controller.
+  function addActionConfirm(bubble, label, turnSignal, runner) {
+    const base = bubble.textContent;
+    const row = document.createElement("div");
+    row.className = "chat-actions";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "primary";
+    confirm.textContent = label;
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = "Batal";
+    confirm.addEventListener("click", async () => {
+      if (state.busy) { bubble.textContent = `${base}\n⏳ Tunggu sampai proses yang sedang berjalan selesai, lalu klik lagi.`; return; }
+      if (turnSignal?.aborted) { bubble.textContent = `${base}\n⏹ Giliran ini dihentikan; tidak ada yang ditulis ke deck.`; return; }
+      row.remove();
+      state.busy = true;
+      state.abort = new AbortController();
+      els.stop.classList.remove("hidden");
+      let lines;
+      try {
+        const result = await runner(state.abort.signal, (text) => { bubble.textContent = `${base}\n${text}`; });
+        lines = result.lines;
+      } catch (error) {
+        console.error("[TantularChat/PPT] aksi slide gagal", error);
+        lines = [`❌ Aksi gagal: ${error?.message || error}`];
+      } finally {
+        state.busy = false;
+        state.abort = null;
+        els.stop.classList.add("hidden");
+      }
+      bubble.textContent = [base, "", ...lines].join("\n").trim();
+      els.messages.scrollTop = els.messages.scrollHeight;
+    });
+    cancel.addEventListener("click", () => { row.remove(); bubble.textContent = `${base}\n⏹ Dibatalkan. Tidak ada slide yang diubah.`; });
+    row.appendChild(confirm);
+    row.appendChild(cancel);
+    els.messages.appendChild(row);
+    els.messages.scrollTop = els.messages.scrollHeight;
+  }
+
+  function addLayoutConfirm(target, bubble, turnSignal) {
+    addActionConfirm(bubble, "Tata ulang slide", turnSignal,
+      (signal, onProgress) => executeRelayout(target, { signal, onProgress }));
+  }
+
   async function reloadDeck() {
     if (state.busy) return;
     const bubble = addBubble("assistant", "Membaca ulang deck aktif...");
@@ -238,6 +393,21 @@ export function mountPptChatPane() {
       bubble.textContent = String(error?.message || error);
       bubble.classList.add("error");
     }
+  }
+
+  // Which slide a deterministic action targets: an explicit number in the
+  // message, else the slide the user pinned via "slide ini", else the LIVE
+  // selection. "sesuaikan ukuran font" named none and was refused although a
+  // slide was selected (live, 2026-09-05).
+  async function resolveActionSlide(message, pinnedIndex, ctx) {
+    let index = pinnedIndex || extractRequestedSlideIndex(message);
+    if (!index) {
+      const selected = await getSelectedSlideTextContext();
+      const resolved = resolveSelectedSlideIndex(selected);
+      if (resolved.ok) index = resolved.index;
+    }
+    const target = index ? resolveActionTarget(ctx, index) : null;
+    return target?.id ? target : null;
   }
 
   async function send(spokenText = null, { voice = false } = {}) {
@@ -252,8 +422,104 @@ export function mountPptChatPane() {
 
     let spoken = "";
     try {
+      // "Perbaiki slide ini" names no slide number, and the planner can only
+      // target numbers. Resolve the live selection FIRST: exactly one usable
+      // slide becomes an explicit "slide N" for the planner; anything else ends
+      // the turn here with a message and no actions — nothing is planned, so
+      // nothing can be confirmed or written.
+      let pinnedIndex = 0;
+      let plannerMessage = message;
+      if (mentionsSelectedSlide(message)) {
+        answer.textContent = "Membaca slide terpilih...";
+        const selected = await getSelectedSlideTextContext();
+        const resolved = resolveSelectedSlideIndex(selected);
+        if (!resolved.ok) {
+          answer.textContent = resolved.reason;
+          history.add("user", message);
+          history.add("assistant", resolved.reason);
+          return;
+        }
+        pinnedIndex = resolved.index;
+        plannerMessage = rewriteSelectedSlideMessage(message, pinnedIndex);
+      }
+
       const ctx = await getDeckContext();
       els.pill.textContent = `Konteks: deck aktif (${ctx.source})`;
+
+      // A FORMATTING request: font size on the slide's own text boxes, or a
+      // proportional fit via the re-layout. Code, not the model; confirm-gated.
+      const format = parseFormatRequest(message);
+      if (format) {
+        const target = await resolveActionSlide(message, pinnedIndex, ctx);
+        if (!target?.id) {
+          answer.textContent = SELECT_ONE_SLIDE_MESSAGE;
+          history.add("user", message);
+          history.add("assistant", answer.textContent);
+          return;
+        }
+        answer.textContent = format.kind === "fit"
+          ? `Tantular akan menyesuaikan ukuran huruf slide ${target.index} agar proporsional dengan slide (menata ulang isi di desain yang sama). Tidak ada undo.`
+          : `Tantular akan mengubah ukuran huruf isi slide ${target.index}${format.size ? ` menjadi ${format.size} pt` : format.delta > 0 ? " (lebih besar)" : " (lebih kecil)"}. Judul dan footer tidak disentuh. Tidak ada undo.`;
+        addActionConfirm(answer, format.kind === "fit" ? "Sesuaikan ukuran" : "Ubah ukuran huruf", state.abort.signal,
+          (signal, onProgress) => executeFormat({ slideId: target.id, slideIndex: target.index }, format, { signal, onProgress }));
+        history.add("user", message);
+        history.add("assistant", `format slide ${target.index}`);
+        return;
+      }
+
+      // A LAYOUT repair: geometry only, deterministic, no model. Still a deck
+      // mutation with no undo, so it waits for the same confirm row.
+      if (wantsLayoutTidy(message)) {
+        const target = await resolveActionSlide(message, pinnedIndex, ctx);
+        if (!target?.id) {
+          answer.textContent = SELECT_ONE_SLIDE_MESSAGE;
+          history.add("user", message);
+          history.add("assistant", answer.textContent);
+          return;
+        }
+        answer.textContent = `Tantular akan menata ulang slide ${target.index} di dalam desainnya sendiri: isi dikelompokkan menjadi panel `
+          + "dengan bar judul atau daftar yang dibagi rata, satu penanda per poin, huruf konsisten; warna dan font mengikuti slide. "
+          + "Judul, footer, dan isi teks tidak berubah. Tidak ada undo.";
+        addLayoutConfirm({ slideId: target.id, slideIndex: target.index }, answer, state.abort.signal);
+        history.add("user", message);
+        history.add("assistant", `rapikan tata letak slide ${target.index}`);
+        return;
+      }
+
+      // A request for OPTIONS: analyse the slide, show a checklist, write
+      // nothing. The planner is not involved.
+      if (wantsSuggestions(message)) {
+        const target = await resolveActionSlide(message, pinnedIndex, ctx);
+        if (!target?.id) {
+          answer.textContent = SELECT_ONE_SLIDE_MESSAGE;
+          history.add("user", message);
+          history.add("assistant", answer.textContent);
+          return;
+        }
+        answer.textContent = `Membaca slide ${target.index}...`;
+        const read = await readSlideShapeTexts({ slideId: target.id, slideIndex: target.index });
+        const structure = read?.found ? describeSlideStructure(read.shapes) : null;
+        if (!structure?.bodies) {
+          answer.textContent = `Slide ${target.index} tidak punya teks yang bisa diusulkan perbaikannya.`;
+          history.add("user", message);
+          history.add("assistant", answer.textContent);
+          return;
+        }
+        answer.textContent = `Menganalisis slide ${target.index}...`;
+        const settings = deckSettings();
+        const list = await requestSuggestions({
+          structure, tone: settings.tone, instruction: settings.instruction, signal: state.abort.signal
+        });
+        if (!list.length) {
+          answer.textContent = `Tidak ada usulan yang lolos pemeriksaan sumber untuk slide ${target.index}. Coba lagi, atau sebutkan bagian yang ingin diperbaiki.`;
+        } else {
+          addSuggestionChecklist(list, answer, { slideId: target.id, slideIndex: target.index }, state.abort.signal);
+        }
+        history.add("user", message);
+        history.add("assistant", `${list.length} usulan untuk slide ${target.index}`);
+        return;
+      }
+
       answer.textContent = "Menyusun rencana...";
 
       const { tone, instruction, styleId } = deckSettings();
@@ -263,7 +529,7 @@ export function mountPptChatPane() {
           + `Tone deck: ${tone || "profesional, jelas, executive"}\n`
           + `Style guide / instruksi project:\n"""${instruction || "tidak ada"}"""\n\n`
           + `Riwayat singkat:\n${history.toMessages().map((m) => `${m.role}: ${m.content}`).join("\n") || "-"}\n\n`
-          + `Permintaan pengguna:\n"""${message}"""`,
+          + `Permintaan pengguna:\n"""${plannerMessage}"""`,
         maxTokens: 3000,
         temperature: 0.15,
         task: "deck",
@@ -278,13 +544,42 @@ export function mountPptChatPane() {
 
       // Bound on the snapshot itself, not its length: slide.index is a true deck
       // position and the extractor skips unreadable slides, so the two differ.
-      const { actions, rejected } = sanitizePptActions(parsed.actions, ctx);
+      const sanitized = sanitizePptActions(parsed.actions, ctx);
+      let actions = sanitized.actions;
+      const rejected = sanitized.rejected;
+      // The user pointed at ONE slide. Whatever the planner emitted is pinned
+      // back onto it, so a weak model cannot drift to slide 1.
+      if (pinnedIndex) {
+        const pinned = pinActionsToSlide(actions, pinnedIndex);
+        actions = pinned.actions;
+        rejected.push(...pinned.rejected);
+      }
+      // A replace aimed at a slide that has text is routed through improve,
+      // so grounding, output language and the loss check apply to it.
+      const routed = preferImproveOverReplace(actions, ctx, plannerMessage);
+      actions = routed.actions;
+      rejected.push(...routed.notes.map((note) => `ℹ️ ${note}`));
+
+      // MEASURED: the local planner usually omits the per-action instruction.
+      // The proposal line reads the intent to say whether the slide design is
+      // kept or the layout will change, so attach the user's own request now,
+      // with the same 200-char clamp the write path applies.
+      // ...and a planner intent that the user's words do not back (the
+      // prompt's own example leaking in) is replaced by the user's message.
+      actions = actions.map((action) => (
+        action.op === "improve_slide"
+          ? { ...action, instruction: resolveImproveIntent("", groundActionIntent(action.instruction, plannerMessage)) }
+          : action
+      ));
       answer.textContent = parsed.reply;
 
       // Planning only — this call cannot touch the deck.
       const { lines, pending } = executePptActions(actions, ctx);
-      answer.textContent = [parsed.reply, "", ...lines, ...rejected.map((r) => `⚠️ ${r}`)]
-        .join("\n").trim();
+      const improves = pending.some((entry) => entry.op === "improve_slide");
+      answer.textContent = [
+        parsed.reply, "", ...lines, ...rejected.map((r) => `⚠️ ${r}`),
+        ...(improves ? [`ℹ️ ${DECK_SETTINGS_NOTE}`] : [])
+      ].join("\n").trim();
 
       // A genuine question plans nothing, so it never sees a confirmation.
       if (needsPptConfirmation(pending)) {
@@ -296,7 +591,7 @@ export function mountPptChatPane() {
           // the raw request travels here too and pptTools uses it as the fallback
           // intent for improve_slide. Without it the user's "supaya lebih ringkas"
           // never reaches the improve prompt at all.
-          userRequest: message
+          userRequest: plannerMessage
         });
       }
 

@@ -564,6 +564,12 @@ export function isThinContent(text) {
   return value.length < 220 && (lines.length <= 2 || words.length < 28);
 }
 
+// A deliberately requested multi-slide deck must reach the deck planner even
+// when its source is short; the title-only shortcut ignores slide count.
+export function shouldUseTitleSlide(text, { countWasExplicit = false } = {}) {
+  return !countWasExplicit && isThinContent(text);
+}
+
 export function looksLikePresentationBrief(text) {
   const value = String(text || "").toLowerCase();
   const presentationSignal = /\b(deck|slide|slides|presentasi|powerpoint|pptx|keynote)\b/i.test(value);
@@ -708,6 +714,9 @@ Aturan kualitas WAJIB:
 - Gunakan chart/visualization HANYA jika teks slide berisi angka eksplisit yang bisa dipakai.
 - Jika tidak ada angka eksplisit, gunakan bullets/cards/columns saja.
 - Pertahankan istilah teknis dan angka asli.
+- Tulis dalam BAHASA yang sama dengan teks slide sumber. Slide berbahasa Inggris tetap berbahasa Inggris; jangan menerjemahkan.
+- Jangan menyalin kalimat sumber kata demi kata: tulis ulang setiap poin agar lebih jelas dan tajam, dengan fakta yang sama.
+- Judul kartu (cards) dan judul kolom: label pendek 2–4 kata yang disusun dari kata-kata yang ada di slide sumber, bukan kalimat dan bukan istilah baru.
 - JANGAN membuang fakta yang berbeda dari teks slide sumber. "Ringkas" berarti memperpendek kalimat, BUKAN menghapus poin. Kalau sumber punya 6 poin berbeda, hasilnya tetap harus memuat 6 fakta itu (boleh digabung kalau memang membahas hal yang sama).
 - Jangan membuat slide "columns" dengan kurang dari 2 kolom. Kalau isinya hanya satu kelompok poin, pakai type "bullets".
 - Setiap kolom wajib punya "title" yang nyata dan berasal dari sumber. Jangan memakai judul placeholder seperti "Kolom 1", "Kolom 2", atau judul kosong.
@@ -728,7 +737,32 @@ Skema:
   }
 }`;
 
-export async function improveExistingSlide({ slideText, tone = "", instruction = "", signal }) {
+// The improve model is Indonesian-first and the whole prompt is Indonesian, so
+// given an English slide it "improves" by translating — and grounding then
+// rejects every line as invented. State the slide's own language explicitly.
+// Stopword counts are enough: a slide is short and rarely mixed.
+const EN_STOPWORDS = /\b(the|and|of|to|in|is|are|with|for|you|what|this|that|from|by|or|it|as|on|be|not)\b/gi;
+const ID_STOPWORDS = /\b(dan|yang|untuk|dengan|dari|di|ke|ini|itu|adalah|tidak|pada|akan|atau|dalam|sebagai|oleh|agar|bisa|harus)\b/gi;
+
+export function detectSlideLanguage(text) {
+  const value = String(text || "");
+  const en = (value.match(EN_STOPWORDS) || []).length;
+  const id = (value.match(ID_STOPWORDS) || []).length;
+  return en > id ? "en" : "id";
+}
+
+function outputLanguageLine(source) {
+  return detectSlideLanguage(source) === "en"
+    ? "BAHASA OUTPUT: English. Teks slide sumber berbahasa Inggris — tulis headline, subhead, dan semua poin dalam bahasa Inggris; jangan menerjemahkan ke bahasa Indonesia."
+    : "BAHASA OUTPUT: Bahasa Indonesia. Jangan menerjemahkan istilah asli yang ada di sumber.";
+}
+
+// `sourceBlocks` (optional): the source slide's body lines, one array per body
+// shape, in slide order — from officeClient.describeSlideStructure. When the
+// model keeps a block's point count, a rewritten point that fails grounding is
+// replaced by the source line in that position instead of being dropped, so
+// "no new facts" no longer costs "lost facts".
+export async function improveExistingSlide({ slideText, tone = "", instruction = "", signal, sourceBlocks = null }) {
   const source = String(slideText || "").trim();
   if (!source) return { spec: null, source: "empty" };
 
@@ -741,6 +775,7 @@ Perbaiki slide sebagai slide presentasi. Jangan mengalihkan ke analisis keamanan
 Jika kata risk/risiko muncul, gunakan konteks slide sumber; jangan otomatis menafsirkannya sebagai cybersecurity.
 
 Perbaiki slide terpilih berikut menjadi SATU slide yang lebih jelas dan executive.
+${outputLanguageLine(source)}
 Tone: ${tone || "profesional, jelas, executive"}.
 Style guide / instruksi project:
 """${instruction || "tidak ada"}"""
@@ -767,7 +802,7 @@ Teks slide sumber:
 
   const candidate = parsed.slide || parsed.slides?.[0] || parsed;
   let slide = normalizeSlide(candidate);
-  slide = enforceSourceGrounding(slide, source);
+  slide = enforceSourceGrounding(slide, source, sourceBlocks);
 
   if (!slide || !hasSubstantiveSlideContent(slide)) {
     return { spec: improveFallbackSpec(source), source: "fallback-grounded" };
@@ -861,15 +896,29 @@ function compactRiskPoints(lines) {
   return points.length ? points : lines.slice(0, 5);
 }
 
-function enforceSourceGrounding(slide, source) {
+// Returns null when grounding leaves nothing usable. It must NOT hand back the
+// mechanical fallback slide itself: improveExistingSlide would then label a
+// fallback as "model-grounded" and the chat would report an improvement that
+// never happened (live, 2026-09-03: a cards request written as fallback bullets).
+function enforceSourceGrounding(slide, source, sourceBlocks = null) {
   if (!slide) return null;
   const sourceNumbers = extractNumbers(source);
   const sourceLexicon = buildSourceLexicon(source);
   const clean = { ...slide };
-  const keepGroundedList = (items) => toStringList(items)
-    .filter((item) => !hasUnsupportedNumber(item, sourceNumbers))
-    .filter((item) => isSourceGroundedText(item, sourceLexicon))
-    .slice(0, 6);
+  const isGrounded = (item) => !hasUnsupportedNumber(item, sourceNumbers) && isSourceGroundedText(item, sourceLexicon);
+  const blocks = Array.isArray(sourceBlocks)
+    ? sourceBlocks.map((block) => toStringList(block)).filter((block) => block.length)
+    : [];
+  // With a matching source block, an ungrounded point keeps its POSITION and
+  // takes the source line there; without one there is no honest positional
+  // guess, so the point is dropped as before.
+  const keepGroundedList = (items, block = null) => {
+    const list = toStringList(items);
+    if (block && block.length === list.length) {
+      return list.map((item, index) => (isGrounded(item) ? item : block[index])).slice(0, 6);
+    }
+    return list.filter(isGrounded).slice(0, 6);
+  };
 
   clean.headline = keepGroundedText(clean.headline, sourceNumbers, sourceLexicon) || firstLine(source) || "Improved Slide";
   clean.subhead = keepGroundedText(clean.subhead, sourceNumbers, sourceLexicon);
@@ -898,32 +947,48 @@ function enforceSourceGrounding(slide, source) {
 
   if (clean.type === "cards") {
     clean.cards = (Array.isArray(clean.cards) ? clean.cards : [])
-      .map((card) => ({
-        title: keepGroundedText(card?.title, sourceNumbers, sourceLexicon),
-        desc: keepGroundedText(card?.desc, sourceNumbers, sourceLexicon)
-      }))
+      .map((card) => {
+        const desc = keepGroundedText(card?.desc, sourceNumbers, sourceLexicon);
+        // A card must not be headless (live, 2026-09-03): when the model's
+        // label fails grounding, the card's own grounded text supplies one.
+        const title = keepGroundedText(card?.title, sourceNumbers, sourceLexicon) || labelFromText(desc);
+        return { title, desc };
+      })
       .filter((card) => card.title || card.desc)
       .slice(0, 6);
-    if (!clean.cards.length) return improveFallbackSpec(source).slides[0];
+    if (!clean.cards.length) return null; // caller labels this fallback-grounded
     return clean;
   }
 
   if (clean.type === "columns") {
     clean.columns = (Array.isArray(clean.columns) ? clean.columns : [])
-      .map((col) => ({
+      .map((col, index) => ({
         title: keepGroundedText(col?.title, sourceNumbers, sourceLexicon),
-        points: keepGroundedList(col?.points)
+        points: keepGroundedList(col?.points, blocks.length === (clean.columns || []).length ? blocks[index] : null)
       }))
       .filter((col) => col.title || col.points.length)
       .slice(0, 3);
-    if (!clean.columns.length) return improveFallbackSpec(source).slides[0];
+    if (!clean.columns.length) return null; // caller labels this fallback-grounded
     return clean;
   }
 
   clean.type = "bullets";
-  clean.bullets = keepGroundedList(clean.bullets);
-  if (!clean.bullets.length) return improveFallbackSpec(source).slides[0];
+  clean.bullets = keepGroundedList(clean.bullets, blocks.length === 1 ? blocks[0] : null);
+  if (!clean.bullets.length) return null; // caller labels this fallback-grounded
   return clean;
+}
+
+// First clause of a sentence, capped at five words: "Name what is missing;
+// a named gap..." → "Name what is missing".
+const LABEL_CONNECTIVES = new Set(["and", "or", "that", "which", "from", "with", "over", "to", "of", "for", "than", "into", "between", "about", "as", "but", "so", "then", "dan", "atau", "yang", "dari", "dengan", "untuk", "agar", "ke", "daripada"]);
+function labelFromText(text) {
+  const clause = str(text).split(/[;:—.]/)[0].trim();
+  if (!clause) return "";
+  const words = clause.split(/\s+/);
+  if (words.length <= 5) return words.join(" ").replace(/[,]$/, "");
+  const cut = words.findIndex((w, i) => i > 0 && LABEL_CONNECTIVES.has(w.toLowerCase().replace(/[^a-z]/g, "")));
+  const kept = words.slice(0, cut > 0 ? Math.min(cut, 5) : 5);
+  return kept.join(" ").replace(/[,]$/, "");
 }
 
 function hasSubstantiveSlideContent(slide) {
@@ -992,17 +1057,41 @@ function isSourceGroundedText(text, sourceLexicon) {
   }
 
   const tokens = significantTokens(value);
-  // Short labels such as "Gallery", "Device", "High Risk", or "Others" are
-  // grounded if every significant word appears in the source slide.
-  if (tokens.length <= 3) return tokens.every((token) => sourceLexicon.tokens.has(token));
   if (!tokens.length) return true;
+  // Short labels ("Gallery", "Evidence Discrimination", "Gap Handling") are
+  // headings built from the slide's topic words, not claims: at least half of
+  // their words must be on the slide. Title case is style here, so the name
+  // check does not apply; numbers were already checked by the caller.
+  if (tokens.length <= 3) {
+    const hits = tokens.filter((token) => sourceLexicon.tokens.has(token)).length;
+    return hits * 2 >= tokens.length;
+  }
+
+  // FACTS stay strict: a capitalised word mid-sentence is a name/term, and a
+  // name the source slide never mentions is an invention however fluent the
+  // sentence around it (numbers are checked separately by hasUnsupportedNumber).
+  if (hasUnsupportedProperNoun(value, sourceLexicon)) return false;
 
   const overlap = tokens.filter((token) => sourceLexicon.tokens.has(token)).length;
   const coverage = overlap / tokens.length;
-  // Require high lexical overlap. This intentionally drops fluent but invented
-  // phrases like "active liveness detection" when those words do not occur in
-  // the selected slide.
-  return coverage >= 0.82;
+  // WORDING is allowed to move (owner decision 2026-09-03): the old 82% exact
+  // overlap rejected every rewording of an English slide, so improve was a
+  // no-op. Half the content words, after stemming, is enough — invented
+  // phrases with no source words still fail.
+  return coverage >= 0.5;
+}
+
+function hasUnsupportedProperNoun(text, sourceLexicon) {
+  const words = String(text || "").split(/\s+/);
+  for (let i = 1; i < words.length; i += 1) {
+    const word = words[i].replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "");
+    if (!/^[A-Z][a-z]{2,}$/.test(word)) continue;
+    // A word after sentence punctuation is a sentence start, not a name.
+    if (/[.!?:;—-]$/.test(words[i - 1])) continue;
+    const token = stemToken(word.toLowerCase());
+    if (!sourceLexicon.tokens.has(token)) return true;
+  }
+  return false;
 }
 
 function significantTokens(text) {
@@ -1013,7 +1102,22 @@ function significantTokens(text) {
   return normalizeGroundingText(text)
     .split(/[^a-z0-9]+/i)
     .map((token) => token.trim())
-    .filter((token) => token.length >= 3 && !stop.has(token));
+    .filter((token) => token.length >= 3 && !stop.has(token))
+    .map(stemToken);
+}
+
+// Inflections are the same word for grounding purposes: "arguments" ⇔
+// "argument", "relied" ⇔ "rely", "exhibits" ⇔ "exhibit". Applied to source and
+// candidate alike, so it never widens what counts as a source word by itself.
+function stemToken(token) {
+  let t = token;
+  if (t.length > 4 && t.endsWith("ies")) t = `${t.slice(0, -3)}y`;
+  else if (t.length > 4 && t.endsWith("ied")) t = `${t.slice(0, -3)}y`;
+  else if (t.length > 5 && t.endsWith("ing")) t = t.slice(0, -3);
+  else if (t.length > 4 && t.endsWith("ed")) t = t.slice(0, -2);
+  else if (t.length > 4 && t.endsWith("es")) t = t.slice(0, -2);
+  else if (t.length > 3 && t.endsWith("s") && !t.endsWith("ss")) t = t.slice(0, -1);
+  return t;
 }
 
 function normalizeGroundingText(text) {

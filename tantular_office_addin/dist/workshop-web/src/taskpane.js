@@ -18,6 +18,10 @@ import { bindLookupEntry } from "./chat/lookupUi.js";
 import {
   getSelectionContext,
   getSelectedSlideTextContext,
+  describeSlideStructure,
+  planInPlaceWrites,
+  readSlideShapeTexts,
+  writeSlideShapeTexts,
   getActivePresentationPptxFile,
   insertResultText,
   writeExcelLabels,
@@ -38,11 +42,10 @@ import { styleOptions } from "./deck/deckStyles.js";
 import {
   planDeck,
   buildTitleSlideSpec,
-  isThinContent,
+  shouldUseTitleSlide,
   looksLikePresentationBrief,
   inferRequestedSlideCount,
-  summarizeDeckSections,
-  improveExistingSlide
+  summarizeDeckSections
 } from "./deck/deckPlanner.js";
 import { buildDeckPptxBase64 } from "./deck/pptxBuilder.js";
 import { extractSlideFromImage, fileToDataUrl, getLastOcrEngine, ocrStatusLine } from "./deck/visionExtract.js";
@@ -62,7 +65,8 @@ import { planWorkbook } from "./workbook/workbookPlanner.js";
 import { buildWorkbookXlsxBase64 } from "./workbook/xlsxBuilder.js";
 import { hostUiConfig } from "./hostUi.js";
 import { putContext, shouldAdoptServerContext } from "./workspaceClient.js";
-import { extractPptxSlides, extractRequestedSlideIndex } from "./chat/pptTools.js";
+import { chooseImproveWriteMode, extractPptxSlides, extractRequestedSlideIndex, runImproveSlidePipeline, writeNativeLayout } from "./chat/pptTools.js";
+import { refineVisualModeInstruction } from "./chat/pptSelectedSlide.js";
 
 const DECK_STUDIO_BUILD = "0.10.9-deselect-before-delete";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
@@ -197,14 +201,16 @@ const els = {
   deckPreview: document.querySelector("#deck-preview"),
   deckStatus: document.querySelector("#deck-status"),
   deckHostNote: document.querySelector("#deck-host-note"),
+  refineToggle: document.querySelector("#refine-toggle"),
+  refineBody: document.querySelector("#refine-body"),
   refineInstruction: document.querySelector("#refine-instruction"),
+  refineVisualMode: document.querySelector("#refine-visual-mode"),
   refineRun: document.querySelector("#refine-run"),
   refineDownload: document.querySelector("#refine-download"),
   refineProgress: document.querySelector("#refine-progress"),
   refineProgressText: document.querySelector("#refine-progress-text"),
   refinePreview: document.querySelector("#refine-preview"),
   refineStatus: document.querySelector("#refine-status"),
-  refineHostNote: document.querySelector("#refine-host-note"),
   actionsTitle: document.querySelector("#actions-title"),
   actionWarning: document.querySelector("#action-warning"),
   actionGrid: document.querySelector("#action-grid"),
@@ -373,7 +379,7 @@ function mountChatForHost() {
   if (!["Word", "Excel", "PowerPoint"].includes(state.host)) return null;
   if (chatMountPromise) return chatMountPromise;
   chatMountPromise = import("./chat/chatPane.js")
-    .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
+    .then(({ mountChatPane }) => mountChatPane({ host: state.host, getAttachment: () => state.attachment || null }))
     // Without this the promise rejects silently and the chat card simply never
     // appears — indistinguishable from "this host has no chat".
     .catch((error) => {
@@ -515,6 +521,10 @@ function bindStaticEvents() {
   els.classifyExcel.addEventListener("click", labelExcelRange);
   els.deckCreate.addEventListener("click", createDeckSmart);
   els.deckDownload.addEventListener("click", downloadDeckSmart);
+  els.refineToggle.addEventListener("click", () => {
+    const hidden = els.refineBody.classList.toggle("hidden");
+    els.refineToggle.setAttribute("aria-expanded", String(!hidden));
+  });
   els.refineRun.addEventListener("click", refineSelectedSlide);
   els.refineDownload.addEventListener("click", downloadRefineResult);
   // An explicit slide-count entry must never be overridden by a count parsed
@@ -526,6 +536,12 @@ function bindStaticEvents() {
   els.sourceDocumentInput.addEventListener("change", () => {
     state.extractedDocumentName = null;
     state.documentSelection = null;
+    state.attachment = null;
+    // Extract now, not only when a Studio runs: the chat's attachment context
+    // must exist the moment the file is chosen (2026-09-05).
+    ingestAttachmentForChat().catch((error) => {
+      els.selectionMeta.textContent = `Lampiran belum bisa dibaca: ${error?.message || error}`;
+    });
   });
   els.saveProjectInstructions.addEventListener("click", saveProjectInstructions);
   els.clearProjectInstructions.addEventListener("click", clearProjectInstructions);
@@ -680,13 +696,14 @@ function setUpLookup() {
       const question = refined.question
         ? `<p class="lookup-refine-question"><strong>${escapeHtml(refined.question)}</strong></p>`
         : "";
+      // Each candidate is one option row: the query to pick, and the reason
+      // beneath it. The leak warning stays on the query line, where the eye is.
       area.innerHTML = question + refined.candidates.map((c, i) =>
-        `<button type="button" class="secondary full-width-button lookup-candidate"
-                 data-index="${i}">
-           ${escapeHtml(c.query)}${c.containsDocumentData
-             ? ` <span class="lookup-leak-warning">⚠ memuat data dokumen</span>` : ""}
-         </button>
-         <p class="hint">${escapeHtml(c.why || "")}</p>`).join("");
+        `<button type="button" class="lookup-candidate" data-index="${i}">
+           <span class="lookup-candidate-query">${escapeHtml(c.query)}${c.containsDocumentData
+             ? ` <span class="lookup-leak-warning">⚠ memuat data dokumen</span>` : ""}</span>
+           ${c.why ? `<span class="lookup-candidate-why">${escapeHtml(c.why)}</span>` : ""}
+         </button>`).join("");
       area.querySelectorAll(".lookup-candidate").forEach((btn) => {
         btn.addEventListener("click", () => {
           const chosen = refined.candidates[Number(btn.dataset.index)];
@@ -1043,7 +1060,6 @@ function renderForHost() {
   els.deckRefine.classList.toggle("hidden", !ui.deckRefine);
   els.classifyExcel.classList.toggle("hidden", state.host !== "Excel");
   els.deckHostNote.textContent = state.host === "PowerPoint" ? "PowerPoint ready" : "Plan only outside PowerPoint";
-  els.refineHostNote.textContent = state.host === "PowerPoint" ? "PowerPoint improve" : "PowerPoint only";
   els.refineRun.disabled = state.host !== "PowerPoint";
   renderHostActionCopy();
   els.deckDownload.disabled = !state.deckSpec;
@@ -1594,6 +1610,25 @@ function documentPreview(text, chars, selection = null) {
 //
 // The full extracted text is kept in memory only; the textarea gets a short
 // preview, so the pane stays light and a large document is never re-rendered.
+// Eager extraction for the chat: the full text of the chosen file, kept in
+// memory as state.attachment. The studios still run their own bounded
+// selection through ingestUploadedSource below.
+async function ingestAttachmentForChat() {
+  const docFile = els.sourceDocumentInput.files?.[0];
+  if (!docFile) return null;
+  els.selectionMeta.textContent = `Membaca lampiran ${docFile.name}...`;
+  const extractedDoc = await extractDocumentFile(docFile);
+  const text = String(extractedDoc.text || "");
+  state.attachment = {
+    filename: extractedDoc.filename || docFile.name, kind: extractedDoc.kind || "",
+    text, chars: Number(extractedDoc.chars) || text.length
+  };
+  const pages = [...text.matchAll(/^\[Page (\d+)\]\s*$/gm)].map((m) => Number(m[1]));
+  els.selectionMeta.textContent = `Lampiran siap untuk Chat: ${docFile.name} — ${state.attachment.chars.toLocaleString("id-ID")} karakter`
+    + (pages.length ? `, ${Math.max(...pages)} halaman` : "") + ". Tanya di Tantular Chat dengan menyebut \"buku ini\"/\"lampiran\", atau pilih konteks Lampiran.";
+  return state.attachment;
+}
+
 async function ingestUploadedSource({ setProgress, setStatus, extraOcrContext = "" }) {
   const docFile = els.sourceDocumentInput.files?.[0];
   const imageFile = els.sourceImageInput.files?.[0];
@@ -1601,6 +1636,12 @@ async function ingestUploadedSource({ setProgress, setStatus, extraOcrContext = 
   if (docFile && state.extractedDocumentName !== docFile.name) {
     setProgress("Mengekstrak dokumen/PDF...");
     const extractedDoc = await extractDocumentFile(docFile);
+    // The FULL extraction stays available to the chat (attachment context),
+    // separate from the budget-bounded selection the studios use below.
+    state.attachment = {
+      filename: extractedDoc.filename || docFile.name, kind: extractedDoc.kind || "",
+      text: String(extractedDoc.text || ""), chars: Number(extractedDoc.chars) || String(extractedDoc.text || "").length
+    };
 
     // Bound the source explicitly. Handing the whole document downstream used
     // to overflow the model context, and the overflow was discarded in silence
@@ -1724,7 +1765,7 @@ async function resolveDeckSpec(signal, setPhase = (text) => { els.deckProgressTe
     renderDeckPreview(state.deckSpec, "capability map");
     return "capability map";
   }
-  if (isThinContent(content) && !looksLikePresentationBrief(content)) {
+  if (shouldUseTitleSlide(content, { countWasExplicit: state.deckCountManual || requestedCount > 0 })) {
     state.deckSpec = applyProjectOutputFormat(buildTitleSlideSpec(content), content);
     state.deckSpecFingerprint = fingerprint;
     state.deckSpecLabel = "judul rapi";
@@ -1910,19 +1951,23 @@ async function downloadDeckSmart() {
 
 async function refineSelectedSlide() {
   if (state.host !== "PowerPoint") {
-    return setRefineStatus("Improve Existing Deck hanya tersedia di PowerPoint.", "error");
+    return setRefineStatus("Perbaiki slide terpilih hanya tersedia di PowerPoint.", "error");
   }
 
   await withRefineProgress("Membaca slide terpilih...", async () => {
     resetRefineOutput();
+    // Same three channels the chat path feeds into runImproveSlidePipeline:
+    // the Deck Studio style guide (+ the visual-mode select, converted to
+    // instruction text), the Deck Studio tone, and the user's own intent.
     const instruction = refineInstructionBundle();
+    const intent = els.refineInstruction.value.trim();
     const selected = await getSelectedSlideTextContext();
     const selectedSlideCount = Math.max(
       new Set(selected.slideIds || []).size,
       new Set(selected.slideIndexes || []).size
     );
     if (selectedSlideCount > 1) {
-      throw new Error("Pilih tepat satu slide di panel thumbnail sebelum menjalankan Improve selected slide.");
+      throw new Error("Pilih tepat satu slide di panel thumbnail sebelum menjalankan Perbaiki slide.");
     }
     let slideText = selected.text.trim();
     const knowsSlide = Boolean(selected.slideIds?.length || selected.slideIndexes?.length);
@@ -1931,7 +1976,7 @@ async function refineSelectedSlide() {
     // is targeted, read its FULL text from the active deck instead.
     if (!slideText || (selected.partialSelection && knowsSlide)) {
       els.refineProgressText.textContent = "Membaca teks lengkap slide dari active deck...";
-      const fullText = await activeDeckSlideTextFallback(selected, instruction);
+      const fullText = await activeDeckSlideTextFallback(selected, intent);
       if (fullText) slideText = fullText;
     }
     if (!slideText) {
@@ -1943,10 +1988,32 @@ async function refineSelectedSlide() {
     }
 
     const tone = els.deckTone.value.trim();
+    const targetIndex = selected.slideIndexes?.[0] || state.refineTargetSlideIndex || extractRequestedSlideIndex(intent);
 
-    els.refineProgressText.textContent = "Menyusun versi slide yang lebih baik...";
-    const result = await improveExistingSlide({ slideText, tone, instruction });
-
+    // ONE improve pipeline for both entry points (chat and this card): intent,
+    // Deck Studio settings, visual preference, content-loss retry and refusal
+    // all live in runImproveSlidePipeline. Same write decision as chat too:
+    // unless a new layout was asked for, the slide's shapes are read first so
+    // the model is steered to them, and the text is written INTO them.
+    const targetRef = { slideId: selected.slideIds?.[0] || state.refineTargetSlideId || "", slideIndex: targetIndex };
+    const writeMode = chooseImproveWriteMode(intent);
+    let shapes = null;
+    if (writeMode === "in_place") {
+      const read = await readSlideShapeTexts(targetRef);
+      if (!read?.found) throw new Error("Slide terpilih tidak ditemukan di deck aktif.");
+      shapes = read.shapes;
+    }
+    const run = await runImproveSlidePipeline({
+      slideText,
+      tone,
+      instruction,
+      intent,
+      structure: shapes ? describeSlideStructure(shapes) : null,
+      slideIndex: targetIndex,
+      onProgress: (text) => { els.refineProgressText.textContent = text; }
+    });
+    if (run.refused) return setRefineStatus(run.refusedLine, "error");
+    const result = run.result;
     if (!result?.spec) {
       throw new Error("Tantular belum dapat memperbaiki slide ini. Pastikan slide berisi teks yang bisa dibaca.");
     }
@@ -1955,7 +2022,40 @@ async function refineSelectedSlide() {
     renderRefinePreview(state.refineSpec, result.source || "source-grounded");
     els.refineDownload.disabled = false;
 
-    els.refineProgressText.textContent = "Mengganti slide terpilih dengan versi improved...";
+    const improved = result.spec.slides?.[0];
+    if (writeMode === "in_place") {
+      const writes = planInPlaceWrites(shapes, improved);
+      if (!writes) {
+        // No structural refusal: rebuild through the builder and say so.
+        els.refineProgressText.textContent = "Struktur slide tidak bisa dipetakan — membangun ulang slide...";
+        const base64 = buildRefineBase64();
+        const rebuilt = await replaceSlideInActivePresentation(base64, { ...targetRef, formatting: "UseDestinationTheme" });
+        if (rebuilt.replaced) {
+          return setRefineStatus(`Struktur slide tidak bisa dipetakan, jadi slide dibangun ulang (${DECK_STUDIO_BUILD}). Desain slide mengikuti gaya Deck Studio.`, "ok");
+        }
+        triggerSpecDownload(base64, state.refineSpec);
+        return setRefineStatus(`Pembangunan ulang gagal; improved slide diunduh sebagai .pptx. ${rebuilt.reason || ""}`, "error");
+      }
+      els.refineProgressText.textContent = "Menulis teks baru ke slide terpilih (desain dipertahankan)...";
+      const outcome = await writeSlideShapeTexts(targetRef, writes);
+      if (outcome.updated) {
+        return setRefineStatus(`Teks slide terpilih diperbarui di tempat; desain slide dipertahankan. Tidak menambah angka/fakta baru. (${DECK_STUDIO_BUILD})`, "ok");
+      }
+      return setRefineStatus(`Slide tidak diubah: ${outcome.reason || "penulisan di tempat gagal"}.`, "error");
+    }
+
+    // Cards/columns are drawn on the user's own slide; a refusal is final.
+    if (improved?.type === "cards" || improved?.type === "columns") {
+      const native = await writeNativeLayout(targetRef, improved, {
+        onProgress: (text) => { els.refineProgressText.textContent = text; }
+      });
+      if (native.ok) {
+        return setRefineStatus(`Layout ${improved.type === "cards" ? "kartu" : "kolom"} dibangun di slide terpilih; desain deck dipertahankan (${native.styleNote}). (${DECK_STUDIO_BUILD})`, "ok");
+      }
+      return setRefineStatus(`Slide tidak diubah: ${native.reason}.`, "error");
+    }
+
+    els.refineProgressText.textContent = "Mengganti slide terpilih dengan layout baru...";
     const base64 = buildRefineBase64();
     try {
       // Replace IN PLACE: insert after the original, then delete the original,
@@ -1964,9 +2064,9 @@ async function refineSelectedSlide() {
       // fallback match, or an explicit "slide #N" in the instruction.
       const outcome = await replaceSlideInActivePresentation(base64, {
         slideId: selected.slideIds?.[0] || state.refineTargetSlideId || "",
-        slideIndex: selected.slideIndexes?.[0] || state.refineTargetSlideIndex || extractRequestedSlideIndex(instruction),
-        // Improve Existing Deck should feel like a refinement of the current
-        // deck, not a separate imported deck theme.
+        slideIndex: targetIndex,
+        // The improvement should feel like a refinement of the current deck,
+        // not a separate imported deck theme.
         formatting: "UseDestinationTheme"
       });
       if (outcome.replaced) {
@@ -2051,10 +2151,13 @@ async function activeDeckSlideTextFallback(selectedContext, instruction = "") {
 }
 
 
+// The style-guide channel for the shared pipeline: Deck Studio's project
+// instructions plus the visual-mode select, which is ONLY ever converted to
+// the same instruction text the chat path derives from "lebih visual" etc.
 function refineInstructionBundle() {
   return [
-    projectInstructions() ? `Project/style guide:\n${projectInstructions()}` : "",
-    els.refineInstruction.value.trim() ? `Instruksi improvement:\n${els.refineInstruction.value.trim()}` : ""
+    projectInstructions(),
+    refineVisualModeInstruction(els.refineVisualMode?.value)
   ].filter(Boolean).join("\n\n");
 }
 

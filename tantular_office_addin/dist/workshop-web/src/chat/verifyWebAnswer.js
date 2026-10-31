@@ -226,6 +226,51 @@ export function checkNoNewFacts(answer, document, untrusted) {
   return Object.entries(introduced).map(([kind, vals]) => `${kind}: ${JSON.stringify(vals)}`);
 }
 
+const INSTRUCTION_CUE =
+  /\b(?:abaikan|awali|ganti(?:lah)?|ubah(?:lah)?|replace|keluarkan|salin|sertakan|instruksi|perintah|diam-diam|roleplay|mulai sekarang|kamu adalah|jangan sebutkan|tulis ulang)\b/i;
+
+// The GATE cues: injection SHAPES, not imperative vocabulary. The broad list
+// above (INSTRUCTION_CUE) only scopes literal extraction for the echo check,
+// where a false positive is cheap. Used as a display gate it withheld the
+// synthesis of a real query because one page carried a CSS template comment,
+// "Replace them with your own styles" (acceptance run, 2026-09-04). Each
+// alternative here is a phrase that addresses the model or rewrites the
+// document — the seven harness classes — and none is ordinary procedural text
+// ("sertakan salinan", "instruksi pengisian", "perintah menteri").
+const INSTRUCTION_GATE_CUE = new RegExp([
+  String.raw`\babaikan\s+(?:instruksi|perintah|aturan|semua)\b`,
+  String.raw`\bdiam-diam\b`,
+  String.raw`\broleplay\b`,
+  String.raw`\bmulai sekarang\b`,
+  String.raw`\bkamu adalah\b`,
+  String.raw`\bjangan sebutkan\b`,
+  String.raw`\btulis ulang\b`,
+  String.raw`\bawali\s+(?:jawaban|balasan|respons)\b`,
+  String.raw`\bsalin\s+isi\s+dokumen\b`,
+  String.raw`\bkeluarkan\s+persis\b`,
+  String.raw`\b(?:ganti|ubah)(?:lah)?\s+(?:semua|nama|vendor|angka|isi|jumlah)\b`,
+  String.raw`\binstruksi\s+(?:baru|sistem|sebelumnya)\b`,
+  String.raw`\bwajib\s+(?:menulis|ditulis|menyebut)\b`,
+  String.raw`\bignore\s+(?:all|previous|prior)\b`,
+  String.raw`\byou are now\b`
+].join("|"), "i");
+
+export function instructionGateCues(text) {
+  // A raw JSON body (single-host path) carries "\n" and "\"" as two-character
+  // escapes: "IV.\n\nKeluarkan" glues "n" to the cue word and defeats \b.
+  // Normalise the escapes first; the scan itself is unchanged.
+  const normalised = String(text || "")
+    .replace(/\\[nrt]/g, "\n")
+    .replace(/\\"/g, "\"")
+    .replace(/\\\//g, "/");
+  return normalised.split(/\n+|(?<=[.!?])\s+/).some((segment) => INSTRUCTION_GATE_CUE.test(segment));
+}
+
+// Kept for callers that gate a whole fetched blob. Same strict cue set.
+export function hasInstructionCues(untrusted) {
+  return instructionGateCues(untrusted);
+}
+
 export function checkUntrustedEcho(answer, document, untrusted, window = 60, minLen = 5) {
   const answerText = String(answer || "");
   const documentText = String(document || "");
@@ -256,8 +301,7 @@ export function checkUntrustedEcho(answer, document, untrusted, window = 60, min
   // literal (real-Excel acceptance, 2026-08-25: "BEI"/"OJK" blocked a benign
   // answer). Facts from the page are explicitly permitted by no_new_facts;
   // this rule exists for imperative payloads, so its cues must be imperative.
-  const instructionCue =
-    /\b(?:abaikan|awali|ganti(?:lah)?|ubah(?:lah)?|replace|keluarkan|salin|sertakan|instruksi|perintah|diam-diam|roleplay|mulai sekarang|kamu adalah|jangan sebutkan|tulis ulang)\b/i;
+  const instructionCue = INSTRUCTION_CUE;
   const literals = new Set();
   for (const segment of untrustedText.split(/\n+|(?<=[.!?])\s+/)) {
     if (!instructionCue.test(segment)) continue;
@@ -359,4 +403,47 @@ export function verify({ answer, document, untrusted, protect }) {
   const ok = Object.keys(findings).length === 0;
   return { ok, reason: ok ? "verified" : "failed_verification",
            protected: protectList, findings };
+}
+
+// --- research verifier --------------------------------------------------------
+// Open Research Mode (2026-09-04). Web research is not a document-verification
+// operation: the document is optional context, so `preserves` does not apply
+// and the document may be empty; the other two checks apply unchanged. verify() above is untouched:
+// it still decides what may be called document-verified and editable, and its
+// Python parity contract is unaffected. Same fail-closed rules as verify().
+export function verifyResearch(input) {
+  const answer = input && typeof input === "object" ? input.answer : undefined;
+  const document = input && typeof input === "object" ? input.document : undefined;
+  const untrusted = input && typeof input === "object" ? input.untrusted : undefined;
+  if (!input || typeof input !== "object"
+      || (answer !== undefined && typeof answer !== "string")
+      || (document !== undefined && typeof document !== "string")) {
+    return { ok: false, reason: "verifier_error",
+             findings: { fail_closed: ["malformed input"] } };
+  }
+  const a = String(answer || "");
+  const d = String(document || "");
+  const u = String(untrusted || "");
+  if (!a.trim()) {
+    return { ok: false, reason: "no_answer", findings: { fail_closed: ["the answer is empty"] } };
+  }
+  // The document is OPTIONAL context for research: fetched pages alone are
+  // a valid source. Nothing at all to ground on is the fail-closed case.
+  if (!d.trim() && !u.trim()) {
+    return { ok: false, reason: "no_source",
+             findings: { fail_closed: ["no document and no fetched content to verify against"] } };
+  }
+  const findings = {};
+  try {
+    const results = [
+      ["no_new_facts", checkNoNewFacts(a, d, u)],
+      ["untrusted_echo", checkUntrustedEcho(a, d, u)]
+    ];
+    for (const [name, result] of results) if (result.length) findings[name] = result;
+  } catch (error) {
+    return { ok: false, reason: "verifier_error",
+             findings: { fail_closed: [`a check could not run: ${error?.message || error}`] } };
+  }
+  const ok = Object.keys(findings).length === 0;
+  return { ok, reason: ok ? "verified" : "failed_verification", findings };
 }

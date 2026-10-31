@@ -9,11 +9,28 @@ import {
   deleteSlidesInActivePresentation,
   insertSlideAfterInActivePresentation,
   readLiveSlideIds,
-  replaceSlideInActivePresentation
+  readSlideShapeTexts,
+  replaceSlideInActivePresentation,
+  writeSlideShapeTexts,
+  describeSlideStructure,
+  isDeckStudioSlide,
+  planInPlaceWrites,
+  writesChangeNothing,
+  applySlideLayout as applySlideLayoutLive,
+  readSlideDesign as readSlideDesignLive,
+  buildNativeCardsOnSlide,
+  planNativeCardTargets
 } from "../officeClient.js";
+import { describeCardStyle, planNativeCards, resolveCardStyle } from "../deck/nativeCards.js";
 import { extractDocumentFile } from "../deck/documentExtract.js";
 import { buildDeckPptxBase64 } from "../deck/pptxBuilder.js";
 import { improveExistingSlide } from "../deck/deckPlanner.js";
+import { visualPreferenceFor, visualPreferenceInstruction } from "./pptSelectedSlide.js";
+import { applySuggestions, describeSuggestion, suggestionsToSlide } from "./pptSuggest.js";
+import { auditSlideLayout, reflowSlideLayout, describeLayoutRepair } from "../deck/slideLayout.js";
+import { analyseSlideContent, choosePattern, planSlideComposition, describeComposition } from "../deck/slideComposer.js";
+import { requestGroupHeadings } from "./pptHeadings.js";
+import { planFormatWrites, describeFormat } from "./pptFormat.js";
 
 const MAX_ACTIONS_PER_TURN = 8;
 const OPS = ["improve_slide", "replace_slide", "add_slide", "delete_slide"];
@@ -151,6 +168,29 @@ export function sanitizePptActions(raw, bounds) {
   }
 
   return { actions, rejected };
+}
+
+// LIVE (2026-09-03): "bisa dibuat tabel ... slide 3" made the planner emit
+// replace_slide with content it wrote itself — translated into Indonesian,
+// half the points gone. replace_slide has none of the improve guards (source
+// grounding, output language, content-loss retry/refusal). So a replace aimed
+// at a slide that HAS readable text is routed through improve_slide carrying
+// the user's request; the model's own draft is discarded. replace_slide stays
+// available for slides with nothing to ground on.
+export function preferImproveOverReplace(actions, ctx, userRequest = "") {
+  const notes = [];
+  const list = (Array.isArray(actions) ? actions : []).map((action) => {
+    if (action?.op !== "replace_slide") return action;
+    const target = resolveActionTarget(ctx, action.slideIndex);
+    if (!target?.text) return action;
+    notes.push(`Slide ${target.index} diperbaiki dari teks slide asli (bukan ditulis ulang dari nol) `
+      + "agar isi, bahasa, dan angkanya tetap sama.");
+    const instruction = sanitizeActionInstruction(userRequest);
+    return instruction
+      ? { op: "improve_slide", slideIndex: target.index, instruction }
+      : { op: "improve_slide", slideIndex: target.index };
+  });
+  return { actions: list, notes };
 }
 
 // Field allowlist = exactly what pptxBuilder consumes. Anything else is
@@ -651,7 +691,7 @@ export function countSpecUnits(slide) {
   return cap(slide.bullets, isViz ? 5 : 7).filter((b) => str(b)).length
     + cap(slide.cards, 8).reduce((sum, card) => sum + pair(card?.title, card?.desc), 0)
     + cap(slide.columns, 3)
-      .reduce((sum, col) => sum + 1 + cap(col?.points, 6).filter((p) => str(p)).length, 0)
+      .reduce((sum, col) => sum + box(col?.title) + cap(col?.points, 6).filter((p) => str(p)).length, 0)
     + cap(slide.metrics, 4).reduce((sum, m) => sum + pair(m?.value, m?.label), 0)
     + cap(slide.data, 8).reduce((sum, d) => sum + pair(
       d?.value === 0 || d?.value ? String(d.value) : "", d?.label
@@ -687,11 +727,75 @@ export function contentLossNote(sourceUnits, keptUnits) {
 
 // Composable with improveResultNote: the ✅ must say what was actually asked,
 // still qualify a fallback result, and never hide that most of the slide is gone.
-export function improveSuccessLine(index, actionInstruction, source, lossNote = "", retried = false) {
+export function improveSuccessLine(index, actionInstruction, source, lossNote = "", retried = false, layoutNote = "") {
   const asked = str(actionInstruction);
   const requested = asked ? ` (diminta: "${asked}")` : "";
   const second = retried ? " (perlu percobaan kedua)" : "";
-  return `✅ Slide ${index} diperbaiki di tempat${requested}${second}${str(lossNote) ? ` ${str(lossNote)}` : ""}${improveResultNote(source)}.`;
+  const layout = str(layoutNote) ? ` — ${str(layoutNote)}` : "";
+  return `✅ Slide ${index} diperbaiki di tempat${requested}${second}${layout}${str(lossNote) ? ` ${str(lossNote)}` : ""}${improveResultNote(source)}.`;
+}
+
+// Which write a request needs. Unless the user asked for a new layout (cards,
+// columns, chart), the improved text is written INTO the slide's own shapes so
+// its design survives; the model is steered to the slide's structure first.
+// A layout request needs the builder, which means a replaced slide.
+export function chooseImproveWriteMode(intent) {
+  const pref = visualPreferenceFor(intent);
+  return pref && pref !== "bullets" ? "replace" : "in_place";
+}
+
+// Steering text derived from the live shapes, so the model answers in the shape
+// the slide can hold. Two column bodies ⇒ exactly two columns, headings kept.
+export function slideStructureInstruction(structure) {
+  const bodies = Number(structure?.bodies) || 0;
+  if (!bodies) return "";
+  if (bodies === 1) return 'Struktur slide sumber: satu blok poin. WAJIB type "bullets".';
+  const headings = (Array.isArray(structure?.headings) ? structure.headings : []).map(str).filter(Boolean);
+  const named = headings.length
+    ? ` Judul kolom WAJIB tetap: ${headings.map((h) => `"${h}"`).join(", ")}.`
+    : "";
+  return `Struktur slide sumber: ${bodies} kolom. WAJIB type "columns" dengan tepat ${bodies} kolom, `
+    + `setiap poin tetap di kolom asalnya, jangan memindahkan atau menggabungkan kolom.${named}`;
+}
+
+export function improveLayoutNote(mode, slide) {
+  return mode === "in_place"
+    ? "desain slide dipertahankan"
+    : `layout diganti menjadi ${str(slide?.type) || "baru"}, desain slide ikut berubah`;
+}
+
+// Traced + reproduced live (2026-09-03): with a "lebih ringkas" intent the
+// model answered with the slide word for word, 3/3. Verbatim is not an
+// improvement, so the pipeline retries once asking explicitly for rewording.
+export function isVerbatimResult(slide, sourceText) {
+  if (!slide) return false;
+  const norm = (t) => str(t).toLowerCase().replace(/\s+/g, " ");
+  const sourceLines = new Set(normalizeSlideText(sourceText).split("\n").map(norm).filter(Boolean));
+  const points = [
+    ...(Array.isArray(slide.bullets) ? slide.bullets : []),
+    ...(Array.isArray(slide.columns) ? slide.columns.flatMap((c) => c?.points || []) : []),
+    ...(Array.isArray(slide.cards) ? slide.cards.flatMap((c) => [c?.title, c?.desc]) : [])
+  ].map(norm).filter(Boolean);
+  if (!points.length) return false;
+  return points.every((p) => sourceLines.has(p));
+}
+
+export function composeRewordInstruction(baseInstruction) {
+  const blunt = [
+    "PERCOBAAN KEDUA — WAJIB DIPATUHI:",
+    "Percobaan pertama menyalin teks sumber kata demi kata. Itu bukan perbaikan.",
+    "Tulis ulang SETIAP poin dengan kalimat yang lebih jelas dan lebih tajam — jangan menyalin kalimat sumber apa adanya.",
+    "Pertahankan setiap fakta, angka, nama, dan tanggal; jumlah poin tetap sama; bahasa tetap sama dengan sumber."
+  ].join("\n");
+  const base = str(baseInstruction);
+  return base ? `${blunt}\n\n${base}` : blunt;
+}
+
+// A fallback is a mechanical re-chunk of the original text. Writing it would
+// replace the user's slide with a worse copy of itself, so it is never written.
+export function improveFallbackRefusedLine(index, source) {
+  return `⛔ Slide ${index} TIDAK diubah — model lokal dua kali tidak menghasilkan versi yang bisa dipakai`
+    + `${improveResultNote(source)}, jadi slide dibiarkan apa adanya. Coba lagi dengan permintaan yang lebih spesifik.`;
 }
 
 // --- Write decision -------------------------------------------------------
@@ -784,7 +888,20 @@ export function describePendingChange(descriptor) {
   if (op === "add_slide") {
     return `Tambah slide baru "${str(descriptor?.newTitle) || "tanpa judul"}" setelah slide ${index}`;
   }
-  if (op === "improve_slide") return `Perbaiki slide ${index}${named} — isinya ditulis ulang`;
+  if (op === "improve_slide") {
+    // The proposal must say what it costs. Cards/columns are drawn ON this
+    // slide (deck design kept; colours/fonts as far as they can be read); a
+    // chart still needs the builder and replaces the slide; anything else is
+    // written into the existing shapes.
+    const pref = visualPreferenceFor(descriptor?.instruction);
+    if (pref === "cards" || pref === "columns") {
+      return `Perbaiki slide ${index}${named} — layout diganti menjadi kartu/kolom, dibangun di slide ini — desain deck dipertahankan; warna/font mengikuti yang terbaca dari slide`;
+    }
+    if (pref === "visual") {
+      return `Perbaiki slide ${index}${named} — layout kartu/kolom dibangun di slide ini (desain deck dipertahankan), atau chart jika ada angka (dibangun ulang, desain berubah)`;
+    }
+    return `Perbaiki slide ${index}${named} — teks ditulis ulang, desain slide dipertahankan`;
+  }
   if (op === "replace_slide") return `Ganti slide ${index}${named} — seluruh isi lama hilang`;
   if (op === "delete_slide") return `Hapus slide ${index}${named}`;
   return `${op || "aksi tidak dikenal"} pada slide ${index}`;
@@ -895,6 +1012,121 @@ export function executePptActions(actions, ctx) {
   return { lines, pending, summary: summarizePendingChanges(pending) };
 }
 
+
+// THE improve pipeline. Both entry points — the confirmed chat write above and
+// Deck Studio's "Perbaiki slide terpilih — Lanjutan" card — call this and
+// nothing else, so intent handling, Deck Studio settings, the visual
+// preference, the content-loss retry and the refusal are identical whichever
+// surface the user started from. It never writes: it returns a spec (or a
+// refusal) and the caller decides what to do with it.
+//
+// `improveSlide` defaults to the real model call; a test passes a plain
+// function. `intent` is the user's request for THIS slide (already resolved by
+// the caller), which is also where the visual preference is read from.
+export async function runImproveSlidePipeline({
+  slideText, tone = "", instruction = "", intent = "", signal, structure = null,
+  improveSlide = improveExistingSlide, onProgress = () => {}, slideIndex = 0
+} = {}) {
+  const text = normalizeSlideText(slideText);
+  const asked = sanitizeActionInstruction(intent);
+  const label = slideIndex ? `slide ${slideIndex}` : "slide terpilih";
+  // In-place writes must fit the slide's shapes, so the structure hint wins
+  // over the generic visual preference; a layout request keeps the preference.
+  const mode = chooseImproveWriteMode(asked);
+  const shape = mode === "in_place" && structure
+    ? slideStructureInstruction(structure)
+    : visualPreferenceInstruction(visualPreferenceFor(asked));
+  const steering = [asked, shape].filter(Boolean).join("\n");
+  const baseInstruction = composeImproveInstruction(instruction, steering);
+  const done = (extra) => ({
+    intent: asked, aborted: false, refused: false, refusedLine: "",
+    retried: false, result: null, sourceUnits: 0, keptUnits: 0, verbatim: false, ...extra
+  });
+
+  if (signal?.aborted) return done({ aborted: true });
+  onProgress(`Menyusun versi lebih baik untuk ${label}...`);
+  const sourceBlocks = Array.isArray(structure?.blocks) && mode === "in_place" ? structure.blocks : null;
+  let result = await improveSlide({ slideText: text, tone, instruction: baseInstruction, signal, sourceBlocks });
+  if (signal?.aborted) return done({ aborted: true });
+  if (!result?.spec) return done({ result: null });
+
+  // Two reasons to try once more, both with the blunt retry instruction: the
+  // model gave nothing usable (a fallback), or it threw most of the slide away.
+  // Neither may ever be written. No undo.
+  const isFallback = (r) => str(r?.source) !== "model-grounded";
+  const sourceUnits = countSourceUnits(text);
+  let keptUnits = countSpecUnits(result.spec?.slides?.[0]);
+  let retried = false;
+  // Severe loss outranks verbatim: a thin copy is first of all a loss.
+  const lossFirst = decideImproveWrite(sourceUnits, keptUnits, 1) === "retry";
+  const verbatimFirst = !isFallback(result) && !lossFirst && isVerbatimResult(result.spec?.slides?.[0], text);
+  const needsRetry = isFallback(result) || verbatimFirst || decideImproveWrite(sourceUnits, keptUnits, 1) === "retry";
+  if (needsRetry) {
+    retried = true;
+    onProgress(isFallback(result)
+      ? `Hasil pertama tidak bisa dipakai — mencoba sekali lagi untuk ${label}...`
+      : verbatimFirst
+        ? `Hasil pertama hanya menyalin teks slide — meminta versi yang ditulis ulang untuk ${label}...`
+        : `Hasil pertama membuang terlalu banyak isi — mencoba sekali lagi untuk ${label}...`);
+    const second = await improveSlide({
+      slideText: text, tone, signal, sourceBlocks,
+      instruction: verbatimFirst
+        ? composeRewordInstruction(baseInstruction)
+        : composeImproveRetryInstruction(baseInstruction, sourceUnits)
+    });
+    if (signal?.aborted) return done({ aborted: true, retried });
+    if (second?.spec) {
+      result = second;
+      keptUnits = countSpecUnits(second.spec?.slides?.[0]);
+    }
+    if (isFallback(result)) {
+      return done({ refused: true, retried, sourceUnits, keptUnits, refusedLine: improveFallbackRefusedLine(slideIndex, result.source) });
+    }
+    if (decideImproveWrite(sourceUnits, keptUnits, 2) === "refuse") {
+      return done({
+        refused: true, retried, sourceUnits, keptUnits,
+        refusedLine: improveRefusedLine(slideIndex, sourceUnits, keptUnits)
+      });
+    }
+  }
+  return done({ result, retried, sourceUnits, keptUnits, verbatim: isVerbatimResult(result.spec?.slides?.[0], text) });
+}
+
+// Cards/columns drawn ON the user's slide (design review 2026-09-03). Shared
+// by the chat write and the Lanjutan card. Every refusal is final: this never
+// falls back to the template rebuild. Returns { ok, line } for the chat and
+// { ok, reason, styleNote } for other callers.
+export function nativeCardsFromSlide(improved) {
+  if (improved?.type === "cards") {
+    return (improved.cards || []).map((c) => ({ title: str(c?.title), lines: [str(c?.desc)].filter(Boolean) }));
+  }
+  if (improved?.type === "columns") {
+    return (improved.columns || []).map((c) => ({ title: str(c?.title), lines: (c?.points || []).map(str).filter(Boolean) }));
+  }
+  return null;
+}
+
+export async function writeNativeLayout(target, improved, hooks = {}) {
+  const { readSlideDesign = readSlideDesignLive, buildNativeCards = buildNativeCardsOnSlide, onProgress = () => {} } = hooks;
+  const cards = nativeCardsFromSlide(improved);
+  if (!cards || !cards.length) return { ok: false, reason: "hasil model bukan kartu/kolom" };
+  onProgress(`Membaca desain slide ${target.slideIndex}...`);
+  const design = await readSlideDesign({ slideId: target.slideId, slideIndex: target.slideIndex });
+  if (!design?.found) return { ok: false, reason: "slide tidak ditemukan di deck aktif" };
+  const missing = Object.entries(design.api || {}).filter(([, ok]) => !ok).map(([m]) => m);
+  if (missing.length) {
+    return { ok: false, reason: `host PowerPoint ini tidak menyediakan ${missing.join(", ")} (butuh PowerPointApi 1.4); kartu tidak dibuat, slide tidak diubah` };
+  }
+  const targets = planNativeCardTargets(design.shapes);
+  if (!targets.ok) return { ok: false, reason: `${targets.reason}; slide tidak diubah` };
+  const style = resolveCardStyle(design);
+  const plan = planNativeCards({ box: targets.box, cards, style });
+  onProgress(`Menggambar ${cards.length} kartu di slide ${target.slideIndex} (desain deck dipertahankan)...`);
+  const outcome = await buildNativeCards({ slideId: target.slideId, slideIndex: target.slideIndex }, plan, targets.deleteIndexes);
+  if (!outcome.updated) return { ok: false, reason: outcome.reason || "pembuatan kartu gagal" };
+  return { ok: true, styleNote: describeCardStyle(style), count: cards.length };
+}
+
 // The confirmed writes. This is the previously-reviewed execution logic, moved
 // behind the confirmation unchanged in substance: the improve retry-then-refuse
 // gate, the abort re-checks after every model call, verified insert/replace/
@@ -914,6 +1146,13 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
   const {
     onProgress = () => {}, signal, tone = "", instruction = "",
     styleId = "nusantara", userRequest = "",
+    improveSlide = improveExistingSlide,
+    readSlideShapes = readSlideShapeTexts,
+    writeShapeTexts = writeSlideShapeTexts,
+    applySlideLayout = applySlideLayoutLive,
+    headings = requestGroupHeadings,
+    readSlideDesign = readSlideDesignLive,
+    buildNativeCards = buildNativeCardsOnSlide,
     readLiveIds = readLiveSlideIds,
     deleteSlides = deleteSlidesInActivePresentation,
     replaceSlide = replaceSlideInActivePresentation,
@@ -955,59 +1194,144 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
       }
 
       if (action.op === "improve_slide") {
-        onProgress(`Menyusun versi lebih baik untuk slide ${target.index}...`);
         const intent = resolveImproveIntent(action.instruction, userRequest);
-        const baseInstruction = composeImproveInstruction(instruction, intent);
-        let result = await improveExistingSlide({
-          slideText: target.text, tone, instruction: baseInstruction, signal
+        const mode = chooseImproveWriteMode(intent);
+        // In place: read the slide's real shapes FIRST so the model is steered
+        // to a shape the slide can hold, and the writes land in those shapes.
+        let shapes = null;
+        if (mode === "in_place") {
+          const read = await readSlideShapes({ slideId: target.id, slideIndex: target.index });
+          if (!read?.found) { lines.push(`❌ Slide ${target.index}: slide tidak ditemukan di deck aktif. Tidak diubah.`); continue; }
+          shapes = read.shapes;
+        }
+        const run = await runImproveSlidePipeline({
+          slideText: target.text,
+          tone,
+          instruction,
+          intent,
+          structure: shapes ? describeSlideStructure(shapes) : null,
+          signal,
+          improveSlide,
+          onProgress,
+          slideIndex: target.index
         });
         // improveExistingSlide catches EVERY failure — including the AbortError
         // raised by Stop — and answers with a truthy mechanical fallback spec.
         // Without this re-check the deck would be rewritten by the very click
         // the user made to prevent it. Nothing below here is reversible.
-        if (signal?.aborted) {
+        if (run.aborted) {
           lines.push(`⏹ Slide ${target.index} TIDAK diubah — dihentikan sebelum ditulis ke deck.`);
           lines.push(abortReportLine(planned.length - position - 1));
           break;
         }
-        if (!result?.spec) {
+        if (run.refused) { lines.push(run.refusedLine); continue; }
+        if (!run.result?.spec) {
           lines.push(`❌ Slide ${target.index}: model tidak mengembalikan slide yang valid.`);
           continue;
         }
 
-        // No undo: on severe loss we do not write and then apologise. We retry
-        // once with a blunt instruction, and if that is bad too we write nothing.
-        const sourceUnits = countSourceUnits(target.text);
-        let keptUnits = countSpecUnits(result.spec?.slides?.[0]);
-        let retried = false;
-        if (decideImproveWrite(sourceUnits, keptUnits, 1) === "retry") {
-          retried = true;
-          onProgress(`Hasil pertama membuang terlalu banyak isi — mencoba sekali lagi untuk slide ${target.index}...`);
-          const second = await improveExistingSlide({
-            slideText: target.text,
-            tone,
-            instruction: composeImproveRetryInstruction(baseInstruction, sourceUnits),
-            signal
-          });
-          if (signal?.aborted) {
-            lines.push(`⏹ Slide ${target.index} TIDAK diubah — dihentikan sebelum ditulis ke deck.`);
-            lines.push(abortReportLine(planned.length - position - 1));
-            break;
-          }
-          if (second?.spec) {
-            result = second;
-            keptUnits = countSpecUnits(second.spec?.slides?.[0]);
-          }
-          if (decideImproveWrite(sourceUnits, keptUnits, 2) === "refuse") {
-            lines.push(improveRefusedLine(target.index, sourceUnits, keptUnits));
+        const improved = run.result.spec.slides?.[0];
+        const layoutNote = improveLayoutNote(mode, improved);
+        if (mode === "in_place") {
+          // Keep the deck's design: write into the existing shapes. If the
+          // result does not fit them, refuse — replacing the slide here would
+          // silently do the very thing this mode exists to avoid.
+          const writes = planInPlaceWrites(shapes, improved);
+          if (!writes) {
+            // No structural refusal (2026-09-05): when the slide's shapes
+            // cannot hold the result, rebuild the slide through the builder
+            // and say what that costs. A Deck Studio slide keeps its style.
+            const studio = isDeckStudioSlide(shapes);
+            if (studio) {
+              // Ours to compose: lay the improved content out natively in the
+              // slide's own style rather than rebuilding through the builder.
+              const relaid = await relayoutSlide({ slideId: target.id, slideIndex: target.index },
+                { readSlideDesign, buildNativeCards, headings, onProgress, signal }, { spec: improved });
+              if (relaid.ok) {
+                wrote = true;
+                lines.push(improveSuccessLine(target.index, run.intent, run.result.source,
+                  contentLossNote(run.sourceUnits, run.keptUnits), run.retried, "isi baru ditata ulang di slide ini"));
+                lines.push(relaid.line);
+                continue;
+              }
+              lines.push(relaid.line);
+              continue;
+            }
+            onProgress(`Struktur slide ${target.index} tidak bisa dipetakan — membangun ulang slide...`);
+            const rebuilt = await replaceSlide(
+              buildDeckPptxBase64(
+                { ...run.result.spec, ...deckPositionFor(deckTotal, target.index) },
+                styleId,
+                instruction
+              ),
+              { slideId: target.id, slideIndex: target.index, formatting: "UseDestinationTheme" }
+            );
+            if (rebuilt.replaced) {
+              wrote = true;
+              lines.push(improveSuccessLine(
+                target.index, run.intent, run.result.source,
+                contentLossNote(run.sourceUnits, run.keptUnits), run.retried,
+                studio
+                  ? "struktur slide tidak bisa dipetakan, jadi slide dibangun ulang dengan gaya Deck Studio yang sama"
+                  : "struktur slide tidak bisa dipetakan, jadi slide dibangun ulang — desain slide ikut berubah"
+              ));
+            } else lines.push(`❌ Slide ${target.index}: ${rebuilt.reason || "pembangunan ulang gagal."}`);
             continue;
           }
+          if (writesChangeNothing(shapes, writes)) {
+            lines.push(`ℹ️ Slide ${target.index} tidak diubah — tidak ada perbaikan kata yang lolos pemeriksaan sumber; `
+              + "teks slide sudah sesuai sumber. Coba permintaan yang lebih spesifik.");
+            continue;
+          }
+          onProgress(`Menulis teks baru ke slide ${target.index} (desain dipertahankan)...`);
+          const outcome = await writeShapeTexts({ slideId: target.id, slideIndex: target.index }, writes);
+          if (outcome.updated) {
+            wrote = true;
+            lines.push(improveSuccessLine(
+              target.index, run.intent, run.result.source,
+              contentLossNote(run.sourceUnits, run.keptUnits), run.retried, layoutNote
+            ));
+            // New text can no longer fit the builder's fixed boxes (live,
+            // 2026-09-05: two bullet boxes overlapped). Audit and re-stack.
+            try {
+              if (isDeckStudioSlide(shapes)) {
+                // A builder slide is ours to compose: panels, markers, even
+                // spacing, in its own style. Other decks only get the tidy.
+                const relaid = await relayoutSlide({ slideId: target.id, slideIndex: target.index },
+                  { readSlideDesign, buildNativeCards, headings, onProgress, signal });
+                lines.push(relaid.line);
+              } else {
+                const tidy = await tidySlideLayout({ slideId: target.id, slideIndex: target.index }, { readSlideShapes, applySlideLayout, onProgress });
+                if (tidy.line) lines.push(tidy.line);
+              }
+            } catch (error) {
+              lines.push(`⚠️ Slide ${target.index}: tata letak tidak bisa diperiksa (${error?.message || error}).`);
+            }
+          } else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penulisan di tempat gagal"}. Slide tidak diubah.`);
+          continue;
         }
 
-        onProgress(`Mengganti slide ${target.index}...`);
+        // Cards/columns: drawn on the user's slide. Only a chart still needs
+        // the builder. A native refusal is final — no template fallback.
+        if (improved?.type === "cards" || improved?.type === "columns") {
+          const native = await writeNativeLayout(
+            { slideId: target.id, slideIndex: target.index }, improved,
+            { readSlideDesign, buildNativeCards, onProgress }
+          );
+          if (!native.ok) { lines.push(`❌ Slide ${target.index}: ${native.reason}.`); continue; }
+          wrote = true;
+          lines.push(improveSuccessLine(
+            target.index, run.intent, run.result.source,
+            contentLossNote(run.sourceUnits, run.keptUnits), run.retried,
+            `layout ${improved.type === "cards" ? "kartu" : "kolom"} dibangun di slide ini, desain deck dipertahankan; ${native.styleNote}`
+          ));
+          continue;
+        }
+
+        onProgress(`Mengganti slide ${target.index} (layout baru)...`);
         const outcome = await replaceSlide(
           buildDeckPptxBase64(
-            { ...result.spec, ...deckPositionFor(deckTotal, target.index) },
+            { ...run.result.spec, ...deckPositionFor(deckTotal, target.index) },
             styleId,
             instruction
           ),
@@ -1016,7 +1340,8 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
         if (outcome.replaced) {
           wrote = true;
           lines.push(improveSuccessLine(
-            target.index, intent, result.source, contentLossNote(sourceUnits, keptUnits), retried
+            target.index, run.intent, run.result.source,
+            contentLossNote(run.sourceUnits, run.keptUnits), run.retried, layoutNote
           ));
         } else lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penggantian gagal."}`);
         continue;
@@ -1065,4 +1390,237 @@ export async function executeConfirmedPptPlan(pending, hooks = {}) {
     lines.push(`(${PPT_CHAT_BUILD})`);
   }
   return { lines };
+}
+
+// The ticked suggestions, applied to the LIVE slide. Same seams as the
+// confirmed plan: live re-read of ids, live shapes, in-place writes only. The
+// structure is re-derived from the live shapes at write time, so a slide that
+// changed between "usulkan" and "terapkan" fails to match and nothing is
+// written blindly.
+export async function executeSuggestionPlan({ slideId = "", slideIndex = 0, suggestions = [], selectedIds = [] } = {}, hooks = {}) {
+  const {
+    readLiveIds = readLiveSlideIds,
+    readSlideShapes = readSlideShapeTexts,
+    writeShapeTexts = writeSlideShapeTexts,
+    onProgress = () => {},
+    signal
+  } = hooks;
+  const lines = [];
+  const chosen = (Array.isArray(suggestions) ? suggestions : []).filter((s) => selectedIds.includes(s.id));
+  if (!chosen.length) { lines.push("ℹ️ Tidak ada perubahan yang dipilih; slide tidak diubah."); return { lines, wrote: false }; }
+  if (signal?.aborted) { lines.push(abortReportLine(0)); return { lines, wrote: false }; }
+
+  let target;
+  try {
+    const liveIds = await readLiveIds();
+    const resolved = resolveDeleteTarget(liveIds, { op: "improve_slide", slideIndex, id: slideId, title: "" });
+    if (!resolved.ok) { lines.push(`❌ ${resolved.reason}`); return { lines, wrote: false }; }
+    target = { id: resolved.id, index: resolved.index };
+  } catch (error) {
+    lines.push(`❌ Slide ${slideIndex}: ${error?.message || error}`);
+    return { lines, wrote: false };
+  }
+
+  onProgress(`Membaca slide ${target.index}...`);
+  const read = await readSlideShapes({ slideId: target.id, slideIndex: target.index });
+  if (!read?.found) { lines.push(`❌ Slide ${target.index} tidak ditemukan di deck aktif. Tidak diubah.`); return { lines, wrote: false }; }
+  const structure = describeSlideStructure(read.shapes);
+  const applied = applySuggestions(structure, chosen, chosen.map((s) => s.id));
+  const slide = suggestionsToSlide(structure, applied);
+  const writes = planInPlaceWrites(read.shapes, slide);
+  if (!writes) {
+    lines.push(`❌ Slide ${target.index}: struktur slide tidak cocok lagi dengan usulan, jadi tidak ditulis. Minta usulan baru.`);
+    return { lines, wrote: false };
+  }
+  const changed = writes.filter((w) => !writesChangeNothing(read.shapes, [w]));
+  if (!changed.length) { lines.push(`ℹ️ Slide ${target.index} tidak diubah — teks sudah sama dengan usulan.`); return { lines, wrote: false }; }
+
+  onProgress(`Menulis ${chosen.length} perubahan ke slide ${target.index} (desain dipertahankan)...`);
+  const outcome = await writeShapeTexts({ slideId: target.id, slideIndex: target.index }, changed);
+  if (!outcome.updated) {
+    lines.push(`❌ Slide ${target.index}: ${outcome.reason || "penulisan gagal"}. Slide tidak diubah.`);
+    return { lines, wrote: false };
+  }
+  invalidateDeckContext();
+  lines.push(`✅ Slide ${target.index}: ${chosen.length} perubahan diterapkan di tempat — desain slide dipertahankan.`);
+  for (const s of chosen) lines.push(`• ${describeSuggestion(s)}`);
+  lines.push(`(${PPT_CHAT_BUILD})`);
+  return { lines, wrote: true };
+}
+
+// Layout repair for one slide: audit → reflow → apply. Returns a report line
+// only when something was done or found; a tidy slide returns no line.
+export async function tidySlideLayout(target, hooks = {}) {
+  const { readSlideShapes = readSlideShapeTexts, applySlideLayout = applySlideLayoutLive, onProgress = () => {} } = hooks;
+  const read = await readSlideShapes(target);
+  if (!read?.found) return { ok: false, line: "" };
+  const audit = auditSlideLayout(read.shapes);
+  if (audit.ok) return { ok: true, tidy: true, line: "" };
+  const plan = reflowSlideLayout(read.shapes);
+  if (!plan.ok) return { ok: false, line: `⚠️ Slide ${target.slideIndex}: kotak teks bertumpuk, tetapi tata letak tidak bisa dirapikan otomatis.` };
+  onProgress(`Merapikan tata letak slide ${target.slideIndex}...`);
+  const outcome = await applySlideLayout(target, plan.writes);
+  if (!outcome.updated) return { ok: false, line: `⚠️ Slide ${target.slideIndex}: tata letak tidak bisa dirapikan (${outcome.reason || "gagal"}).` };
+  return { ok: true, plan, line: `📐 Slide ${target.slideIndex}: tata letak dirapikan — ${describeLayoutRepair(plan)}.` };
+}
+
+// The chat action "rapikan tata letak": live id re-resolution, then the same
+// repair. Reports "sudah rapi" honestly when nothing overlaps.
+export async function executeLayoutTidy({ slideId = "", slideIndex = 0 } = {}, hooks = {}) {
+  const { readLiveIds = readLiveSlideIds, signal } = hooks;
+  const lines = [];
+  if (signal?.aborted) { lines.push(abortReportLine(0)); return { lines, wrote: false }; }
+  let target;
+  try {
+    const liveIds = await readLiveIds();
+    const resolved = resolveDeleteTarget(liveIds, { op: "improve_slide", slideIndex, id: slideId, title: "" });
+    if (!resolved.ok) { lines.push(`❌ ${resolved.reason}`); return { lines, wrote: false }; }
+    target = { slideId: resolved.id, slideIndex: resolved.index };
+  } catch (error) {
+    lines.push(`❌ Slide ${slideIndex}: ${error?.message || error}`);
+    return { lines, wrote: false };
+  }
+  const tidy = await tidySlideLayout(target, hooks);
+  if (tidy.tidy) { lines.push(`ℹ️ Slide ${target.slideIndex} sudah rapi: tidak ada kotak teks yang bertumpuk atau meluap.`); return { lines, wrote: false }; }
+  lines.push(tidy.line || `❌ Slide ${target.slideIndex}: tata letak tidak bisa dirapikan.`);
+  if (tidy.ok) { invalidateDeckContext(); lines.push(`(${PPT_CHAT_BUILD})`); }
+  return { lines, wrote: Boolean(tidy.ok) };
+}
+
+// Automatic re-layout in the slide's own design (2026-09-05): analyse the
+// content shape, choose a pattern, name the groups from the slide's words,
+// and draw panels / markers / lines natively. Refusals are only for a missing
+// shape API or an empty slide; both are reported plainly.
+// Groups for the composer from an improved slide spec, so a fresh result can
+// be laid out directly instead of being squeezed into old boxes.
+export function groupsFromSlideSpec(slide) {
+  const type = str(slide?.type);
+  const clean = (v) => str(v);
+  if (type === "columns") {
+    return (slide.columns || []).map((c) => ({ heading: clean(c?.title), items: (c?.points || []).map(clean).filter(Boolean) })).filter((g) => g.items.length);
+  }
+  if (type === "cards") {
+    return (slide.cards || []).map((c) => ({ heading: clean(c?.title), items: [clean(c?.desc)].filter(Boolean) })).filter((g) => g.items.length || g.heading);
+  }
+  const items = (slide?.bullets || []).map(clean).filter(Boolean);
+  return items.length ? [{ heading: "", items }] : [];
+}
+
+export async function relayoutSlide(target, hooks = {}, { spec = null } = {}) {
+  const {
+    readSlideDesign = readSlideDesignLive, buildNativeCards = buildNativeCardsOnSlide,
+    headings = requestGroupHeadings, onProgress = () => {}, signal
+  } = hooks;
+  const design = await readSlideDesign({ slideId: target.slideId, slideIndex: target.slideIndex });
+  if (!design?.found) return { ok: false, line: `❌ Slide ${target.slideIndex} tidak ditemukan di deck aktif.` };
+  const missing = Object.entries(design.api || {}).filter(([, ok]) => !ok).map(([m]) => m);
+  if (missing.length) {
+    return { ok: false, line: `❌ Slide ${target.slideIndex}: host PowerPoint ini tidak menyediakan ${missing.join(", ")} (butuh PowerPointApi 1.4); tata ulang tidak dilakukan.` };
+  }
+  const studio = isDeckStudioSlide(design.shapes);
+  const content = analyseSlideContent(design.shapes, { includeDecorations: studio });
+  if (spec) {
+    const groups = groupsFromSlideSpec(spec);
+    if (groups.length) content.groups = groups;
+  }
+  if (!content.groups.length) return { ok: false, line: `ℹ️ Slide ${target.slideIndex}: tidak ada isi teks yang bisa ditata ulang.` };
+  const pattern = choosePattern(content.groups);
+  const base = resolveCardStyle(design);
+  const accents = Array.isArray(design.accents) ? design.accents : [];
+  const bars = Array.isArray(design.bars) ? design.bars : [];
+  const accent = accents[0] || bars[0] || base.accent;
+  const style = {
+    ...base,
+    accent,
+    accent2: accents[1] || accents[0] || bars[0] || base.accent,
+    panel: "#F6F7F9", onAccent: "#FFFFFF"
+  };
+  if (studio) {
+    // A builder slide's typeface and colours are known: Segoe UI, and the
+    // accent that draws its own left bar and markers. These are the slide's
+    // real values, not fallbacks, so the result line does not warn.
+    const known = new Set(["accent", "titleFont", "bodyFont", "titleColor", "bodyColor", "bodySize"]);
+    if (base.fallbacks.includes("titleFont")) style.titleFont = "Segoe UI";
+    if (base.fallbacks.includes("bodyFont")) style.bodyFont = "Segoe UI";
+    if (base.fallbacks.includes("titleColor")) style.titleColor = accent;
+    if (base.fallbacks.includes("bodyColor")) style.bodyColor = "#222222";
+    if (base.fallbacks.includes("bodySize")) style.bodySize = 14;
+    style.fallbacks = base.fallbacks.filter((f) => !known.has(f));
+  }
+  let labels = [];
+  if (pattern === "panels" || pattern === "panels-2rows") {
+    onProgress(`Menamai kelompok isi slide ${target.slideIndex}...`);
+    const slideText = [content.title, ...content.groups.flatMap((g) => [g.heading, ...g.items])].filter(Boolean).join("\n");
+    try {
+      labels = (await headings({ groups: content.groups, slideText, signal })).map((h) => h.text);
+    } catch (_) {
+      labels = content.groups.map((g) => g.heading || g.items[0]);
+    }
+  }
+  const plan = planSlideComposition({ content, pattern, style, headings: labels });
+  if (!plan.length) return { ok: false, line: `ℹ️ Slide ${target.slideIndex}: tidak ada isi teks yang bisa ditata ulang.` };
+  onProgress(`Menata ulang slide ${target.slideIndex} (${describeComposition(pattern, content.groups.length)})...`);
+  const outcome = await buildNativeCards({ slideId: target.slideId, slideIndex: target.slideIndex }, plan, content.deleteIndexes);
+  if (!outcome.updated) return { ok: false, line: `❌ Slide ${target.slideIndex}: tata ulang gagal (${outcome.reason || "gagal"}); slide tidak diubah.` };
+  const groupCount = pattern === "panels" && content.groups.length === 1 ? 2 : content.groups.length;
+  return { ok: true, line: `✨ Slide ${target.slideIndex} ditata ulang: ${describeComposition(pattern, groupCount)}; ${describeCardStyle(style)}.` };
+}
+
+export async function executeRelayout({ slideId = "", slideIndex = 0 } = {}, hooks = {}) {
+  const { readLiveIds = readLiveSlideIds, signal } = hooks;
+  const lines = [];
+  if (signal?.aborted) { lines.push(abortReportLine(0)); return { lines, wrote: false }; }
+  let target;
+  try {
+    const liveIds = await readLiveIds();
+    const resolved = resolveDeleteTarget(liveIds, { op: "improve_slide", slideIndex, id: slideId, title: "" });
+    if (!resolved.ok) { lines.push(`❌ ${resolved.reason}`); return { lines, wrote: false }; }
+    target = { slideId: resolved.id, slideIndex: resolved.index };
+  } catch (error) {
+    lines.push(`❌ Slide ${slideIndex}: ${error?.message || error}`);
+    return { lines, wrote: false };
+  }
+  const result = await relayoutSlide(target, hooks);
+  lines.push(result.line);
+  if (result.ok) { invalidateDeckContext(); lines.push(`(${PPT_CHAT_BUILD})`); }
+  return { lines, wrote: Boolean(result.ok) };
+}
+
+// Formatting requests from chat (2026-09-05): font size on the body text
+// boxes through the shape API; "proporsional" runs the re-layout, which
+// picks the largest size that fits.
+export async function executeFormat({ slideId = "", slideIndex = 0 } = {}, request, hooks = {}) {
+  const {
+    readLiveIds = readLiveSlideIds, readSlideShapes = readSlideShapeTexts,
+    applySlideLayout = applySlideLayoutLive, relayout = (t, h) => relayoutSlide(t, h), signal
+  } = hooks;
+  const lines = [];
+  if (signal?.aborted) { lines.push(abortReportLine(0)); return { lines, wrote: false }; }
+  let target;
+  try {
+    const liveIds = await readLiveIds();
+    const resolved = resolveDeleteTarget(liveIds, { op: "improve_slide", slideIndex, id: slideId, title: "" });
+    if (!resolved.ok) { lines.push(`❌ ${resolved.reason}`); return { lines, wrote: false }; }
+    target = { slideId: resolved.id, slideIndex: resolved.index };
+  } catch (error) {
+    lines.push(`❌ Slide ${slideIndex}: ${error?.message || error}`);
+    return { lines, wrote: false };
+  }
+  if (request?.kind === "fit") {
+    const result = await relayout(target, hooks);
+    lines.push(result.line);
+    if (result.ok) { invalidateDeckContext(); lines.push(`(${PPT_CHAT_BUILD})`); }
+    return { lines, wrote: Boolean(result.ok) };
+  }
+  const read = await readSlideShapes(target);
+  if (!read?.found) { lines.push(`❌ Slide ${target.slideIndex} tidak ditemukan di deck aktif.`); return { lines, wrote: false }; }
+  const writes = planFormatWrites(read.shapes, request);
+  if (!writes.length) { lines.push(`ℹ️ Slide ${target.slideIndex}: tidak ada kotak teks isi yang bisa diformat.`); return { lines, wrote: false }; }
+  const before = Number(read.shapes[writes[0].index]?.fontSize) || 14;
+  const outcome = await applySlideLayout(target, writes);
+  if (!outcome.updated) { lines.push(`❌ Slide ${target.slideIndex}: format gagal (${outcome.reason || "gagal"}).`); return { lines, wrote: false }; }
+  invalidateDeckContext();
+  lines.push(`🔠 Slide ${target.slideIndex}: ${describeFormat(request, before, writes[0].fontSize)} (${writes.length} kotak).`);
+  lines.push(`(${PPT_CHAT_BUILD})`);
+  return { lines, wrote: true };
 }

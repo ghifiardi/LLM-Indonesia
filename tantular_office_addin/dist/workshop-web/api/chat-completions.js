@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 // Portal-only model gateway.
 //
 // The portal lets someone use Tantular with no install at all — no Ollama, no
@@ -71,14 +73,21 @@ function sseFromCompletion(rawJsonText) {
 }
 
 export default async function handler(request, response) {
-  if (request.method === "OPTIONS") return response.status(204).end();
+  // Generate identifiers locally; never trust or log client-provided headers.
+  const requestId = randomUUID();
+  function logOutcome(category, status) {
+    console.log(JSON.stringify({ event: "tantular_gateway", timestamp: new Date().toISOString(), requestId, category, status }));
+  }
+  if (request.method === "OPTIONS") { logOutcome("preflight", 204); return response.status(204).end(); }
   if (request.method !== "POST") {
+    logOutcome("method_not_allowed", 405);
     return response.status(405).json({ error: { message: "Gunakan POST." } });
   }
 
   const upstreamUrl = process.env.TANTULAR_UPSTREAM_URL;
   const upstreamKey = process.env.TANTULAR_UPSTREAM_KEY;
   if (!upstreamUrl || !upstreamKey) {
+    logOutcome("configuration_missing", 503);
     return response.status(503).json({
       error: {
         message:
@@ -93,9 +102,11 @@ export default async function handler(request, response) {
     try { body = JSON.parse(body); } catch (_) { body = null; }
   }
   if (!body || typeof body !== "object" || !Array.isArray(body.messages)) {
+    logOutcome("invalid_request", 400);
     return response.status(400).json({ error: { message: "Body harus JSON dengan array \"messages\"." } });
   }
   if (JSON.stringify(body).length > MAX_BODY_BYTES) {
+    logOutcome("request_too_large", 413);
     return response.status(413).json({
       error: { message: "Permintaan terlalu besar untuk mode portal. Pakai dokumen yang lebih kecil." }
     });
@@ -176,15 +187,16 @@ Anda dapat menangani brief deck panjang hingga 30 slide. Gunakan variasi struktu
       body: JSON.stringify(payload)
     });
 
-    const text = await upstream.text();
     if (!upstream.ok) {
-      // Pass the status through, but never the upstream body verbatim — it can
-      // carry account or key detail that does not belong in a public response.
-      console.error("[tantular-portal] upstream error", upstream.status, text.slice(0, 500));
+      // Error bodies may echo user content or credentials. Do not read or log them.
+      logOutcome("upstream_http_error", upstream.status);
       return response.status(upstream.status).json({
         error: { message: `Gateway model menolak permintaan (${upstream.status}). Coba lagi sebentar.` }
       });
     }
+
+    const text = await upstream.text();
+    logOutcome("success", 200);
 
     // Answer in the shape the caller asked for. Errors above stay JSON: the client's
     // streaming path reads them with response.text() before touching the body stream.
@@ -195,8 +207,9 @@ Anda dapat menangani brief deck panjang hingga 30 slide. Gunakan variasi struktu
     }
     response.setHeader("Content-Type", "application/json");
     return response.status(200).send(text);
-  } catch (error) {
-    console.error("[tantular-portal] upstream unreachable", error);
+  } catch {
+    // Exceptions may contain sensitive URLs, headers or user content.
+    logOutcome("upstream_request_failed", 502);
     return response.status(502).json({
       error: { message: "Gateway model tidak dapat dihubungi. Coba lagi sebentar." }
     });

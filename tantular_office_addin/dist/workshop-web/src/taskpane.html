@@ -76,14 +76,14 @@
       window.__tantularTrace = state;
     })();
   </script>
-  <link rel="stylesheet" href="./taskpane.css" />
+  <link rel="stylesheet" href="./taskpane.css?v=host42" />
 </head>
 <body>
   <main class="shell">
     <header class="hero">
       <div class="mark" aria-hidden="true">T</div>
       <div>
-        <h1>Tantular <small class="build-tag" style="font-size:11px;color:#98a2b3;font-weight:400">host12</small></h1>
+        <h1>Tantular <small class="build-tag">host42</small></h1>
         <p id="host-subtitle">Asisten privat Bahasa Indonesia untuk Microsoft 365.</p>
       </div>
     </header>
@@ -98,21 +98,20 @@
       <span id="mode-banner-text">🔒 Mode Lokal — teks dokumen Anda tidak keluar dari komputer ini.</span>
     </div>
 
-    <div id="auth-section" style="margin:8px 0 16px;">
+    <div id="auth-section" class="auth-section">
       <div id="auth-status" class="hint">
         Microsoft 365: memeriksa sesi...
       </div>
       <button id="microsoft-signin"
               class="secondary"
-              type="button"
-              style="margin-top:8px;">
+              type="button">
         Masuk dengan Microsoft 365
       </button>
     </div>
 
     <section class="card chat hidden" id="chat-card" aria-labelledby="chat-title">
       <div class="section-title-row">
-        <h2 id="chat-title">💬 Tantular Chat <small class="build-tag" style="font-size:10px;color:#98a2b3;font-weight:400">host12</small></h2>
+        <h2 id="chat-title">💬 Tantular Chat <small class="build-tag">host42</small></h2>
         <button id="chat-context-pill" class="pill pill-button" type="button"
                 title="Konteks yang akan dibaca Tantular">Konteks: —</button>
       </div>
@@ -167,11 +166,12 @@
         <div id="lookup-mode-row" class="lookup-mode-row" hidden>
           <label>
             <input type="checkbox" id="lookup-mode-toggle" />
-            Mode Lokal + Pencarian
+            Mode Lokal + Riset Web
           </label>
           <p id="lookup-mode-hint" class="hint">
             Dokumen tetap di komputer ini. Hanya query yang Anda setujui yang
-            dikirim keluar, dan jawaban diperiksa terhadap dokumen Anda.
+            dikirim keluar. Hasil riset dirangkum dari sumber web dan dilengkapi
+            rujukan.
           </p>
           <div id="lookup-search-controls" class="lookup-search-controls" hidden>
             <label for="lookup-host" id="lookup-host-row">
@@ -228,20 +228,20 @@
         <!-- Cloud Mode intentionally hides all Ollama/local-runtime controls.
              The cloud backend, model and credential are managed server-side. -->
         <div id="cloud-model-summary" class="hidden" role="status" aria-live="polite">
-          <div style="margin:14px 0;padding:16px;border:1px solid #ead8bd;border-radius:16px;background:#fffaf2;">
-            <div style="font-weight:700;font-size:18px;margin-bottom:10px;">
+          <div class="cloud-summary">
+            <div class="cloud-summary-title">
               ☁️ Tantular Cloud
             </div>
-            <div style="margin-bottom:7px;">
+            <div class="cloud-summary-row">
               <strong>Model:</strong> Tantular Cloud
             </div>
-            <div style="margin-bottom:7px;">
-              <strong>Status:</strong> <span style="color:#18794e;">● Terhubung</span>
+            <div class="cloud-summary-row">
+              <strong>Status:</strong> <span class="cloud-summary-ok">● Terhubung</span>
             </div>
-            <div style="margin-bottom:10px;">
+            <div class="cloud-summary-row">
               <strong>Endpoint:</strong> dikelola oleh Tantular
             </div>
-            <p class="hint" style="margin:0;">
+            <p class="hint">
               Tidak memerlukan Ollama, Tantular Companion, API key pengguna,
               atau instalasi model lokal.
             </p>
@@ -453,7 +453,7 @@
       </label>
       <label class="prompt-label">
         Project / output instructions (bebas)
-        <textarea id="deck-project-instructions" rows="8" placeholder="Tempel style guide, output format, chart preference, executive summary rules, methodology notes, brand colors, dll. Contoh: gaya editorial akademik, banyak diagram proses, gunakan #EC008C, #24BDAD, #FFCB09...; output must include 3-5 bullet executive summary and methodology notes."></textarea>
+        <textarea id="deck-project-instructions" rows="8" placeholder="Tempel style guide, output format, chart preference, executive summary rules, methodology notes, brand colors, dll. Contoh: gaya editorial akademik, banyak diagram proses, gunakan #A6351D, #D9A441, #F6E8C9...; output must include 3-5 bullet executive summary and methodology notes."></textarea>
       </label>
       <div class="button-row compact-row">
         <button id="save-project-instructions" class="secondary" type="button">Simpan instruksi</button>
@@ -471,29 +471,40 @@
       </div>
       <div id="deck-preview" class="deck-preview hidden" aria-live="polite"></div>
       <p id="deck-status" class="status" role="status" aria-live="polite"></p>
-    </section>
 
-    <section id="deck-refine" class="card deck-refine hidden" aria-labelledby="refine-title">
-      <div class="section-title-row">
-        <h2 id="refine-title">🛠 Improve Existing Deck</h2>
-        <span class="pill" id="refine-host-note">PowerPoint</span>
+      <div id="deck-refine" class="deck-refine">
+        <button class="card-toggle refine-toggle" id="refine-toggle" type="button" aria-expanded="false" aria-controls="refine-body">
+          <span id="refine-title">🛠 Perbaiki slide terpilih — Lanjutan</span>
+          <span aria-hidden="true">▾</span>
+        </button>
+        <div id="refine-body" class="refine-body hidden">
+          <p class="hint">Cara termudah: pilih satu slide, lalu tulis di <strong>Tantular Chat</strong> — “Perbaiki slide ini” atau “Buat lebih visual”. Bagian ini adalah kontrol manualnya: pipeline yang sama, memakai Tone, Gaya desain, dan Project/output instructions di atas. Tidak menambah angka/fakta baru.</p>
+          <label class="prompt-label">
+            Instruksi (opsional)
+            <input id="refine-instruction" type="text" placeholder="Contoh: jadikan lebih executive, bandingkan hanya jika datanya ada." />
+          </label>
+          <label>
+            Mode visual
+            <select id="refine-visual-mode">
+              <option value="auto">Otomatis</option>
+              <option value="concise">Lebih ringkas</option>
+              <option value="cards">Kartu</option>
+              <option value="columns">Kolom</option>
+              <option value="chart">Chart jika ada angka</option>
+            </select>
+          </label>
+          <div class="button-row">
+            <button id="refine-run" class="primary deck-build" type="button">🛠 Perbaiki slide</button>
+            <button id="refine-download" class="secondary" type="button">Download hasil</button>
+          </div>
+          <div id="refine-progress" class="progress hidden" role="status" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="refine-progress-text">Menyiapkan...</span>
+          </div>
+          <div id="refine-preview" class="deck-preview hidden" aria-live="polite"></div>
+          <p id="refine-status" class="status" role="status" aria-live="polite"></p>
+        </div>
       </div>
-      <p class="hint">Untuk deck yang sudah kompleks: pilih satu slide, lalu Tantular membuat <strong>versi slide yang lebih jelas</strong> memakai style guide Deck Studio. Output dijaga agar tetap berbasis teks slide: tidak menambah angka/fakta baru.</p>
-      <label class="prompt-label">
-        Apa yang perlu diperbaiki? (opsional)
-        <input id="refine-instruction" type="text" placeholder="Contoh: jadikan lebih executive, bandingkan SOC vs best practice hanya jika datanya ada." />
-      </label>
-      <p class="hint">Menggunakan Tone, Gaya desain, dan Project/output instructions dari Deck Studio di atas. Jika slide tidak punya data numerik, Tantular tidak akan membuat chart palsu.</p>
-      <div class="button-row">
-        <button id="refine-run" class="primary deck-build" type="button">🛠 Improve selected slide</button>
-        <button id="refine-download" class="secondary" type="button">Download improved slide</button>
-      </div>
-      <div id="refine-progress" class="progress hidden" role="status" aria-live="polite">
-        <span class="spinner" aria-hidden="true"></span>
-        <span id="refine-progress-text">Menyiapkan...</span>
-      </div>
-      <div id="refine-preview" class="deck-preview hidden" aria-live="polite"></div>
-      <p id="refine-status" class="status" role="status" aria-live="polite"></p>
     </section>
 
     <section class="card" aria-labelledby="actions-title">
@@ -538,13 +549,13 @@
        reports TANTULAR_TRACE=1; on the hosted build the probe simply fails
        and the collector above is unwound. -->
   <script type="module">
-    import { installTraceSink } from "./traceSink.js?entry=host12";
+    import { installTraceSink } from "./traceSink.js?entry=host42";
     installTraceSink().catch(() => {});
   </script>
 
-  <!-- entry=host12 is an intentional top-level cache generation. Even when a
+  <!-- entry=host42 is an intentional top-level cache generation. Even when a
        long-running dev server still has its previous module-cache token, this
        URL has never existed in Office's WebView cache. -->
-  <script type="module" src="./taskpane.js?entry=host12"></script>
+  <script type="module" src="./taskpane.js?entry=host42"></script>
 </body>
 </html>

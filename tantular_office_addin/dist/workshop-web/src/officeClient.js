@@ -541,6 +541,497 @@ export function sameSlideId(a, b) {
 // target plus its 1-based index. Grounding on the live collection's id — not
 // the raw selected id, which a different API surface may format differently —
 // keeps the insert anchor and the later delete pointed at the same slide.
+// --- In-place slide text edit ------------------------------------------------
+// "Perbaiki slide ini" used to build a NEW slide in the Deck Studio style and
+// replace the original, so the deck's master, colours and footer were lost.
+// Now the improved text is written into the slide's EXISTING shapes, mapped
+// onto the slide's real structure: title + one body, or title + N column
+// bodies with optional heading boxes above them. Identification is
+// conservative: a wrong shape rewritten is damage with no undo, and a stale
+// heading left beside new text is a wrong slide — so anything that does not
+// map cleanly is a refusal and the caller reports "tidak diubah".
+const TITLE_SHAPE_RE = /\b(title|judul)\b/i;
+const CHROME_SHAPE_RE = /\b(footer|slide number|date|header)\b/i;
+const FOOTER_TEXT_RE = /·\s*\d+\s*\/\s*\d+\s*$/;
+
+// A column is often ONE shape whose first paragraph is the heading and the
+// rest are bullets (live slide, 2026-09-03). Such an inline heading must be
+// kept — writing the whole shape erased it and gave every line its style.
+function inlineHeadingOf(lines) {
+  if (lines.length < 2) return "";
+  const first = lines[0];
+  const rest = lines.slice(1);
+  const mean = rest.reduce((sum, line) => sum + line.length, 0) / rest.length;
+  // Short, no sentence punctuation, and clearly shorter than the bullets
+  // under it — a short first BULLET ("Read it twice" over "Cite the exhibit")
+  // is not a heading.
+  return first.length <= 60 && !/[.!?:;]$/.test(first) && first.length <= 0.6 * mean ? first : "";
+}
+
+function classifyShapes(shapes) {
+  const list = (Array.isArray(shapes) ? shapes : []).map((shape, index) => ({
+    index,
+    name: String(shape?.name || ""),
+    text: String(shape?.text || "").replace(/\r\n?/g, "\n").trim()
+  }));
+  const textual = list.filter((shape) => shape.text && !CHROME_SHAPE_RE.test(shape.name) && !FOOTER_TEXT_RE.test(shape.text));
+  if (!textual.length) return null;
+  const title = textual.find((shape) => TITLE_SHAPE_RE.test(shape.name)) || textual[0];
+  const rest = textual.filter((shape) => shape !== title);
+  // A body is a multi-paragraph shape. Every single-line shape (column
+  // heading, caption, a footer text box) is a heading candidate; only the
+  // first N of them, in slide order, pair with the N bodies.
+  const isHeading = (shape) => !shape.text.includes("\n");
+  // Builder layout (Deck Studio, live 2026-09-05): every bullet is its own
+  // text box, stacked in one column under the title. Three or more such boxes
+  // sharing a left edge are ONE bullets body split across slots — not N
+  // columns, which is what the model was steered to and what the writer then
+  // refused. Read as one body; write one bullet per slot.
+  const candidates = rest.filter((shape) => !FOOTER_TEXT_RE.test(shape.text) && !/·/.test(shape.text));
+  if (candidates.length >= 3) {
+    const lefts = candidates.map((shape) => Number(shapes[shape.index]?.left));
+    const aligned = lefts.every((l) => Number.isFinite(l)) && Math.max(...lefts) - Math.min(...lefts) <= 24;
+    if (aligned) {
+      const lines = candidates.flatMap((shape) => shape.text.split("\n").map((line) => line.trim()).filter(Boolean));
+      return {
+        title, layout: "split_bullets", slots: candidates.map((shape) => shape.index),
+        bodies: [{ index: candidates[0].index, inlineHeading: "", lines }], headings: []
+      };
+    }
+  }
+  const bodies = rest.filter((shape) => !isHeading(shape)).map((shape) => {
+    const lines = shape.text.split("\n").map((line) => line.trim()).filter(Boolean);
+    const inlineHeading = inlineHeadingOf(lines);
+    return { ...shape, inlineHeading, lines: inlineHeading ? lines.slice(1) : lines };
+  });
+  return { title, bodies, headings: rest.filter(isHeading) };
+}
+
+// A slide the Deck Studio builder produced carries its footer.
+export function isDeckStudioSlide(shapes) {
+  return (Array.isArray(shapes) ? shapes : []).some((shape) => /tantular deck studio/i.test(String(shape?.text || "")));
+}
+
+export function describeSlideStructure(shapes) {
+  const parts = classifyShapes(shapes);
+  if (!parts) return { title: "", bodies: 0, headings: [], blocks: [] };
+  const title = parts.title.text;
+  if (parts.layout === "split_bullets") {
+    return { title, bodies: 1, headings: [], blocks: [parts.bodies[0].lines],
+             slots: parts.slots.length, layout: "split_bullets", deckStudio: isDeckStudioSlide(shapes) };
+  }
+  // A single-shape slide (title + one short line) still has one body: the line.
+  if (!parts.bodies.length && parts.headings.length === 1) {
+    return { title, bodies: 1, headings: [], blocks: [[parts.headings[0].text]] };
+  }
+  const paired = parts.headings.slice(0, parts.bodies.length);
+  const headings = parts.bodies.map((body, i) => body.inlineHeading || paired[i]?.text || "").filter(Boolean);
+  return { title, bodies: parts.bodies.length, headings, blocks: parts.bodies.map((body) => body.lines) };
+}
+
+function flattenToLines(slide) {
+  const type = String(slide?.type || "");
+  if (type === "bullets" || type === "agenda") {
+    return (Array.isArray(slide.bullets) ? slide.bullets : []).map((b) => String(b || "").trim()).filter(Boolean);
+  }
+  if (type === "columns") {
+    return (Array.isArray(slide.columns) ? slide.columns : []).flatMap((col) => [
+      String(col?.title || "").trim(),
+      ...(Array.isArray(col?.points) ? col.points : []).map((pt) => String(pt || "").trim())
+    ]).filter(Boolean);
+  }
+  if (type === "cards") {
+    return (Array.isArray(slide.cards) ? slide.cards : []).map((card) => {
+      const title = String(card?.title || "").trim();
+      const desc = String(card?.desc || "").trim();
+      return title && desc ? `${title}: ${desc}` : title || desc;
+    }).filter(Boolean);
+  }
+  return null;
+}
+
+// Pure: which shapes get which text, or null when the result does not fit.
+// A write with `afterFirstParagraph` replaces only the paragraphs after the
+// shape's inline heading, so the heading and the bullets' formatting survive.
+export function planInPlaceWrites(shapes, slide) {
+  const parts = classifyShapes(shapes);
+  if (!parts || !slide) return null;
+  const type = String(slide.type || "");
+  if (!["bullets", "agenda", "columns", "cards"].includes(type)) return null;
+  const writes = [];
+  const headline = String(slide.headline || "").trim();
+  if (headline) writes.push({ index: parts.title.index, text: headline });
+  const bodyWrite = (body, lines) => (body.inlineHeading
+    ? { index: body.index, text: lines.join("\n"), afterFirstParagraph: true }
+    : { index: body.index, text: lines.join("\n") });
+
+  if (parts.layout === "split_bullets") {
+    // One bullet per box, in slide order; overflow joins into the last box;
+    // boxes beyond the bullets are cleared so no stale text survives.
+    const lines = flattenToLines(slide);
+    if (!lines || !lines.length) return null;
+    const slots = parts.slots;
+    slots.forEach((index, i) => {
+      if (i < lines.length) {
+        writes.push({ index, text: i === slots.length - 1 ? lines.slice(i).join("\n") : lines[i] });
+      } else {
+        writes.push({ index, text: "", clear: true });
+      }
+    });
+    return writes;
+  }
+
+  let bodies = parts.bodies;
+  let headings = parts.headings;
+  if (!bodies.length && headings.length === 1) { bodies = [{ ...headings[0], inlineHeading: "" }]; headings = []; }
+  if (!bodies.length) return null;
+
+  if (bodies.length === 1) {
+    const lines = flattenToLines(slide);
+    if (!lines || !lines.length) return null;
+    writes.push(bodyWrite(bodies[0], lines));
+    return writes;
+  }
+
+  // Several bodies: only a columns result with exactly that many columns fits.
+  if (type !== "columns") return null;
+  const columns = Array.isArray(slide.columns) ? slide.columns : [];
+  if (columns.length !== bodies.length) return null;
+  const pairedHeadings = headings.slice(0, bodies.length);
+  columns.forEach((col, i) => {
+    const title = String(col?.title || "").trim();
+    const points = (Array.isArray(col?.points) ? col.points : []).map((pt) => String(pt || "").trim()).filter(Boolean);
+    // An inline heading is kept as it is; only a separate heading shape is rewritten.
+    if (title && !bodies[i].inlineHeading && pairedHeadings[i]) writes.push({ index: pairedHeadings[i].index, text: title });
+    if (points.length) writes.push(bodyWrite(bodies[i], points));
+  });
+  return writes.sort((x, y) => x.index - y.index);
+}
+
+// Pure: true when applying `writes` would leave every touched shape with the
+// text it already has (grounding put every rewording back). The caller then
+// reports "tidak diubah" instead of a false ✅ and skips the write.
+export function writesChangeNothing(shapes, writes) {
+  const norm = (text) => String(text || "").replace(/\r\n?/g, "\n").split("\n").map((l) => l.trim()).filter(Boolean).join("\n");
+  return (Array.isArray(writes) ? writes : []).every((write) => {
+    const current = norm(shapes?.[write.index]?.text);
+    const target = norm(write.text);
+    if (!write.afterFirstParagraph) return current === target;
+    const rest = current.split("\n").slice(1).join("\n");
+    return rest === target;
+  });
+}
+
+// --- Layout repair -------------------------------------------------------------
+// Applies a deck/slideLayout reflow: top, height, font size, and merged text
+// only. Left, width, colours and every other shape are untouched.
+export async function applySlideLayout(target = {}, writes = []) {
+  if (!globalThis.PowerPoint?.run) {
+    throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
+  }
+  const list = (Array.isArray(writes) ? writes : []).filter((w) => Number.isInteger(w?.index));
+  if (!list.length) return { updated: false, reason: "tidak ada perubahan tata letak" };
+  return PowerPoint.run(async (context) => {
+    const loaded = await loadSlideShapes(context, target);
+    if (!loaded) return { updated: false, reason: "slide target tidak ditemukan di deck aktif" };
+    for (const write of list) {
+      const shape = loaded.shapes[write.index];
+      if (!shape) return { updated: false, reason: `shape #${write.index + 1} tidak ditemukan` };
+      if (write.top !== undefined) shape.top = write.top;
+      if (write.height !== undefined) shape.height = write.height;
+      const range = loaded.ranges[write.index];
+      if (range && write.fontSize !== undefined) { try { range.font.size = write.fontSize; } catch (_) { /* best effort */ } }
+      if (range && write.text !== undefined) range.text = write.clear ? "" : String(write.text);
+    }
+    await context.sync();
+    return { updated: true, changed: list.length };
+  });
+}
+
+// --- Native visual cards --------------------------------------------------------
+// Card panels drawn ON the user's slide (design review 2026-09-03). Rules:
+// identify what to replace conservatively and refuse when unsure (no undo);
+// feature-detect every method used; create → sync → verify → delete LAST; a
+// failed create removes what it made. Style reads that come back empty are
+// resolved by deck/nativeCards.resolveCardStyle with explicit fallbacks.
+const NATIVE_METHODS = ["addGeometricShape", "addTextBox"];
+
+export function planNativeCardTargets(shapes) {
+  const parts = classifyShapes(shapes);
+  if (!parts || !parts.bodies.length) return { ok: false, reason: "tidak ada shape isi yang bisa diganti menjadi kartu" };
+  const geometry = (index) => {
+    const sh = shapes[index] || {};
+    return { left: Number(sh.left) || 0, top: Number(sh.top) || 0, width: Number(sh.width) || 0, height: Number(sh.height) || 0 };
+  };
+  const bodies = parts.bodies;
+  if (bodies.some((b) => { const g = geometry(b.index); return g.width <= 0 || g.height <= 0; })) {
+    return { ok: false, reason: "geometri shape isi tidak terbaca, jadi kartu tidak bisa ditempatkan dengan aman" };
+  }
+  // Single-line text shapes: either exactly one heading per body (they go
+  // with the bodies) or none. Any other count is ambiguous — a caption could
+  // be mistaken for a heading and deleted — so refuse.
+  const stray = parts.headings.filter((h) => !FOOTER_TEXT_RE.test(h.text) && !/·/.test(h.text));
+  if (stray.length !== 0 && stray.length !== bodies.length) {
+    return { ok: false, reason: `tidak yakin shape mana yang isi dan mana yang keterangan (${stray.length} baris tunggal, ${bodies.length} isi); tidak ada yang dihapus` };
+  }
+  const targets = [...bodies, ...stray].map((s) => s.index).sort((a, b) => a - b);
+  const boxes = targets.map(geometry);
+  const left = Math.min(...boxes.map((g) => g.left));
+  const top = Math.min(...boxes.map((g) => g.top));
+  const right = Math.max(...boxes.map((g) => g.left + g.width));
+  const bottom = Math.max(...boxes.map((g) => g.top + g.height));
+  return { ok: true, box: { left, top, width: right - left, height: bottom - top }, deleteIndexes: targets };
+}
+
+function readFont(range) {
+  const font = range?.font || {};
+  const value = (v) => (typeof v === "string" ? v : "");
+  return { name: value(font.name), color: value(font.color), size: Number(font.size) || 0 };
+}
+
+export async function readSlideDesign(target = {}) {
+  if (!globalThis.PowerPoint?.run) {
+    throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
+  }
+  return PowerPoint.run(async (context) => {
+    const loaded = await loadSlideShapes(context, target);
+    if (!loaded) return { found: false, shapes: [] };
+    for (const [i, shape] of loaded.shapes.entries()) {
+      try { shape.load("left,top,width,height"); } catch (_) { /* ignore */ }
+      try { shape.fill?.load?.("foregroundColor"); } catch (_) { /* ignore */ }
+      try { loaded.ranges[i]?.font?.load?.("name,color,size"); } catch (_) { /* ignore */ }
+    }
+    await context.sync();
+    const shapes = loaded.shapes.map((shape, i) => ({
+      name: String(shape.name || ""), text: String(loaded.ranges[i]?.text || ""),
+      left: Number(shape.left) || 0, top: Number(shape.top) || 0, width: Number(shape.width) || 0, height: Number(shape.height) || 0
+    }));
+    const parts = classifyShapes(shapes);
+    const title = parts ? readFont(loaded.ranges[parts.title.index]) : readFont(null);
+    const body = parts?.bodies?.[0] ? readFont(loaded.ranges[parts.bodies[0].index]) : readFont(null);
+    const heading = parts?.headings?.[0] ? readFont(loaded.ranges[parts.headings[0].index]) : readFont(null);
+    const collection = loaded.slide.shapes;
+    const api = Object.fromEntries(NATIVE_METHODS.map((m) => [m, typeof collection[m] === "function"]));
+    // Accent colours from the slide's own small marker shapes, in slide order
+    // and de-duplicated: the composer alternates them for panel bars.
+    const accents = [];
+    const bars = [];
+    for (const [i, shape] of loaded.shapes.entries()) {
+      const meta = shapes[i];
+      if (meta.text) continue;
+      const isMarker = meta.width <= 24 && meta.height <= 24;
+      const isBar = meta.width <= 14 && meta.height >= 200;
+      if (!isMarker && !isBar) continue;
+      let color = "";
+      try { color = String(shape.fill?.foregroundColor || shape.fillColor || ""); } catch (_) { /* ignore */ }
+      if (!/^#?[0-9a-f]{6}$/i.test(color)) continue;
+      const hex = (color.startsWith("#") ? color : `#${color}`).toUpperCase();
+      const target = isMarker ? accents : bars;
+      if (!target.includes(hex)) target.push(hex);
+    }
+    return { found: true, shapes, title, body, headingColor: heading.color, accents, bars, api };
+  });
+}
+
+export async function buildNativeCardsOnSlide(target = {}, plan = [], deleteIndexes = []) {
+  if (!globalThis.PowerPoint?.run) {
+    throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
+  }
+  const list = Array.isArray(plan) ? plan : [];
+  if (!list.length) return { updated: false, reason: "tidak ada kartu yang bisa digambar" };
+  return PowerPoint.run(async (context) => {
+    const loaded = await loadSlideShapes(context, target);
+    if (!loaded) return { updated: false, reason: "slide target tidak ditemukan di deck aktif" };
+    const collection = loaded.slide.shapes;
+    const missing = NATIVE_METHODS.filter((m) => typeof collection[m] !== "function");
+    if (missing.length) {
+      return { updated: false, reason: `host PowerPoint ini tidak menyediakan ${missing.join(", ")} (butuh PowerPointApi 1.4); kartu tidak dibuat` };
+    }
+    const before = loaded.shapes.length;
+    const oldShapes = deleteIndexes.map((i) => loaded.shapes[i]).filter(Boolean);
+    const created = [];
+
+    // Remove everything this call created. Deletes are queued and applied at
+    // a sync; if that sync throws (it did, live 2026-09-05), re-read the
+    // collection and delete by id, up to three passes, and report honestly.
+    const cleanup = async () => {
+      let remaining = created.slice();
+      for (let pass = 0; pass < 3 && remaining.length; pass += 1) {
+        try {
+          for (const shape of remaining) shape.delete();
+          await context.sync();
+          remaining = [];
+        } catch (_) {
+          try {
+            collection.load("items");
+            await context.sync();
+            const ids = new Set(created.map((c) => c.__id).filter(Boolean));
+            const live = (collection.items || []).filter((shape) => ids.has(String(shape.id)));
+            remaining = live;
+          } catch (_2) { /* next pass retries the same list */ }
+        }
+      }
+      return remaining.length === 0;
+    };
+
+    // Phase 1: create + geometry only. On this host a just-added shape's text
+    // frame is not addressable until after a sync, so styling waits.
+    try {
+      for (const item of list) {
+        if (item.text === undefined && item.fill !== undefined) {
+          created.push(collection.addGeometricShape("Rectangle", { left: item.left, top: item.top, width: item.width, height: item.height }));
+        } else {
+          created.push(collection.addTextBox(String(item.text ?? ""), { left: item.left, top: item.top, width: item.width, height: item.height }));
+        }
+      }
+      // Creation must be synced on its own first: on this host (live, host42)
+      // even a load() on a not-yet-synced new shape is InvalidArgument.
+      await context.sync();
+      for (const shape of created) { try { shape.load("id"); } catch (_) { /* ignore */ } }
+      collection.load("items");
+      await context.sync();
+      for (const shape of created) { try { shape.__id = String(shape.id || ""); } catch (_) { /* ignore */ } }
+      const now = (collection.items || []).length;
+      if (now < before + list.length) throw new Error(`hanya ${now - before} dari ${list.length} shape yang terbentuk`);
+    } catch (error) {
+      const clean = await cleanup();
+      return { updated: false, reason: `pembuatan kartu gagal (${error?.message || error}); `
+        + (clean ? "slide tidak diubah" : "PERHATIAN: sebagian shape baru tidak bisa dihapus otomatis, hapus manual") };
+    }
+
+    // Phase 2: styling, in the smallest batches that still fail safe. Fills
+    // first, then fonts. A batch that throws is retried per shape; a shape
+    // whose styling still fails aborts the whole build and removes everything.
+    const styleFill = (shape, item) => {
+      try { shape.fill.setSolidColor(item.fill); } catch (_) { /* best effort */ }
+      try { if (item.alpha !== undefined) shape.fill.transparency = 1 - item.alpha; } catch (_) { /* ignore */ }
+      try { shape.lineFormat.visible = false; } catch (_) { /* ignore */ }
+    };
+    const styleText = (shape, item) => {
+      const font = shape.textFrame.textRange.font;
+      if (item.font?.name) font.name = item.font.name;
+      if (item.font?.color) font.color = item.font.color;
+      if (item.font?.size) font.size = item.font.size;
+      font.bold = Boolean(item.font?.bold);
+      try { shape.textFrame.wordWrap = true; } catch (_) { /* ignore */ }
+    };
+    const batches = [
+      ["fill", list.map((item, i) => [created[i], item]).filter(([, item]) => item.text === undefined && item.fill !== undefined)],
+      ["text", list.map((item, i) => [created[i], item]).filter(([, item]) => item.text !== undefined)]
+    ];
+    for (const [kind, pairs] of batches) {
+      const apply = (shape, item) => (kind === "fill" ? styleFill(shape, item) : styleText(shape, item));
+      try {
+        for (const [shape, item] of pairs) apply(shape, item);
+        await context.sync();
+      } catch (batchError) {
+        // Retry one shape at a time so a single bad property does not take
+        // the rest down; any shape that still fails aborts.
+        for (const [shape, item] of pairs) {
+          try { apply(shape, item); await context.sync(); }
+          catch (error) {
+            const clean = await cleanup();
+            return { updated: false, reason: `penataan ${kind === "fill" ? "warna" : "huruf"} gagal (${error?.message || batchError?.message || error}); `
+              + (clean ? "slide tidak diubah" : "PERHATIAN: sebagian shape baru tidak bisa dihapus otomatis, hapus manual") };
+          }
+        }
+      }
+    }
+
+    // Phase 3: delete the old shapes LAST, in one batch.
+    for (const shape of oldShapes) shape.delete();
+    await context.sync();
+    return { updated: true, created: list.length };
+  });
+}
+
+async function loadSlideShapes(context, { slideId = "", slideIndex = 0 } = {}) {
+  const collection = context.presentation.slides;
+  collection.load("items");
+  await context.sync();
+  const items = collection.items || [];
+  for (const slide of items) slide.load("id");
+  await context.sync();
+  const liveIds = items.map((slide) => String(slide.id || ""));
+  const { targetLiveId, targetIndex } = resolveReplaceTarget(liveIds, { slideId, slideIndex });
+  const slide = targetLiveId ? items[targetIndex - 1] : null;
+  if (!slide) return null;
+  slide.shapes.load("items");
+  await context.sync();
+  const shapes = slide.shapes.items || [];
+  const ranges = shapes.map((shape) => {
+    try { shape.load("name"); } catch (_) { /* ignore */ }
+    try {
+      const range = shape.textFrame.textRange;
+      range.load("text");
+      return range;
+    } catch (_) { return null; }
+  });
+  await context.sync();
+  return { slide, shapes, ranges };
+}
+
+export async function readSlideShapeTexts(target = {}) {
+  if (!globalThis.PowerPoint?.run) {
+    throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
+  }
+  return PowerPoint.run(async (context) => {
+    const loaded = await loadSlideShapes(context, target);
+    if (!loaded) return { found: false, shapes: [] };
+    // Geometry too (2026-09-05): the builder-layout rule needs left edges.
+    for (const [i, shape] of loaded.shapes.entries()) {
+      try { shape.load("left,top,width,height"); } catch (_) { /* ignore */ }
+      try { loaded.ranges[i]?.font?.load?.("size"); } catch (_) { /* ignore */ }
+    }
+    await context.sync();
+    return {
+      found: true,
+      shapes: loaded.shapes.map((shape, index) => ({
+        name: String(shape.name || ""), text: String(loaded.ranges[index]?.text || ""),
+        left: Number(shape.left) || 0, top: Number(shape.top) || 0,
+        width: Number(shape.width) || 0, height: Number(shape.height) || 0,
+        fontSize: Number(loaded.ranges[index]?.font?.size) || 0
+      }))
+    };
+  });
+}
+
+export async function writeSlideShapeTexts(target = {}, writes = []) {
+  if (!globalThis.PowerPoint?.run) {
+    throw new Error("PowerPoint JavaScript API tidak tersedia. Buka pane ini di PowerPoint.");
+  }
+  const list = (Array.isArray(writes) ? writes : []).filter((w) => Number.isInteger(w?.index) && (w?.clear || String(w?.text || "").trim()));
+  if (!list.length) return { updated: false, reason: "tidak ada teks yang bisa ditulis" };
+  return PowerPoint.run(async (context) => {
+    const loaded = await loadSlideShapes(context, target);
+    if (!loaded) return { updated: false, reason: "slide target tidak ditemukan di deck aktif" };
+    for (const write of list) {
+      const range = loaded.ranges[write.index];
+      if (!range) return { updated: false, reason: `shape #${write.index + 1} tidak punya teks yang bisa ditulis` };
+    }
+    for (const write of list) {
+      const range = loaded.ranges[write.index];
+      const text = write.clear ? "" : String(write.text).trim();
+      if (!write.afterFirstParagraph) { range.text = text; continue; }
+      // Keep paragraph 1 (the inline heading). Replace the rest through a
+      // substring range so the new paragraphs inherit the bullets' formatting,
+      // not the heading's. Hosts without getSubstring fall back to rewriting
+      // the shape with the heading put back in front.
+      const raw = String(range.text || "");
+      const cut = raw.search(/\r|\n/);
+      if (cut < 0) { range.text = text; continue; }
+      const start = cut + 1;
+      if (typeof range.getSubstring === "function" && raw.length > start) {
+        range.getSubstring(start, raw.length - start).text = text;
+      } else {
+        range.text = `${raw.slice(0, cut)}\n${text}`;
+      }
+    }
+    await context.sync();
+    return { updated: true };
+  });
+}
+
 export function resolveReplaceTarget(liveIds, { slideId = "", slideIndex = 0 } = {}) {
   const ids = (Array.isArray(liveIds) ? liveIds : []).map((id) => String(id || ""));
   if (slideId) {
@@ -1159,7 +1650,7 @@ function basicBlockText(block, listIndex) {
 // just edited — Word caches the bundle from when the pane was opened.
 // It sat at b0818a across the progress/cancel work (5cf7fee) and so
 // reported "current" for a pane that was two features behind.
-export const TASKPANE_BUILD = "host12";
+export const TASKPANE_BUILD = "host42";
 
 // Insert a formatted answer. When `afterText` is provided and located, the
 // content is placed immediately after that anchor (end of the queried
