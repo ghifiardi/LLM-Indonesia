@@ -149,16 +149,27 @@ function drawCards(add, ids, s, style, index, total) {
   const gap = 18, top = 164, areaW = W - M * 2, areaH = H - top - 58;
   const cw = (areaW - gap * (cols - 1)) / cols;
   const ch = (areaH - gap * (rows - 1)) / rows;
+  // One title size for every card: the smallest size any title needs, so a
+  // short label and a long one line up instead of shouting at each other.
+  const fittedTitles = cards.map((c) => (c.title ? fitBox(c.title, cw - 30, 40, ts.body + 2, Math.max(11, ts.body - 4)) : null));
+  const titleSize = Math.min(...fittedTitles.filter(Boolean).map((t) => t.size), ts.body + 2);
   cards.forEach((c, i) => {
     const x = M + (i % cols) * (cw + gap);
     const y = top + Math.floor(i / cols) * (ch + gap);
-    const title = fitBox(c.title || "", cw - 30, 40, ts.body + 2, Math.max(11, ts.body - 4));
     add(rect(ids.next(), x, y, cw, ch, style.panel));
     add(rect(ids.next(), x, y, cw, 7, i % 2 ? style.accent2 : style.accent));
-    add(textBox(ids.next(), title.text, x + 15, y + 17, cw - 30, 40, { size: title.size, bold: true, color: style.title }));
-    if (c.desc) {
-      const desc = fitBox(c.desc, cw - 30, ch - 68, ts.caption + 1.5, Math.max(9.5, ts.caption - 3));
-      add(textBox(ids.next(), desc.text, x + 15, y + 58, cw - 30, ch - 68, { size: desc.size, color: style.text }));
+    // Grounding may blank an invented card title (live, 2026-09-03). A card
+    // without a title draws its text from the top — no empty title row.
+    if (c.title) {
+      const title = fittedTitles[i];
+      add(textBox(ids.next(), title.text, x + 15, y + 17, cw - 30, 40, { size: titleSize, bold: true, color: style.title }));
+      if (c.desc) {
+        const desc = fitBox(c.desc, cw - 30, ch - 68, ts.caption + 1.5, Math.max(9.5, ts.caption - 3));
+        add(textBox(ids.next(), desc.text, x + 15, y + 58, cw - 30, ch - 68, { size: desc.size, color: style.text }));
+      }
+    } else if (c.desc) {
+      const desc = fitBox(c.desc, cw - 30, ch - 27, ts.body, Math.max(10, ts.caption - 2));
+      add(textBox(ids.next(), desc.text, x + 15, y + 17, cw - 30, ch - 27, { size: desc.size, color: style.text }));
     }
   });
   footer(add, ids, style, index, total);

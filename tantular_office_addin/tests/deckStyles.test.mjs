@@ -212,3 +212,45 @@ test("footer numbering: a multi-slide spec without position is unchanged", () =>
     assert.match(raw, new RegExp(`Deck Studio[^<]*${i}/${total}`));
   }
 });
+
+// --- Title-less cards (live, 2026-09-03) -----------------------------------
+// "Buat slide lebih visual" produced three cards; grounding blanked two
+// invented titles, and the builder still reserved a title row, so two cards
+// rendered with an empty gap above their text. A card without a title must
+// draw its text from the top, with no empty title box.
+function slideShapes(b64) {
+  const xml = firstSlideXml(b64);
+  return (xml.match(/<p:sp>/g) || []).length;
+}
+test("a card without a title has no empty title box and its text starts at the top", () => {
+  const titled = buildDeckPptxBase64({ title: "t", slides: [{ type: "cards", headline: "H", cards: [{ title: "T", desc: "Body text" }] }] }, "nusantara");
+  const untitled = buildDeckPptxBase64({ title: "t", slides: [{ type: "cards", headline: "H", cards: [{ desc: "Body text" }] }] }, "nusantara");
+  assert.equal(slideShapes(titled) - slideShapes(untitled), 1, "exactly the title box is omitted");
+  const xml = firstSlideXml(untitled);
+  assert.match(xml, /Body text/);
+  // The desc box of the untitled card sits where the title box would have been (top + 17), not at top + 58.
+  const titledXml = firstSlideXml(titled);
+  const offY = (x) => [...x.matchAll(/<a:off x="\d+" y="(\d+)"\/>/g)].map((m) => Number(m[1]));
+  const titleY = offY(titledXml).at(-3); // title box of the single card, before its desc box
+  const descYUntitled = offY(xml).at(-2);
+  assert.equal(descYUntitled, titleY, "untitled desc takes the title's y position");
+});
+
+test("card titles share one font size so short and long labels line up", () => {
+  const b64 = buildDeckPptxBase64({ title: "t", slides: [{ type: "cards", headline: "H", cards: [
+    { title: "Traceable Reasoning", desc: "a" },
+    { title: "Evidence versus Claim Separation Discipline", desc: "b" },
+    { title: "Gaps", desc: "c" }
+  ] }] }, "nusantara");
+  const xml = firstSlideXml(b64);
+  // title runs are bold; collect the sz of every bold run in the card area (after the headline)
+  const sizeBefore = (text) => {
+    // fitBox may wrap or trim a long title, so match on its first word.
+    const at = xml.indexOf(`<a:t>${text.split(" ")[0]}`);
+    assert.ok(at >= 0, `title ${text} rendered`);
+    const run = xml.slice(0, at);
+    return Number(run.slice(run.lastIndexOf('sz="')).match(/sz="(\d+)"/)[1]);
+  };
+  const cardTitleSizes = ["Traceable Reasoning", "Evidence versus Claim Separation Discipline", "Gaps"].map(sizeBefore);
+  assert.equal(new Set(cardTitleSizes).size, 1, `card title sizes differ: ${cardTitleSizes.join(", ")}`);
+});
