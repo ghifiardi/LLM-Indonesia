@@ -190,3 +190,24 @@ test("HTTP: unknown route beyond prefix is 404; wrong method is 405", async () =
     assert.equal(wrongMethod.status, 405);
   } finally { server.close(); }
 });
+
+test("HTTP: a fresh store answers a plain GET with 200; only an explicit since_rev can 304", async () => {
+  // Regression: Number(null) is 0, so a GET without since_rev on a rev-0 store
+  // used to return 304 with no body instead of the snapshot.
+  const { store } = tmpStore();
+  const { server, base } = await serve(store);
+  try {
+    const plain = await fetch(`${base}/api/workspace`);
+    assert.equal(plain.status, 200);
+    const body = await plain.json();
+    assert.equal(body.rev, 0);
+    assert.deepEqual(body.items, []);
+
+    assert.equal((await fetch(`${base}/api/workspace?since_rev=`)).status, 200, "an empty since_rev is no condition");
+    assert.equal((await fetch(`${base}/api/workspace?since_rev=abc`)).status, 200, "a non-numeric since_rev is no condition");
+
+    const unchanged = await fetch(`${base}/api/workspace?since_rev=0`);
+    assert.equal(unchanged.status, 304, "an explicit since_rev=0 on a rev-0 store is still not modified");
+    assert.equal(await unchanged.text(), "");
+  } finally { server.close(); }
+});

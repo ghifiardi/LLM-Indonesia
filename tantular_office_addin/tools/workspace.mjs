@@ -100,7 +100,10 @@ export function handleWorkspaceRequest(store, req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/workspace") {
-    const since = Number(url.searchParams.get("since_rev"));
+    // A missing or empty since_rev is no condition. (Number(null) is 0, which
+    // made a plain GET on a fresh rev-0 store answer 304 with no body.)
+    const raw = url.searchParams.get("since_rev");
+    const since = raw === null || raw.trim() === "" ? NaN : Number(raw);
     if (Number.isFinite(since) && store.rev <= since) {
       res.writeHead(304, {
         "Cache-Control": "no-store",
