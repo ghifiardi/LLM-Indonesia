@@ -591,8 +591,11 @@ async function callChat({
     // resolution on the server side, or a benchmark comparing requested vs.
     // actual model — needs the latter, not the former.
     const responseModel = String(data?.model || model);
+    // finishReason is reported for EVERY call, not only structured-mode ones:
+    // a plain-text JSON edit cut off at max_tokens ("length") looked exactly
+    // like a malformed reply until this was surfaced (2026-10-31).
     const metrics = data?.tantular_metrics
-      ? { model: responseModel, ...data.tantular_metrics, ...structuredModeTelemetry({
+      ? { model: responseModel, ...data.tantular_metrics, finishReason: data?.choices?.[0]?.finish_reason ?? null, ...structuredModeTelemetry({
         requestedMode, usedMode, downgradeReason, maxTokens,
         completionTokens: data.tantular_metrics.completionTokens,
         finishReason: data?.choices?.[0]?.finish_reason ?? null,

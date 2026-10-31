@@ -1,9 +1,18 @@
-import { locateEdit, searchOrdinalAt } from "./editContract.js";
+import { resolveEditAnchor, escapeWordSearch, rangeMatchesPlan } from "./editContract.js";
 import { applyIfCurrent, STALE_PREVIEW_MESSAGE } from "./staleGuard.js";
 import { getDocumentBodyText } from "../officeClient.js";
 
 function hasWordApi14() {
   return globalThis.Office?.context?.requirements?.isSetSupported?.("WordApi", "1.4") ?? false;
+}
+
+export function editStatusLabel(error) {
+  if (!error) return "";
+  if (error === "not_found") return " ⚠ tidak ditemukan";
+  if (error === "ambiguous") return " ✖ ambigu, dilewati";
+  if (error === "unanchorable") return " ⚠ tidak bisa dijangkarkan di Word, dilewati";
+  if (error === "substantive") return " ✖ mengubah isi, bukan perbaikan bahasa — dilewati";
+  return " ✖ dilewati";
 }
 
 export function renderEditPreview({
@@ -26,8 +35,7 @@ export function renderEditPreview({
     checkbox.disabled = Boolean(item.error);
     const desc = document.createElement("details");
     desc.className = "edit-detail";
-    const status = item.error === "not_found" ? " ⚠ tidak ditemukan"
-      : item.error === "ambiguous" ? " ✖ ambigu, dilewati" : "";
+    const status = editStatusLabel(item.error);
     const summary = document.createElement("summary");
     summary.textContent = `Edit ${i + 1}${item.edit.alasan ? ` — ${item.edit.alasan}` : ""}${status}`;
     const oldLabel = document.createElement("strong");
@@ -125,33 +133,20 @@ export async function applyTrackedEdits(edits) {
         bodyRange.load("text");
         await context.sync();
         const bodyNow = bodyRange.text ?? "";
-        const r = locateEdit(bodyNow, edit);
+        // Same locate + anchor plan the preview used (resolveEditAnchor),
+        // so a span the preview offered is the span reached here — including
+        // one that crosses paragraphs or exceeds Word's 255-char search limit.
+        const r = resolveEditAnchor(bodyNow, edit);
         if (r.error) {
           results.push({ edit, status: r.error === "not_found" ? "not_found" : "skipped" });
           continue;
         }
-        // locateEdit may resolve via its whitespace-normalized retry, in
-        // which case edit.find does NOT occur literally at r.index. Anchor
-        // on the text that actually matched so the ordinal lookup and the
-        // Word search agree with what locateEdit found.
-        const matchedText = bodyNow.slice(r.index, r.index + r.length);
-        if (matchedText.length > 250) {
+        const range = await reachPlannedRange(context, doc, r.plan);
+        if (!range) {
           results.push({ edit, status: "not_found" });
           continue;
         }
-        const nth = searchOrdinalAt(bodyNow, matchedText, r.index);
-        if (nth === -1) {
-          results.push({ edit, status: "not_found" });
-          continue;
-        }
-        const found = doc.body.search(matchedText, { matchCase: true });
-        found.load("items");
-        await context.sync();
-        if (!found.items[nth]) {
-          results.push({ edit, status: "not_found" });
-          continue;
-        }
-        found.items[nth].insertText(edit.replace, Word.InsertLocation.replace);
+        range.insertText(r.plan.replace, Word.InsertLocation.replace);
         await context.sync();
         results.push({ edit, status: "applied" });
       }
@@ -163,4 +158,22 @@ export async function applyTrackedEdits(edits) {
     }
   });
   return results;
+}
+
+// Resolves an anchor plan to a live Word range, or null. Never writes: the
+// expanded range's text must equal the planned span before the caller may
+// replace it, so a prefix that happens to hit the wrong place fails safe.
+export async function reachPlannedRange(context, doc, plan) {
+  const startHits = doc.body.search(escapeWordSearch(plan.start.text), { matchCase: true });
+  startHits.load("items");
+  const endHits = plan.end ? doc.body.search(escapeWordSearch(plan.end.text), { matchCase: true }) : null;
+  endHits?.load("items");
+  await context.sync();
+  const start = startHits.items[plan.start.ordinal];
+  const end = plan.end ? endHits.items[plan.end.ordinal] : null;
+  if (!start || (plan.end && !end)) return null;
+  const range = end ? start.expandTo(end) : start;
+  range.load("text");
+  await context.sync();
+  return rangeMatchesPlan(range.text, plan) ? range : null;
 }
