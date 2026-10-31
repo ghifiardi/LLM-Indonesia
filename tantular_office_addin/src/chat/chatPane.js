@@ -13,12 +13,14 @@ import {
   insertStructuredTextIntoWord
 } from "../officeClient.js";
 import { actionsForHost } from "../prompts.js";
+import { answerAttachmentStats, attachmentLabel, describeAttachment, mentionsAttachment, retrieveFromAttachment } from "./attachmentQa.js";
+import { splitAttachmentSections, planElaboration, wantsElaboration, elaborateSections } from "./attachmentElaborate.js";
 import { consumeAutoSwitchNote } from "../tantularClient.js";
 
-const CONTEXT_LABELS = { selection: "Seleksi", document: "Dokumen (isi utama)", none: "Tanpa konteks" };
-const CONTEXT_ORDER = [null, "selection", "document", "none"];
+const CONTEXT_LABELS = { selection: "Seleksi", document: "Dokumen (isi utama)", attachment: "Lampiran", none: "Tanpa konteks" };
+const CONTEXT_ORDER = [null, "selection", "document", "attachment", "none"];
 
-export function mountChatPane({ host }) {
+export function mountChatPane({ host, getAttachment = () => null }) {
   const card = document.querySelector("#chat-card");
   if (!card) return;
   // RETURN these promises. The caller in taskpane.js attaches the .catch that
@@ -69,7 +71,9 @@ export function mountChatPane({ host }) {
   });
   els.pill.addEventListener("click", () => {
     const current = state.contextOverride;
-    const next = CONTEXT_ORDER[(CONTEXT_ORDER.indexOf(current) + 1) % CONTEXT_ORDER.length];
+    let next = CONTEXT_ORDER[(CONTEXT_ORDER.indexOf(current) + 1) % CONTEXT_ORDER.length];
+    // The attachment context exists only while a file is attached.
+    if (next === "attachment" && !getAttachment()) next = "none";
     state.contextOverride = next;
     setPill(next);
   });
@@ -97,7 +101,28 @@ export function mountChatPane({ host }) {
   }
 
   function setPill(mode) {
-    els.pill.textContent = `Konteks: ${mode ? CONTEXT_LABELS[mode] : "otomatis"}`;
+    const attachment = mode === "attachment" ? getAttachment() : null;
+    els.pill.textContent = `Konteks: ${mode === "attachment" && attachment
+      ? attachmentLabel(attachment.filename) : mode ? CONTEXT_LABELS[mode] : "otomatis"}`;
+  }
+
+  // Question-driven excerpts from the attachment, labelled so the model and
+  // the user both know they come from the file, with page markers kept.
+  function attachmentContext(attachment, message) {
+    const stats = describeAttachment(attachment);
+    const retrieved = retrieveFromAttachment(attachment.text, message);
+    const head = `[${attachmentLabel(attachment.filename)} — ${stats.pages ? `${stats.pages} halaman, ` : ""}${stats.paragraphs} paragraf; `
+      + `${retrieved.mode === "retrieved" ? "kutipan yang relevan dengan pertanyaan" : "bagian awal dokumen"}. `
+      + "Sebutkan halaman [Page N] bila ada.]";
+    return { text: `${head}\n\n${retrieved.text}` };
+  }
+
+  function attachmentTurn(attachment, message) {
+    const context = { ...attachmentContext(attachment, message), kind: "attachment", label: "attachment", scope: `attachment:${attachment.filename}` };
+    history.setScope(context.scope);
+    const priorMessages = history.toMessages();
+    history.add("user", message);
+    return { kind: "ready", context, priorMessages, usedReferent: false };
   }
 
   function addBubble(cls, text = "") {
@@ -397,8 +422,66 @@ export function mountChatPane({ host }) {
       // "…yang saya pilih…" refers to the live selection; honor it even when
       // the default (or pinned) context is the whole document.
       if (hasSelection && prefersSelectionContext(message)) mode = "selection";
+      // A file attached in the source card is a context of its own. Used when
+      // pinned, or when the message refers to it (2026-09-05: a book PDF was
+      // attached and the chat answered "tidak ditemukan" from the Word body).
+      const attachment = getAttachment();
+      if (attachment && (mode === "attachment" || (state.contextOverride == null && mentionsAttachment(message)))) {
+        mode = "attachment";
+      }
       setPill(mode);
-      const turn = await prepareTurn({
+      if (mode === "attachment") {
+        if (!attachment) {
+          answer.textContent = "Tidak ada file yang dilampirkan. Unggah PDF/DOCX di kartu Sumber dokumen, lalu tanya lagi.";
+          return;
+        }
+        // Elaborate the attachment into the document: section by section,
+        // grounded on each section, bounded, cancellable; then the same
+        // insert buttons every document answer has.
+        history.setScope(`attachment:${attachment.filename}`);
+        if (wantsElaboration(message)) {
+          const sections = splitAttachmentSections(attachment.text);
+          const plan = planElaboration(sections, message);
+          const tag = document.createElement("span");
+          tag.className = "intent-tag";
+          tag.textContent = `ELABORASI · ${attachmentLabel(attachment.filename)}`;
+          answer.replaceChildren(tag);
+          if (plan.scope === "none") {
+            answer.append("Tidak ada bagian lampiran yang cocok dengan permintaan itu. Sebutkan judul bab atau kata kunci yang ada di file, atau minta 'seluruh isi'.");
+            return;
+          }
+          const note = `Menguraikan ${plan.sections.length} bagian${plan.truncated ? ` (dari ${plan.sections.length + plan.truncated}; sisanya bisa diminta berikutnya)` : ""}. Tekan Stop untuk berhenti; hasil yang sudah jadi tetap ditampilkan.`;
+          answer.append(note);
+          const result = await elaborateSections({
+            sections: plan.sections, instruction: message, signal: state.abort.signal,
+            onProgress: (text) => { answer.replaceChildren(tag); answer.append(`${note}\n${text}`); els.messages.scrollTop = els.messages.scrollHeight; }
+          });
+          answer.replaceChildren(tag);
+          renderChatMarkdown(answer, result.text || "(tidak ada hasil)");
+          if (result.aborted) addBubble("assistant", `⏹ Dihentikan setelah ${result.done} bagian; hasil di atas bisa dimasukkan.`);
+          if (result.text) addDocumentAnswerActions(answer, { kind: "text", text: result.text });
+          history.add("user", message);
+          history.add("assistant", `elaborasi ${result.done} bagian lampiran`);
+          return;
+        }
+        // Counts are metadata: computed from the extraction, never asked of
+        // the model.
+        const stats = describeAttachment(attachment);
+        const counted = answerAttachmentStats(message, stats);
+        if (counted) {
+          const tag = document.createElement("span");
+          tag.className = "intent-tag";
+          tag.textContent = `HITUNG · ${attachmentLabel(attachment.filename)}`;
+          answer.replaceChildren(tag);
+          renderChatMarkdown(answer, counted);
+          history.add("user", message);
+          history.add("assistant", counted);
+          return;
+        }
+      }
+      // An attachment turn has no referent to resolve: its context is the
+      // retrieved excerpt, under its own history scope.
+      const turn = mode === "attachment" ? attachmentTurn(attachment, message) : await prepareTurn({
         message,
         mode,
         selectionText: selection.text ?? "",
@@ -420,7 +503,7 @@ export function mountChatPane({ host }) {
       state.referent = null; // one-shot: a referent is never reused later
       const tag = document.createElement("span");
       tag.className = "intent-tag";
-      tag.textContent = `${intent} · ${CONTEXT_LABELS[mode]}`;
+      tag.textContent = `${intent} · ${mode === "attachment" ? attachmentLabel(attachment?.filename) : CONTEXT_LABELS[mode]}`;
       answer.prepend(tag);
       let emitted = 0;
       // A comparative "lebih singkat" on a bounded span is a rewrite, never RINGKAS

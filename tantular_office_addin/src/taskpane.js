@@ -373,7 +373,7 @@ function mountChatForHost() {
   if (!["Word", "Excel", "PowerPoint"].includes(state.host)) return null;
   if (chatMountPromise) return chatMountPromise;
   chatMountPromise = import("./chat/chatPane.js")
-    .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
+    .then(({ mountChatPane }) => mountChatPane({ host: state.host, getAttachment: () => state.attachment || null }))
     // Without this the promise rejects silently and the chat card simply never
     // appears — indistinguishable from "this host has no chat".
     .catch((error) => {
@@ -526,6 +526,12 @@ function bindStaticEvents() {
   els.sourceDocumentInput.addEventListener("change", () => {
     state.extractedDocumentName = null;
     state.documentSelection = null;
+    state.attachment = null;
+    // Extract now, not only when a Studio runs: the chat's attachment context
+    // must exist the moment the file is chosen (2026-09-05).
+    ingestAttachmentForChat().catch((error) => {
+      els.selectionMeta.textContent = `Lampiran belum bisa dibaca: ${error?.message || error}`;
+    });
   });
   els.saveProjectInstructions.addEventListener("click", saveProjectInstructions);
   els.clearProjectInstructions.addEventListener("click", clearProjectInstructions);
@@ -1594,6 +1600,25 @@ function documentPreview(text, chars, selection = null) {
 //
 // The full extracted text is kept in memory only; the textarea gets a short
 // preview, so the pane stays light and a large document is never re-rendered.
+// Eager extraction for the chat: the full text of the chosen file, kept in
+// memory as state.attachment. The studios still run their own bounded
+// selection through ingestUploadedSource below.
+async function ingestAttachmentForChat() {
+  const docFile = els.sourceDocumentInput.files?.[0];
+  if (!docFile) return null;
+  els.selectionMeta.textContent = `Membaca lampiran ${docFile.name}...`;
+  const extractedDoc = await extractDocumentFile(docFile);
+  const text = String(extractedDoc.text || "");
+  state.attachment = {
+    filename: extractedDoc.filename || docFile.name, kind: extractedDoc.kind || "",
+    text, chars: Number(extractedDoc.chars) || text.length
+  };
+  const pages = [...text.matchAll(/^\[Page (\d+)\]\s*$/gm)].map((m) => Number(m[1]));
+  els.selectionMeta.textContent = `Lampiran siap untuk Chat: ${docFile.name} — ${state.attachment.chars.toLocaleString("id-ID")} karakter`
+    + (pages.length ? `, ${Math.max(...pages)} halaman` : "") + ". Tanya di Tantular Chat dengan menyebut \"buku ini\"/\"lampiran\", atau pilih konteks Lampiran.";
+  return state.attachment;
+}
+
 async function ingestUploadedSource({ setProgress, setStatus, extraOcrContext = "" }) {
   const docFile = els.sourceDocumentInput.files?.[0];
   const imageFile = els.sourceImageInput.files?.[0];
@@ -1601,6 +1626,12 @@ async function ingestUploadedSource({ setProgress, setStatus, extraOcrContext = 
   if (docFile && state.extractedDocumentName !== docFile.name) {
     setProgress("Mengekstrak dokumen/PDF...");
     const extractedDoc = await extractDocumentFile(docFile);
+    // The FULL extraction stays available to the chat (attachment context),
+    // separate from the budget-bounded selection the studios use below.
+    state.attachment = {
+      filename: extractedDoc.filename || docFile.name, kind: extractedDoc.kind || "",
+      text: String(extractedDoc.text || ""), chars: Number(extractedDoc.chars) || String(extractedDoc.text || "").length
+    };
 
     // Bound the source explicitly. Handing the whole document downstream used
     // to overflow the model context, and the overflow was discarded in silence
