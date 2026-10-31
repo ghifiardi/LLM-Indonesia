@@ -20,7 +20,7 @@ import {
   parseRangeRef,
   sanitizeSeriesChart
 } from "./excelSeriesChart.js";
-import { sanitizeExcelActions } from "./excelTools.js";
+import { isChartAction, sanitizeExcelActions } from "./excelTools.js";
 
 // --- Success-claim guard ----------------------------------------------------
 
@@ -208,26 +208,104 @@ export function repairChartActions(rawActions, ctx) {
   return { actions, notes, clarify: null };
 }
 
+// --- Distribution requests ---------------------------------------------------
+//
+// "Distribusi Bear D1" is a histogram of one column. The planner used to answer
+// it with a Line chart of that column over the date axis; any chart action in a
+// distribution request is turned into add_histogram on one value column, or a
+// question when several columns are planned and the request names none.
+
+const DISTRIBUTION_RE = /(?<![\p{L}\p{N}])(distribusi(?:nya)?|sebaran(?:nya)?|histogram|distribution|frekuensi)(?![\p{L}\p{N}])/iu;
+const normName = (text) => String(text || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+export function isDistributionRequest(request) {
+  return DISTRIBUTION_RE.test(String(request || ""));
+}
+
+// The value columns a chart action plots: [{ name, values, sheet }].
+function plottedColumns(action, ctx) {
+  const header = (letter) => ctx?.columnMap?.columns?.find((c) => c.column === letter)?.header || "";
+  if (action.op === "add_series_chart") {
+    return (action.series || []).map((s) => ({ name: String(s?.name || "").trim(), values: s?.values ?? s?.range, sheet: action.sheet }));
+  }
+  const ref = parseRangeRef(action.dataAddress || action.address);
+  if (!ref) return [];
+  return Array.from({ length: ref.c2 - ref.c1 + 1 }, (_, i) => {
+    const letter = colName(ref.c1 + i);
+    return { name: header(letter) || `Kolom ${letter}`, values: `${letter}${ref.r1}:${letter}${ref.r2}`, sheet: action.sheet || ref.sheet };
+  });
+}
+
+export function distributionCharts(actions, request, ctx) {
+  if (!Array.isArray(actions) || !isDistributionRequest(request)) return { actions, notes: [], clarify: null };
+  const wanted = normName(request);
+  const out = [];
+  const notes = [];
+  for (const action of actions) {
+    if (!["add_chart", "add_series_chart"].includes(action?.op)) { out.push(action); continue; }
+    const columns = plottedColumns(action, ctx).filter((c) => c.values);
+    let pick = columns.length === 1 ? columns[0] : null;
+    if (!pick) {
+      const named = columns.filter((c) => c.name && ` ${wanted} `.includes(` ${normName(c.name)} `));
+      if (named.length === 1) pick = named[0];
+    }
+    if (!pick) {
+      return {
+        actions,
+        notes: [],
+        clarify: {
+          question: "Histogram menggambarkan distribusi SATU kolom. Kolom mana yang ingin dilihat distribusinya?",
+          options: columns.map((c) => c.name).filter(Boolean).slice(0, 6)
+        }
+      };
+    }
+    out.push({ op: "add_histogram", sheet: pick.sheet || action.sheet || "", title: action.title || `Distribusi ${pick.name}`, name: pick.name, values: pick.values });
+    if (action.op !== "add_histogram") notes.push(`Permintaan distribusi dibuat sebagai histogram "${pick.name}", bukan chart ${action.type || "garis"} dari waktu ke waktu.`);
+  }
+  return { actions: out, notes, clarify: null };
+}
+
+// The chat's explanation of a chart plan, written from the validated actions
+// (never from the model's prose, which once said "D1–D5 as series" for a plan
+// that plotted only D1).
+export function describeChartPlan(actions) {
+  const lines = actions.filter(isChartAction).map((a) => {
+    const sheet = a.sheet ? ` di sheet "${a.sheet}"` : "";
+    if (a.op === "add_histogram") return `Rencana: histogram distribusi "${a.name}" dari ${a.values}${sheet}.`;
+    if (a.op === "add_series_chart") {
+      return `Rencana: chart ${a.type}${sheet} — sumbu X ${a.categories}; ${a.series.length} seri: ${a.series.map((s) => `${s.name} (${s.values})`).join(", ")}.`;
+    }
+    return `Rencana: chart ${a.type} dari ${a.dataAddress}${sheet}.`;
+  });
+  if (lines.length) lines.push("Baris dan nilainya dibaca ulang dan ditampilkan di pratinjau di bawah; workbook belum diubah.");
+  return lines.join("\n");
+}
+
 // --- The whole turn ----------------------------------------------------------
 
 // { kind: "act", actions, rejected, notes, text } or
 // { kind: "clarify", question, options, text }. `text` is the only thing the
 // chat may display, speak or remember for this turn.
-export function interpretPlan(parsed, ctx) {
+// `request` is the user's request for this turn (distribution detection).
+export function interpretPlan(parsed, ctx, request = "") {
   let plan = resolvePlan(parsed);
   if (plan.kind === "act") {
     const repair = repairChartActions(plan.actions, ctx);
-    if (!repair.clarify) {
-      const { actions, rejected } = sanitizeExcelActions(repair.actions);
+    const distribution = repair.clarify ? null : distributionCharts(repair.actions, request, ctx);
+    const clarify = repair.clarify || distribution.clarify;
+    if (!clarify) {
+      const { actions, rejected } = sanitizeExcelActions(distribution.actions);
+      const notes = [...repair.notes, ...distribution.notes];
+      const chartText = describeChartPlan(actions);
       return {
         kind: "act",
         actions,
         rejected,
-        notes: repair.notes,
-        text: composePlanAnswer({ reply: parsed?.reply, changesPending: actions.length > 0, rejectedCount: rejected.length, notes: repair.notes })
+        notes,
+        text: composePlanAnswer({ reply: chartText || parsed?.reply, changesPending: actions.length > 0, rejectedCount: rejected.length, notes })
       };
     }
-    plan = { kind: "clarify", ...repair.clarify };
+    plan = { kind: "clarify", ...clarify };
   }
   const reply = stripChangeClaims(parsed?.reply).text;
   return {

@@ -101,8 +101,12 @@ export function approvalDialogModel(disclosure) {
   return {
     title: "Setujui pencarian web?",
     host,
+    provider: String(disclosure?.provider || ""),
     query,
-    warning: `Teks berikut akan dikirim ke ${host} dan keluar dari komputer Anda.`,
+    warning: [
+      `Teks berikut akan dikirim ke ${host} dan keluar dari komputer Anda.`,
+      String(disclosure?.warning || "").trim()
+    ].filter(Boolean).join(" "),
     // Shown so a user can see at a glance whether the model smuggled document
     // content into the query.
     chars: query.length,

@@ -3,7 +3,7 @@ export const EDIT_SYSTEM_PROMPT = [
   "Anda editor dokumen Bahasa Indonesia yang teliti.",
   "Balas HANYA JSON valid dengan bentuk:",
   '{"edits":[{"find":"<teks persis dari dokumen>","replace":"<teks baru>","before":"<±40 karakter sebelum find>","after":"<±40 karakter sesudah find>","occurrence":1,"alasan":"<alasan singkat>"}]}',
-  "Aturan: find harus persis sama dengan teks di dokumen (maksimal 200 karakter);",
+  "Aturan: find harus persis sama dengan teks di dokumen (maksimal 2000 karakter);",
   "gunakan before/after untuk membedakan teks yang berulang; maksimal 20 edit;",
   "Untuk permintaan elaborasi/perluasan bagian: pilih satu kalimat pendek yang persis ada sebagai find, lalu replace dengan 2-4 paragraf siap pakai (gunakan baris kosong antarparagraf) yang mempertahankan ide asli dan menambahkan definisi, trade-off, implikasi, serta kriteria pemilihan yang konsisten dengan konteks;",
   "Jangan hanya menambah satu klausa. Elaborasi harus substantif tetapi tetap ringkas, sekitar 120-250 kata bila pengguna meminta greater detail;",
@@ -13,7 +13,14 @@ export const EDIT_SYSTEM_PROMPT = [
 ].join(" ");
 
 const MAX_EDITS = 20;
-const MAX_FIND = 200;
+// Raised from 200 to 2000 at the user's explicit request, after being told
+// the tradeoff: the exact-match requirement below is unchanged, so a longer
+// "find" is not less safe in the sense of matching the WRONG text — it just
+// gets harder for the model to reproduce byte-for-byte over a longer span,
+// which fails safe as locateEdit's "not_found" (surfaced, never a silent
+// wrong replacement), not a corrupted document. 2000 chars fits whole
+// long-sentence/paragraph edits in one shot for prose like academic writing.
+const MAX_FIND = 2000;
 
 export function parseEditContract(raw) {
   const text = String(raw ?? "");
@@ -29,21 +36,37 @@ export function parseEditContract(raw) {
   const edits = parsed?.edits;
   if (!Array.isArray(edits) || edits.length === 0) throw new Error("Tidak ada edit yang diusulkan.");
   if (edits.length > MAX_EDITS) throw new Error(`Terlalu banyak edit (${edits.length}); maksimal ${MAX_EDITS}.`);
-  return {
-    edits: edits.map((e, i) => {
-      const find = String(e?.find ?? "");
-      const replace = String(e?.replace ?? "");
-      if (!find) throw new Error(`Edit #${i + 1} tidak punya "find".`);
-      if (find.length > MAX_FIND) throw new Error(`Edit #${i + 1}: "find" terlalu panjang (maksimal ${MAX_FIND} karakter).`);
-      const occurrence = Number.isInteger(e?.occurrence) && e.occurrence >= 1 ? e.occurrence : 1;
-      return {
-        find, replace, occurrence,
-        before: typeof e?.before === "string" ? e.before : "",
-        after: typeof e?.after === "string" ? e.after : "",
-        alasan: typeof e?.alasan === "string" ? e.alasan : ""
-      };
-    })
-  };
+
+  // One malformed item must not discard an otherwise-good batch. A weaker
+  // local model asked for many edits at once (a large selection) is more
+  // likely to slip on ONE item — e.g. leaving out "find" — while the rest of
+  // the JSON is fine. Throwing away all of them on that single miss is what
+  // previously turned "9 good edits, 1 bad" into "0 edits, try again", which
+  // for a slow local model can mean burning another 90-second timeout instead
+  // of just proceeding with what parsed correctly.
+  const good = [];
+  const skipped = [];
+  edits.forEach((e, i) => {
+    const find = String(e?.find ?? "");
+    const replace = String(e?.replace ?? "");
+    if (!find) return skipped.push({ index: i + 1, reason: `tidak punya "find"` });
+    if (find.length > MAX_FIND) {
+      return skipped.push({ index: i + 1, reason: `"find" terlalu panjang (maksimal ${MAX_FIND} karakter)` });
+    }
+    const occurrence = Number.isInteger(e?.occurrence) && e.occurrence >= 1 ? e.occurrence : 1;
+    good.push({
+      find, replace, occurrence,
+      before: typeof e?.before === "string" ? e.before : "",
+      after: typeof e?.after === "string" ? e.after : "",
+      alasan: typeof e?.alasan === "string" ? e.alasan : ""
+    });
+  });
+  // All-bad is still a real failure — there is nothing useful to show, and
+  // the earlier per-item error text explained why better than a generic one.
+  if (good.length === 0) {
+    throw new Error(`Semua ${edits.length} edit tidak valid: ${skipped.map((s) => `#${s.index} ${s.reason}`).join("; ")}.`);
+  }
+  return { edits: good, skipped };
 }
 
 function allIndexesOf(haystack, needle) {

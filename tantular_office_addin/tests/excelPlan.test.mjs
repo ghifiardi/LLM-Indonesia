@@ -236,7 +236,7 @@ test("a question from the model has its reply guarded too", () => {
 test("Excel chat displays, speaks and remembers only the guarded text", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const chat = fs.readFileSync(path.join(root, "src/chat/excelChat.js"), "utf8");
-  assert.match(chat, /interpretPlan\(parsed, ctx\)/);
+  assert.match(chat, /interpretPlan\(parsed, ctx, turn\.request\)/);
   // The raw model reply never reaches the bubble, the voice output or history.
   assert.equal(chat.split("parsed.reply").length - 1, 1, "parsed.reply is only checked for type");
   assert.match(chat, /typeof parsed\.reply !== "string"/);

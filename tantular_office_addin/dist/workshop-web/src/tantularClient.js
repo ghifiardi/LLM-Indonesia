@@ -16,7 +16,15 @@ import {
 function defaultEndpoint() {
   return companionUrl("/api/chat-completions");
 }
-const DEFAULT_MODEL = "qwen3.5:9b";
+// Chat defaults to the Tantular profile, like Studio does. This was
+// "qwen3.5:9b" — the raw base model, carrying none of the Tantular system
+// prompt — so every fresh install answered as stock Qwen while the product
+// said Tantular, and on a machine without that base model pulled it failed
+// outright with Ollama's "model 'qwen3.5:9b' not found".
+const DEFAULT_MODEL = "tantular-office:0.5-9b";
+// Used when the Tantular profile is not installed on this machine. Studio has
+// always had this; chat did not, so a missing model surfaced as a raw 404.
+const CHAT_MODEL_FALLBACK = "qwen3.5:9b";
 // Q8_0 profile, published as ghifidanukusumo/tantular:latest and installed
 // under this alias. The 0.4 alias was Q4_K_M, which scores 37/40 on the voice
 // gate against a 0.95 bar; Q8 scores 38/40 and matches bf16. Existing installs
@@ -33,6 +41,9 @@ const LOCAL_COMPANION_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost):3000\//i;
 const RETIRED_MODEL_DEFAULTS = new Map([
   ["tantular-office:0.3-8b", DEFAULT_DECK_MODEL],
   ["qwen3:8b", DEFAULT_MODEL],
+  // The previous chat default. Nobody picked stock Qwen for a Tantular
+  // product on purpose; it was simply what shipped.
+  ["qwen3.5:9b", DEFAULT_MODEL],
   // Old low-RAM quick-fix value: keep those machines on the lite alias, never
   // auto-upgrade them to a 9B they can't run.
   ["qwen3:4b", "tantular-office:lite"]
@@ -175,6 +186,24 @@ export function consumeAutoSwitchNote() {
   return note;
 }
 
+// Real Ollama inference timing from the MOST RECENT non-streaming call —
+// token counts and durations only, never prompt/response text (see
+// ollamaBridge.js's ollamaInferenceMetrics). One-shot, same idiom as
+// consumeAutoSwitchNote above: a consumer (a future benchmarking pass, a
+// diagnostics panel) reads it once per call it cares about, rather than this
+// module accumulating history no one asked it to keep. callChat clears this
+// to null on ANY non-streaming response that carries no tantular_metrics —
+// including a Cloud Mode/portal response — so a prior local call's numbers
+// can never survive to be mistaken for a later, metrics-less call's own
+// result. A streaming call (runTantularStream) does not go through callChat
+// at all and never touches this slot either way.
+let lastInferenceMetrics = null;
+export function consumeLastInferenceMetrics() {
+  const metrics = lastInferenceMetrics;
+  lastInferenceMetrics = null;
+  return metrics;
+}
+
 async function findInstalledLiteModel(excludeModel) {
   try {
     const names = await listLocalModels();
@@ -191,8 +220,33 @@ export async function runTantular({
   temperature = 0.1,
   signal,
   task = "general",
-  jsonMode = false
+  jsonMode = false,
+  jsonSchema = null,
+  // Metrics belong to THIS invocation specifically. The module-level slot
+  // below (consumeLastInferenceMetrics) is a convenience for a single
+  // in-flight call; two overlapping runTantular calls would otherwise race
+  // to overwrite each other's metrics in that one slot. Pass onMetrics when
+  // the caller needs to be sure it got its own results.
+  onMetrics,
+  // 2026-08-31: a benchmark/gate that explicitly asked for Q8 must never
+  // silently answer from Lite instead and call that a passing sample — a
+  // 10-run reliability gate did exactly that (one row auto-downgraded mid-run
+  // and inflated its own wall-clock past 15 minutes). Real interactive usage
+  // still wants the downgrade-and-persist kindness, so the default preserves
+  // that: only a caller that explicitly opts out (benchmarks, gates) changes
+  // this.
+  //   "timeout-and-missing" (default) — current behavior: downgrade to Lite
+  //     on either a Studio timeout or a missing-model error, and persist it.
+  //   "missing-model-only" — downgrade only when the configured model was
+  //     never installed at all; a timeout is reported as a timeout.
+  //   "none" — never downgrade or persist a different model; every failure
+  //     (including a timeout) is reported as-is to the caller.
+  modelFallbackPolicy = "timeout-and-missing"
 }) {
+  // One-shot, cleared up front: a request that fails or gets cancelled
+  // before ever reaching a response must not leave a PRIOR call's metrics
+  // sitting in the slot for the next consumer to mistake for its own.
+  lastInferenceMetrics = null;
   const settings = loadSettings();
   const usesOfficeModel = task === "deck" || task === "document" || task === "workbook";
   const model = usesOfficeModel ? settings.deckModel : settings.model;
@@ -209,24 +263,58 @@ export async function runTantular({
     // Studio planning uses a larger local model (9B) plus long JSON output and can
     // cold-start slowly, so give it a much larger budget than short chat calls.
     // 8 minutes accommodates slow CPU-only laptops (~5-8 tok/s) on compact plans.
-    timeoutMs: usesOfficeModel ? 480_000 : 90_000,
+    //
+    // task "edit" (EDIT_TEKS, e.g. "Perbaiki bahasa" on a large selection)
+    // stays on the small/fast chat model even on constrained machines — that
+    // is the point of "lite" — but it still has to produce one JSON edit per
+    // sentence in the selection, so a big selection is long structured output
+    // on possibly slow hardware, same shape of problem as Studio, just with a
+    // faster model. 90s was measured too short for that combination even on
+    // a capable machine; give it real headroom without going all the way to
+    // Studio's 8 minutes, since "lite" is chosen specifically to be fast.
+    timeoutMs: usesOfficeModel ? 480_000 : task === "edit" ? 240_000 : 90_000,
     signal,
-    fallbackModel: usesOfficeModel && model === DEFAULT_DECK_MODEL ? DECK_MODEL_FALLBACK : "",
-    jsonMode
+    fallbackModel: model === (usesOfficeModel ? DEFAULT_DECK_MODEL : DEFAULT_MODEL)
+      ? (usesOfficeModel ? DECK_MODEL_FALLBACK : CHAT_MODEL_FALLBACK)
+      : "",
+    jsonMode,
+    jsonSchema,
+    onMetrics
   };
   try {
     return await callChat(request);
   } catch (error) {
-    // Auto-downgrade: a timeout on a Studio task usually means the machine
-    // cannot hold the model in RAM. Retry once with an installed lighter
-    // model and persist it so every later call is fast too.
-    const timedOut = /terlalu lama/i.test(String(error?.message || ""));
-    if (!usesOfficeModel || !timedOut || signal?.aborted) throw error;
+    // Auto-downgrade, two triggers:
+    // - A timeout on a Studio task usually means the machine cannot hold that
+    //   model in RAM.
+    // - "model not found" means the configured model was never installed
+    //   here at all — settings pointing at a default that a RAM-constrained
+    //   install never pulled (that install only builds "lite"), a settings
+    //   reset (e.g. cleared site data), or a fresh profile. This used to be
+    //   a dead end for chat/edit tasks: request.fallbackModel retries with
+    //   qwen3.5:9b, but a machine that only ever installed "lite" doesn't
+    //   have THAT either, so the fallback 404s too and the raw error reached
+    //   the user with no way to recover short of manually reconfiguring.
+    // Either way: retry once with whatever Tantular model IS actually
+    // installed, and persist it so every later call already has it right.
+    const message = String(error?.message || "");
+    const timedOut = /terlalu lama/i.test(message);
+    const missingModel = /not found|no such model|try pulling/i.test(message);
+    const allowMissingFallback = modelFallbackPolicy !== "none" && missingModel;
+    const allowTimeoutFallback = modelFallbackPolicy === "timeout-and-missing" && usesOfficeModel && timedOut;
+    if (signal?.aborted || !(allowMissingFallback || allowTimeoutFallback)) throw error;
     const lite = await findInstalledLiteModel(model);
     if (!lite) throw error;
     const text = await callChat({ ...request, model: lite, fallbackModel: "" });
-    saveSettings({ deckModel: lite });
-    autoSwitchNote = `Model "${model}" terlalu lambat di perangkat ini; otomatis beralih ke "${lite}" dan disimpan sebagai Model Studio.`;
+    if (usesOfficeModel) {
+      saveSettings({ deckModel: lite });
+      autoSwitchNote = missingModel
+        ? `Model "${model}" tidak ditemukan di perangkat ini; otomatis beralih ke "${lite}" dan disimpan sebagai Model Studio.`
+        : `Model "${model}" terlalu lambat di perangkat ini; otomatis beralih ke "${lite}" dan disimpan sebagai Model Studio.`;
+    } else {
+      saveSettings({ model: lite });
+      autoSwitchNote = `Model "${model}" tidak ditemukan di perangkat ini; otomatis beralih ke "${lite}" dan disimpan sebagai Model umum/chat.`;
+    }
     console.warn(`[Tantular] ${autoSwitchNote}`);
     return text;
   }
@@ -295,6 +383,12 @@ function applyReasoningOff(body, model) {
   return body;
 }
 
+// jsonModeState is a downgrade chain, not a boolean: "schema" (a real JSON
+// Schema enforced by the server's own grammar — Ollama's /api/chat "format"
+// field accepts a full schema object, not just the string "json") falls back
+// to "object" (ask-for-valid-JSON only) if the endpoint rejects json_schema,
+// which in turn falls back to no JSON mode at all if THAT is rejected too.
+// See fetchChatCompletion for where each downgrade actually happens.
 function buildChatRequestBody({
   model,
   messages,
@@ -302,12 +396,55 @@ function buildChatRequestBody({
   maxTokens,
   stream,
   includeReasoning,
-  includeJsonMode
+  jsonModeState,
+  jsonSchema
 }) {
   const body = { model, messages, temperature, max_tokens: maxTokens, stream };
   if (includeReasoning) applyReasoningOff(body, model);
-  if (includeJsonMode) body.response_format = { type: "json_object" };
+  if (jsonModeState === "schema" && jsonSchema) {
+    body.response_format = { type: "json_schema", json_schema: { name: "tantular_document", strict: true, schema: jsonSchema } };
+  } else if (jsonModeState === "object") {
+    body.response_format = { type: "json_object" };
+  }
   return body;
+}
+
+function structuredModeLabel(mode) {
+  if (mode === "schema") return "schema";
+  if (mode === "object") return "json_object";
+  return "none";
+}
+
+// 2026-08-31 telemetry follow-up: an earlier reliability gate ran against a
+// stale Companion process that silently answered with plain json_object
+// instead of the schema it was asked for — nothing in the client-visible
+// result said so. serverReportedMode (tantular_structured_mode, echoed by
+// dev-server.mjs from the SAME native.format value it actually sent) is the
+// ground truth when present; the client's own requestedMode/usedMode tracking
+// is the fallback for a hosted gateway that doesn't run this Companion.
+// Returns {} for a call that never asked for structured output at all, so a
+// plain chat call's metrics shape is unaffected.
+function structuredModeTelemetry({ requestedMode, usedMode, downgradeReason, maxTokens, completionTokens, finishReason, serverReportedMode }) {
+  if (!requestedMode) return {};
+  const structuredModeRequested = structuredModeLabel(requestedMode);
+  const structuredModeUsed = serverReportedMode || structuredModeLabel(usedMode);
+  return {
+    structuredModeRequested,
+    structuredModeUsed,
+    // "server" means the Companion itself echoed back the native.format it
+    // actually sent (tantular_structured_mode) — the ground truth. Without
+    // that echo (a hosted gateway that isn't this Companion), the client
+    // only knows which attempt got a 2xx response, which is real but weaker
+    // evidence — a reliability gate must not treat the two as equivalent.
+    structuredModeEvidence: serverReportedMode ? "server" : "client_inferred",
+    structuredModeDowngraded: structuredModeRequested !== structuredModeUsed,
+    structuredDowngradeReason: downgradeReason,
+    finishReason,
+    requestedMaxTokens: Number.isFinite(maxTokens) ? maxTokens : null,
+    nearTokenCap: Number.isFinite(completionTokens) && Number.isFinite(maxTokens)
+      ? completionTokens >= maxTokens - 50
+      : false
+  };
 }
 
 function looksLikeReasoningRejection(status, bodyText) {
@@ -335,7 +472,7 @@ export function buildChatHeaders(endpoint, apiKey) {
 }
 
 async function fetchChatCompletion(endpoint, signal, bodyParams, apiKey = "") {
-  const attempt = async (includeReasoning, includeJsonMode) => {
+  const attempt = async (includeReasoning, jsonModeState) => {
     const response = await fetch(endpoint, {
       method: "POST",
       signal,
@@ -343,7 +480,7 @@ async function fetchChatCompletion(endpoint, signal, bodyParams, apiKey = "") {
       body: JSON.stringify(buildChatRequestBody({
         ...bodyParams,
         includeReasoning,
-        includeJsonMode
+        jsonModeState
       }))
     });
     if (response.ok) return { response, errorText: null };
@@ -352,22 +489,42 @@ async function fetchChatCompletion(endpoint, signal, bodyParams, apiKey = "") {
   };
 
   let includeReasoning = true;
-  let includeJsonMode = Boolean(bodyParams.jsonMode);
-  let result = await attempt(includeReasoning, includeJsonMode);
-  for (let retries = 0; !result.response.ok && retries < 2; retries += 1) {
+  // Start at the strongest mode actually requested: a caller that passed
+  // jsonSchema wants schema enforcement, not just "json_object" — silently
+  // starting one rung down would hide the whole point of passing a schema.
+  const requestedMode = bodyParams.jsonSchema ? "schema" : (bodyParams.jsonMode ? "object" : false);
+  let jsonModeState = requestedMode;
+  let downgradeReason = null;
+  let result = await attempt(includeReasoning, jsonModeState);
+  // Up to 3 downgrade steps: drop reasoning_effort, then schema -> object,
+  // then object -> no JSON mode. Each is independent — a server can reject
+  // reasoning control without rejecting json_schema, or vice versa — so this
+  // must try each remaining rung in turn rather than assume one retry covers
+  // everything network before a schema retry.
+  for (let retries = 0; !result.response.ok && retries < 3; retries += 1) {
     if (includeReasoning && looksLikeReasoningRejection(result.response.status, result.errorText)) {
       includeReasoning = false;
-      result = await attempt(includeReasoning, includeJsonMode);
+      result = await attempt(includeReasoning, jsonModeState);
       continue;
     }
-    if (includeJsonMode && looksLikeJsonModeRejection(result.response.status, result.errorText)) {
-      includeJsonMode = false;
-      result = await attempt(includeReasoning, includeJsonMode);
+    if (jsonModeState === "schema" && looksLikeJsonModeRejection(result.response.status, result.errorText)) {
+      jsonModeState = "object";
+      downgradeReason = "schema_rejected_by_endpoint";
+      result = await attempt(includeReasoning, jsonModeState);
+      continue;
+    }
+    if (jsonModeState === "object" && looksLikeJsonModeRejection(result.response.status, result.errorText)) {
+      jsonModeState = false;
+      downgradeReason = "json_object_rejected_by_endpoint";
+      result = await attempt(includeReasoning, jsonModeState);
       continue;
     }
     break;
   }
-  return result;
+  // Reported alongside the response so callChat can build client-side
+  // structured-mode telemetry even when the server (a hosted gateway, not
+  // the local Companion) never echoes tantular_structured_mode back.
+  return { ...result, requestedMode, usedMode: jsonModeState, downgradeReason };
 }
 
 async function callChat({
@@ -381,7 +538,9 @@ async function callChat({
   signal,
   fallbackModel = "",
   jsonMode = false,
-  apiKey = ""
+  jsonSchema = null,
+  apiKey = "",
+  onMetrics
 }) {
   const controller = new AbortController();
   if (signal) {
@@ -390,8 +549,8 @@ async function callChat({
   }
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const { response, errorText } = await fetchChatCompletion(endpoint, controller.signal, {
-      model, messages, temperature, maxTokens, stream: false, jsonMode
+    const { response, errorText, requestedMode, usedMode, downgradeReason } = await fetchChatCompletion(endpoint, controller.signal, {
+      model, messages, temperature, maxTokens, stream: false, jsonMode, jsonSchema
     }, apiKey);
 
     if (!response.ok) {
@@ -407,7 +566,9 @@ async function callChat({
           visionModelName,
           signal,
           jsonMode,
-          apiKey
+          jsonSchema,
+          apiKey,
+          onMetrics
         });
       }
       if (visionModelName && (response.status === 404 || /not found|no such model|try pulling/i.test(body))) {
@@ -417,6 +578,29 @@ async function callChat({
     }
 
     const data = await response.json();
+    // Always assigned, never left as-is: a response with no metrics (Cloud
+    // Mode/portal, or a local reply that genuinely carried none) must
+    // overwrite any PRIOR call's leftover value with null, not silently
+    // keep it — see runTantular's own clear-on-entry for the complementary
+    // half (a request that fails before ever reaching this line).
+    //
+    // model here is what the REQUEST asked for; data.model is what the
+    // SERVER says actually answered (Ollama's own response echoes the model
+    // it ran, via ollamaBridge.js's parseOllamaResponse). A consumer that
+    // wants to know what really produced this answer — a fallback/alias
+    // resolution on the server side, or a benchmark comparing requested vs.
+    // actual model — needs the latter, not the former.
+    const responseModel = String(data?.model || model);
+    const metrics = data?.tantular_metrics
+      ? { model: responseModel, ...data.tantular_metrics, ...structuredModeTelemetry({
+        requestedMode, usedMode, downgradeReason, maxTokens,
+        completionTokens: data.tantular_metrics.completionTokens,
+        finishReason: data?.choices?.[0]?.finish_reason ?? null,
+        serverReportedMode: data?.tantular_structured_mode ?? null
+      }) }
+      : null;
+    lastInferenceMetrics = metrics;
+    if (onMetrics) onMetrics(metrics);
     const content = data?.choices?.[0]?.message?.content ?? data?.message?.content ?? data?.response;
     if (!content || !String(content).trim()) {
       throw new Error("Model tidak mengembalikan teks.");
@@ -445,7 +629,9 @@ async function callChat({
         visionModelName,
         signal,
         fallbackModel,
-        jsonMode
+        jsonMode,
+        jsonSchema,
+        onMetrics
       });
     }
     if (isNetworkLoadFailure(error)) {

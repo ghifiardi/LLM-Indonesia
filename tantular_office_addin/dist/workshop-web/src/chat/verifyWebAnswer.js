@@ -69,7 +69,10 @@ const COMMON_NOUNS = new Set([
   "pengguna", "sumber", "status", "target", "capaian", "penyerapan"
 ]);
 
-const NUMBER_RE = /(?:Rp\s*)?\d[\d.,]*\s*(?:%|persen|kwh|kg|km|jam|hari|bulan|tahun|orang|unit|lembar|buah)?/gi;
+// Currency PREFIXES are part of the fact. Before USD was recognised,
+// "USD 1.750.000.000" extracted as a bare number and matched the document's
+// bare "1750000000" — a currency rewrite the checks could not see.
+const NUMBER_RE = /(?:(?:Rp|IDR|USD|EUR|SGD|US\$|\$)\s*)?\d[\d.,]*\s*(?:%|persen|kwh|kg|km|jam|hari|bulan|tahun|orang|unit|lembar|buah)?/gi;
 const DATE_RE = new RegExp(`\\b(\\d{1,2})\\s+(${MONTHS.join("|")})\\s*(\\d{4})?\\b`, "gi");
 // Two or more capitalised words in a row, or a single ALL-CAPS token.
 const ENTITY_RE = /\b(?:[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+|[A-Z]{2,})\b/g;
@@ -88,7 +91,14 @@ function numbers(text) {
   const out = new Set();
   for (const m of String(text || "").matchAll(NUMBER_RE)) {
     const raw = m[0].trim();
-    if (/\d/.test(raw)) out.add(normaliseNumber(raw));
+    if (!/\d/.test(raw)) continue;
+    const fact = normaliseNumber(raw);
+    // "Slide 3", "Poin 6", list indices: a bare one- or two-digit integer
+    // with no unit is structure, not a fact worth policing. Real quantities
+    // carry units or magnitude. (Real-Excel acceptance, 2026-08-25.)
+    const [digits, unit] = fact.split("|");
+    if (!unit && digits.length <= 2) continue;
+    out.add(fact);
   }
   return out;
 }
@@ -103,8 +113,16 @@ function dates(text) {
 
 function entities(text) {
   const out = new Set();
-  for (const sentence of String(text || "").split(/(?<=[.!?:\n])\s+/)) {
-    const stripped = sentence.trim();
+  // "**Kekurangan Data:**" is a heading the model invented to STRUCTURE its
+  // answer, not a fact it asserted — yet the colon made it its own segment and
+  // it read as an organisation (real-Excel acceptance, 2026-08-25). Bold
+  // labels ending in a colon are dropped wholesale; their VALUES survive on
+  // their own lines.
+  const cleaned = String(text || "").replace(/\*\*([^*\n]{2,60}):\*\*/g, "");
+  for (const sentence of cleaned.split(/(?<=[.!?:\n])\s+/)) {
+    // Leading Markdown decoration hides sentence-initial position from the
+    // checks below ("**Data" does not start with "Data").
+    const stripped = sentence.trim().replace(/^[\s*_#>•-]+/, "");
     if (!stripped) continue;
     for (const m of stripped.matchAll(ENTITY_RE)) {
       const token = m[0].trim();
@@ -137,12 +155,51 @@ export function extractFacts(text) {
   return { numbers: numbers(text), dates: dates(text), entities: entities(text) };
 }
 
+// An Excel cell holds "1750000000"; the model naturally writes "Rp
+// 1.750.000.000". Same fact, two spellings — flagging it blocked a correct
+// answer in real-Excel acceptance (2026-08-25). Rp/IDR are the ambient
+// currency here, so they are equivalent to the bare form; FOREIGN currencies
+// stay distinct because rewriting Rp as USD is a real distortion.
+const AMBIENT_CURRENCY = new Set(["", "rp", "idr"]);
+
+function sameNumberDifferentMarker(fact, srcSet) {
+  const [digits, unit] = String(fact).split("|");
+  if (!AMBIENT_CURRENCY.has(unit)) return false;
+  return [...AMBIENT_CURRENCY].some((u) => srcSet.has(`${digits}|${u}`));
+}
+
+// The strict entity rules exist to keep the ANSWER side from tripping over
+// headings and sentence capitals. Applying them to the SOURCE side shrinks
+// the permitted set instead: "OJK mulai mengawasi..." opens a sentence, so
+// strict extraction dropped OJK from the page — and then a benign answer
+// citing OJK was "inventing" it (real-Excel acceptance, 2026-08-25). The
+// source is document ∪ page, which no_new_facts permits WHOLESALE by design,
+// so source extraction is liberal: every capitalised match, no pruning, plus
+// substring containment so "Sinar Mas" matches a source's "PT Sinar Mas".
+function liberalEntities(text) {
+  const out = new Set();
+  for (const m of String(text || "").matchAll(ENTITY_RE)) {
+    out.add(m[0].trim().toLowerCase());
+  }
+  return out;
+}
+
 export function newFacts(output, source) {
   const src = extractFacts(source);
   const out = extractFacts(output);
+  const permittedEntities = new Set([...src.entities, ...liberalEntities(source)]);
+  const entityPermitted = (f) =>
+    permittedEntities.has(f) || [...permittedEntities].some((s) => s.includes(f));
   const found = {};
   for (const kind of ["numbers", "dates", "entities"]) {
-    const introduced = [...out[kind]].filter((f) => !src[kind].has(f)).sort();
+    let introduced = [...out[kind]].filter((f) => !src[kind].has(f));
+    if (kind === "numbers") {
+      introduced = introduced.filter((f) => !sameNumberDifferentMarker(f, src.numbers));
+    }
+    if (kind === "entities") {
+      introduced = introduced.filter((f) => !entityPermitted(f));
+    }
+    introduced.sort();
     if (introduced.length) found[kind] = introduced;
   }
   return found;
@@ -192,8 +249,15 @@ export function checkUntrustedEcho(answer, document, untrusted, window = 60, min
   // That still lets hostile page content reach the pane. Look only inside
   // instruction-like segments, then block distinctive literals from those
   // segments when they are absent from the user's document.
+  // Injection-shaped phrases ONLY. The first list included "sebagai",
+  // "mulai", "sistem" and "tulis" — words present in nearly every paragraph
+  // of encyclopedic Indonesian, which made most of a REAL page count as
+  // instructions and turned every entity cited from it into a forbidden
+  // literal (real-Excel acceptance, 2026-08-25: "BEI"/"OJK" blocked a benign
+  // answer). Facts from the page are explicitly permitted by no_new_facts;
+  // this rule exists for imperative payloads, so its cues must be imperative.
   const instructionCue =
-    /\b(?:abaikan|awali|ganti|ubah|replace|keluarkan|salin|sertakan|tulis(?:kan)?|mulai|instruksi|perintah|sistem|diam-diam|roleplay|sebagai)\b/i;
+    /\b(?:abaikan|awali|ganti(?:lah)?|ubah(?:lah)?|replace|keluarkan|salin|sertakan|instruksi|perintah|diam-diam|roleplay|mulai sekarang|kamu adalah|jangan sebutkan|tulis ulang)\b/i;
   const literals = new Set();
   for (const segment of untrustedText.split(/\n+|(?<=[.!?])\s+/)) {
     if (!instructionCue.test(segment)) continue;
@@ -206,7 +270,17 @@ export function checkUntrustedEcho(answer, document, untrusted, window = 60, min
     for (const pattern of patterns) {
       for (const match of segment.matchAll(pattern)) {
         const literal = String(match[1] || match[0]).trim();
-        if (literal.length >= 3) literals.add(literal);
+        if (literal.length < 3) continue;
+        // A literal is only evidence if it is DISTINCTIVE. "DATA" in caps is
+        // ordinary vocabulary and matched every answer containing the word
+        // "data" (real-Excel acceptance, 2026-08-25). Single common words are
+        // out; short all-caps tokens must be at least five characters unless
+        // they carry structure ([...], quotes, PT names — multi-token).
+        const lower = literal.toLowerCase();
+        if (COMMON_NOUNS.has(lower) || GENERIC_ACRONYMS.has(lower)
+            || SENTENCE_OPENERS.has(lower)) continue;
+        if (/^[A-Z]{2,4}$/.test(literal)) continue;
+        literals.add(literal);
       }
     }
   }
@@ -217,6 +291,13 @@ export function checkUntrustedEcho(answer, document, untrusted, window = 60, min
     if (answerLower.includes(lower) && !documentLower.includes(lower)) {
       findings.push("answer repeats a payload literal from instruction-like "
                     + "untrusted content");
+      // The literal itself never reaches the pane. For diagnosis it can be
+      // recorded LOCALLY, opt-in, on a debug companion only: without this
+      // there is no way to learn WHICH word on a real page keeps firing.
+      if (globalThis.process?.env?.TANTULAR_LOOKUP_DEBUG === "true") {
+        globalThis.__lookupDebug?.("payload-literal matched: "
+          + JSON.stringify(literal));
+      }
       break;
     }
   }

@@ -1,5 +1,6 @@
 import { createRun, classifyOutcome, progressLabel, REQUEST_BUDGET_MS,
-         DECK_BUDGET_MS } from "./chat/runProgress.js";
+         DECK_BUDGET_MS, createStudioProgressRunner } from "./chat/runProgress.js";
+import { fingerprintStudioInputs, resolveAutoLoadedSource } from "./chat/studioCache.js";
 import { ACTIONS, actionsForHost, detectHost, normalizeHostName, scopedUserPrompt } from "./prompts.js";
 import {
   consumeAutoSwitchNote,
@@ -11,6 +12,8 @@ import {
 } from "./tantularClient.js";
 import { isCloudSession, isPortalMode, loadMode, modeIsKnown, companionUrl } from "./companionUrl.js";
 import { createLookupController, createLocalCompanionPost } from "./chat/lookupController.js";
+import { resolveLookupHost, readLookupDocument } from "./chat/lookupDocument.js";
+
 import { bindLookupEntry } from "./chat/lookupUi.js";
 import {
   getSelectionContext,
@@ -63,6 +66,17 @@ import { extractPptxSlides, extractRequestedSlideIndex } from "./chat/pptTools.j
 
 const DECK_STUDIO_BUILD = "0.10.9-deselect-before-delete";
 const PROJECT_INSTRUCTIONS_KEY = "tantular.deck.projectInstructions.v1";
+let authModulePromise = null;
+let chatMountPromise = null;
+
+// Authentication is optional infrastructure, not a prerequisite for chat or
+// document editing. Keep the large MSAL/import-map graph out of the taskpane's
+// static module graph: an older Office WKWebView that rejects one MSAL import
+// must still register Office.onReady and mount the core Tantular UI.
+function loadAuthModule() {
+  if (!authModulePromise) authModulePromise = import("./auth.js");
+  return authModulePromise;
+}
 
 const state = {
   host: "Office",
@@ -76,12 +90,28 @@ const state = {
   documentSelection: null,
   refineSpec: null,
   documentSpec: null,
+  documentSpecFingerprint: "",
+  documentSpecSource: "",
+  // The Word auto-read path below only fits a 12,000-char preview into the
+  // textarea; these hold the FULL source separately so a later Download
+  // (which re-reads the textarea, not Word) can still fingerprint the
+  // complete document instead of the truncated preview.
+  documentSourceText: "",
+  documentSourcePreview: "",
   workbookSpec: null,
-  lastContextUpdatedAt: null
+  workbookSpecFingerprint: "",
+  workbookSpecSource: "",
+  deckSpecFingerprint: "",
+  deckSpecSource: "",
+  lastContextUpdatedAt: null,
+  lookupDiscovery: null
 };
 
 const els = {
+  settingsTitle: document.querySelector("#settings-title"),
   subtitle: document.querySelector("#host-subtitle"),
+  authStatus: document.querySelector("#auth-status"),
+  microsoftSignin: document.querySelector("#microsoft-signin"),
   settingsToggle: document.querySelector("#settings-toggle"),
   settingsBody: document.querySelector("#settings-body"),
   modeBanner: document.querySelector("#mode-banner"),
@@ -93,6 +123,15 @@ const els = {
   lookupQuery: document.querySelector("#lookup-query"),
   lookupRun: document.querySelector("#lookup-run"),
   lookupResult: document.querySelector("#lookup-result-container"),
+  lookupRefine: document.querySelector("#lookup-refine"),
+  lookupHost: document.querySelector("#lookup-host"),
+  // `closest("label")` is the compatibility path for an Office WebView that
+  // mixed a newer JS entry with an older cached HTML document (the old HTML
+  // has the select but not lookup-host-row). Discovery must still remove the
+  // picker in that mixed-generation state.
+  lookupHostRow: document.querySelector("#lookup-host-row")
+    || document.querySelector("#lookup-host")?.closest?.("label"),
+  lookupRefineArea: document.querySelector("#lookup-refine-area"),
   modeHint: document.querySelector("#mode-hint"),
   modeConfirm: document.querySelector("#mode-confirm"),
   modeConfirmText: document.querySelector("#mode-confirm-text"),
@@ -111,6 +150,7 @@ const els = {
   testSelectedModel: document.querySelector("#test-selected-model"),
   refreshModels: document.querySelector("#refresh-models"),
   modelSelectionStatus: document.querySelector("#model-selection-status"),
+  modelSelectionStatusTop: document.querySelector("#model-selection-status-top"),
   saveSettings: document.querySelector("#save-settings"),
   sourceText: document.querySelector("#source-text"),
   selectionMeta: document.querySelector("#selection-meta"),
@@ -186,11 +226,20 @@ const els = {
 bootstrap();
 
 function bootstrap() {
-  bindStaticEvents();
-  hydrateSettings();
-  renderDeckStyleOptions();
-  hydrateProjectInstructions();
+  // The manifest already carries the authoritative host in ?host=. Use it
+  // immediately: mounting static chat controls does not call an Office API,
+  // and waiting for Office.onReady made a slow/stalled callback look like a
+  // broken manifest (the entire chat card stayed hidden).
+  const hintedHost = detectHost(undefined);
+  if (hintedHost !== "Office") {
+    state.host = hintedHost;
+    step("renderForHost", renderForHost);
+    mountChatForHost();
+  }
 
+  // Register readiness BEFORE any nonessential synchronous hydration. A
+  // storage/UI exception must not prevent Office from ever getting its
+  // callback, which previously stranded auth at "memeriksa sesi..." forever.
   if (globalThis.Office?.onReady) {
     Office.onReady((info) => {
       // Not normalizeHostName(info.host) alone: an unpopulated info.host
@@ -202,7 +251,7 @@ function bootstrap() {
       // that states the mode this session actually runs in. Doing it ahead of
       // renderForHost() means a failure there can never strand the pane showing
       // a mode claim that does not match how it routes.
-      hydrateSettings();
+      step("hydrateSettings", hydrateSettings);
 
       // Each step runs INDEPENDENTLY. These used to be bare statements, so a
       // throw in renderForHost() — one null element, one unexpected host —
@@ -213,29 +262,72 @@ function bootstrap() {
       step("renderForHost", renderForHost);
       step("mountWorkspaceUi", mountWorkspaceUi);
 
+      // Initialize Microsoft authentication independently so auth failure
+      // never blocks the rest of Tantular from loading.
+      loadAuthModule()
+        .then(async ({ initializeAuth, getSignedInAccount }) => {
+          await initializeAuth();
+          const account = getSignedInAccount();
+          const authStatus = document.querySelector("#auth-status");
+
+          if (account) {
+            console.info("[Tantular] Microsoft account available:", account.username || account.name || "signed in");
+            if (authStatus) {
+              authStatus.textContent = `Microsoft 365: terhubung — ${account.username || account.name || "akun aktif"}`;
+            }
+          } else {
+            console.info("[Tantular] Microsoft auth initialized; no account token acquired yet.");
+            if (authStatus) {
+              authStatus.textContent = "Microsoft 365: siap — belum ada token pengguna.";
+            }
+          }
+        })
+        .catch((error) => {
+          console.warn("[Tantular] Microsoft auth initialization failed:", error);
+          const authStatus = document.querySelector("#auth-status");
+          if (authStatus) {
+            authStatus.textContent = `Microsoft 365: gagal inisialisasi — ${error?.message || error}`;
+          }
+        });
+
       // The host goes in the status line because it is the single fact that
       // explains a stripped-looking pane: "Office" means detectHost() found no
       // usable signal, and that hides chat AND Studio while everything
       // host-agnostic still renders normally.
-      if (state.host === "Office") {
-        setStatus(
-          `Host Office tidak terdeteksi (build ${TASKPANE_BUILD}). Chat dan Studio disembunyikan. `
-          + "Laporkan pesan ini ke fasilitator.",
-          "error"
-        );
-      } else {
+      const finishHostSetup = () => {
         setStatus(`Terhubung ke ${state.host}. (build ${TASKPANE_BUILD})`, "ok");
-      }
+        mountChatForHost();
+      };
 
-      if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
-        import("./chat/chatPane.js")
-          .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
-          // Without this the promise rejects silently and the chat card simply
-          // never appears — indistinguishable from "this host has no chat".
-          .catch((error) => {
-            console.error("[Tantular] chat pane failed to mount:", error);
-            setStatus(`Chat tidak dapat dimuat: ${error?.message || error}`, "error");
-          });
+      if (state.host === "Office") {
+        // Office.onReady can fire before Office.context is populated on a pane
+        // reload. Giving up here stripped the whole pane — chat card gone,
+        // lookup dead — while a click seconds later detected Excel fine
+        // (real-Excel acceptance, 2026-08-25). So keep asking for ten seconds
+        // before declaring the host truly unknown.
+        setStatus(`Mendeteksi host Office... (build ${TASKPANE_BUILD})`, "");
+        let attempts = 0;
+        const retry = setInterval(() => {
+          attempts += 1;
+          const detected = detectHost(undefined);
+          if (detected !== "Office") {
+            clearInterval(retry);
+            state.host = detected;
+            step("renderForHost", renderForHost);
+            finishHostSetup();
+            return;
+          }
+          if (attempts >= 20) {
+            clearInterval(retry);
+            setStatus(
+              `Host Office tidak terdeteksi (build ${TASKPANE_BUILD}). Chat dan Studio disembunyikan. `
+              + "Laporkan pesan ini ke fasilitator.",
+              "error"
+            );
+          }
+        }, 500);
+      } else {
+        finishHostSetup();
       }
       // Warm up the Studio model in the background: the first Studio call
       // otherwise pays the multi-GB cold load (slow disks/RAM on workshop
@@ -254,13 +346,16 @@ function bootstrap() {
     // Browser-only preview for UI development.
     const previewHost = new URLSearchParams(globalThis.location?.search || "").get("host");
     state.host = normalizeHostName(previewHost || "Word");
-    renderForHost();
+    step("renderForHost", renderForHost);
     setStatus("Mode pratinjau browser: Office.js belum tersedia.", "");
-    mountWorkspaceUi();
-    if (state.host === "Word" || state.host === "Excel" || state.host === "PowerPoint") {
-      import("./chat/chatPane.js").then(({ mountChatPane }) => mountChatPane({ host: state.host }));
-    }
+    step("mountWorkspaceUi", mountWorkspaceUi);
+    mountChatForHost();
   }
+
+  step("bindStaticEvents", bindStaticEvents);
+  step("hydrateSettings", hydrateSettings);
+  step("renderDeckStyleOptions", renderDeckStyleOptions);
+  step("hydrateProjectInstructions", hydrateProjectInstructions);
 }
 
 // Run one startup step so that its failure is reported rather than silently
@@ -272,6 +367,24 @@ function step(name, fn) {
     console.error(`[Tantular] ${name} failed:`, error);
     setStatus(`Gagal pada ${name}: ${error?.message || error}`, "error");
   }
+}
+
+function mountChatForHost() {
+  if (!["Word", "Excel", "PowerPoint"].includes(state.host)) return null;
+  if (chatMountPromise) return chatMountPromise;
+  chatMountPromise = import("./chat/chatPane.js")
+    .then(({ mountChatPane }) => mountChatPane({ host: state.host }))
+    // Without this the promise rejects silently and the chat card simply never
+    // appears — indistinguishable from "this host has no chat".
+    .catch((error) => {
+      console.error("[Tantular] chat pane failed to mount:", error);
+      setStatus(`Chat tidak dapat dimuat: ${error?.message || error}`, "error");
+      // A transient module/network failure should be retryable if Office later
+      // reaches onReady; a successful mount remains strictly single-shot.
+      chatMountPromise = null;
+      return null;
+    });
+  return chatMountPromise;
 }
 
 function mountWorkspaceUi() {
@@ -301,6 +414,63 @@ function adoptServerContext(context) {
 }
 
 function bindStaticEvents() {
+  els.microsoftSignin?.addEventListener("click", async () => {
+    if (els.microsoftSignin) {
+      els.microsoftSignin.disabled = true;
+      els.microsoftSignin.textContent = "Menghubungkan...";
+    }
+    if (els.authStatus) {
+      els.authStatus.textContent = "Microsoft 365: meminta akses pengguna...";
+    }
+
+    try {
+      const { signIn } = await loadAuthModule();
+      const account = await signIn();
+
+      if (account) {
+        const label = account.username || account.name || "akun Microsoft";
+        if (els.authStatus) {
+          els.authStatus.textContent = `Microsoft 365: terhubung — ${label}`;
+        }
+        if (els.microsoftSignin) {
+          els.microsoftSignin.textContent = "✓ Terhubung ke Microsoft 365";
+        }
+      } else {
+        if (els.authStatus) {
+          els.authStatus.textContent = "Microsoft 365: autentikasi selesai, tetapi akun tidak ditemukan.";
+        }
+        if (els.microsoftSignin) {
+          els.microsoftSignin.textContent = "Masuk dengan Microsoft 365";
+        }
+      }
+    } catch (error) {
+      console.error("[Tantular] Microsoft sign-in failed:", error);
+      console.error("[Tantular] auth error details:", {
+        name: error?.name,
+        message: error?.message,
+        errorCode: error?.errorCode,
+        subError: error?.subError,
+        correlationId: error?.correlationId,
+        stack: error?.stack
+      });
+
+      if (els.authStatus) {
+        const code = error?.errorCode || error?.name || "unknown";
+        const message = error?.message || String(error);
+        els.authStatus.textContent =
+          `Microsoft 365: gagal — ${code}: ${message}`;
+      }
+
+      if (els.microsoftSignin) {
+        els.microsoftSignin.textContent = "Coba masuk lagi";
+      }
+    } finally {
+      if (els.microsoftSignin) {
+        els.microsoftSignin.disabled = false;
+      }
+    }
+  });
+
   els.settingsToggle.addEventListener("click", () => {
     const hidden = els.settingsBody.classList.toggle("hidden");
     els.settingsToggle.setAttribute("aria-expanded", String(!hidden));
@@ -367,7 +537,7 @@ function bindStaticEvents() {
 // it is not actually running in.
 const CLOUD_BANNER = "☁️ Mode Cloud AKTIF — teks dokumen yang Anda kirim DIPROSES DI SERVER Tantular, bukan di komputer ini.";
 const LOCAL_BANNER = "🔒 Mode Lokal — teks dokumen Anda tidak keluar dari komputer ini.";
-const CLOUD_CONSEQUENCE = "Dengan Mode Cloud, isi dokumen/slide/sheet yang Anda proses DIKIRIM ke server Tantular untuk dijalankan di sana. Ini bukan lagi pemrosesan lokal. Fitur yang butuh Companion (daftar model Ollama, baca file PDF/DOCX/PPTX, Extract from image, kirim antar-aplikasi) tidak tersedia.";
+const CLOUD_CONSEQUENCE = "Dengan Mode Cloud, isi dokumen/slide/sheet yang Anda proses DIKIRIM ke server Tantular untuk dijalankan di sana. Ini bukan lagi pemrosesan lokal. Fitur yang butuh Companion (daftar model Ollama, baca file PDF/DOCX/PPTX/XLSX, Extract from image, kirim antar-aplikasi) tidak tersedia.";
 
 function renderMode() {
   // Before Office.onReady the mode is not yet knowable (see modeIsKnown): stay
@@ -379,6 +549,12 @@ function renderMode() {
   if (!known) {
     if (els.modeSelect) els.modeSelect.disabled = true;
     if (els.modeHint) els.modeHint.textContent = "";
+
+    // Do not expose either local or cloud configuration until Office mode
+    // has been resolved.
+    document.querySelector("#cloud-model-summary")?.classList.add("hidden");
+    document.querySelector("#local-model-settings")?.classList.add("hidden");
+
     return null;
   }
   const mode = loadMode();
@@ -401,6 +577,21 @@ function renderMode() {
       ? "Mode Cloud memakai model di server Tantular — tidak perlu instalasi apa pun, tetapi teks dokumen Anda dikirim ke server."
       : "Mode Lokal memakai model di komputer Anda melalui Tantular Companion. Teks dokumen tidak dikirim ke mana pun.";
   }
+
+  // Keep Cloud Mode visually simple. Ollama, local model names, endpoint,
+  // API-key and model-test controls are relevant only when processing locally.
+  const cloudSummary = document.querySelector("#cloud-model-summary");
+  const localSettings = document.querySelector("#local-model-settings");
+
+  cloudSummary?.classList.toggle("hidden", !cloud);
+  localSettings?.classList.toggle("hidden", cloud);
+
+  if (els.settingsTitle) {
+    els.settingsTitle.textContent = cloud
+      ? "Pengaturan Tantular Cloud"
+      : "Pengaturan model lokal";
+  }
+
   return mode;
 }
 
@@ -417,13 +608,20 @@ function hideModeConfirm() {
 function setUpLookup() {
   if (!els.lookupModeToggle || !els.lookupModeRow) return;
 
+  const lookupPost = createLocalCompanionPost({
+    fetchImpl: (...args) => fetch(...args), isCloudSession, companionUrl
+  });
   const runLookup = createLookupController({
-    postLocal: createLocalCompanionPost({
-      fetchImpl: (...args) => fetch(...args), isCloudSession, companionUrl
-    }),
+    postLocal: lookupPost,
     confirm: confirmLookupDisclosure,
     container: els.lookupResult,
-    getHost: () => state.host,
+    getHost: () => resolveLookupHost(state.host, () => {
+      // Re-detect against the live Office.context; heal the snapshot too so
+      // the rest of the pane benefits from the recovered host.
+      const detected = detectHost(undefined);
+      if (detected !== "Office") state.host = detected;
+      return detected;
+    }),
     onEdit: (answer) => { insertResultText(state.host, answer).catch(() => {}); }
   });
 
@@ -433,12 +631,79 @@ function setUpLookup() {
     input: els.lookupQuery,
     button: els.lookupRun,
     result: els.lookupResult,
-    run: runLookup
+    // The picker's choice joins here so every path — button, Enter key,
+    // state.runLookup — carries the same host into the same approval flow.
+    run: (args) => runLookup({
+      ...args,
+      ...(state.lookupDiscovery?.enabled
+        ? { provider: state.lookupDiscovery.provider }
+        : { host: els.lookupHost?.value || undefined })
+    })
   });
 
   // The visible button and Enter key use this same runner; exposing it also
   // keeps the path available to future commands without creating a second flow.
   state.runLookup = entry.run;
+
+  // Agentic assist: the model proposes queries LOCALLY; picking one only
+  // fills the input. The single egress door — Tinjau → approval — is
+  // untouched, so a model-proposed query is approved exactly like a typed one.
+  els.lookupRefine?.addEventListener("click", async () => {
+    const area = els.lookupRefineArea;
+    const intent = String(els.lookupQuery?.value || "").trim();
+    if (!area) return;
+    area.hidden = false;
+    if (!intent) {
+      area.innerHTML = `<p class="hint">Tulis dulu maksud pencarian di kolom query,
+        lalu klik "Bantu susun query".</p>`;
+      return;
+    }
+    area.innerHTML = `<p class="hint">Menyusun usulan query...</p>`;
+    els.lookupRefine.disabled = true;
+    try {
+      // The document grounds the suggestions AND powers the leak screening.
+      // Reading it stays local; a failed read still refines, just unscreened
+      // against nothing — with no document there is nothing to leak.
+      const doc = await readLookupDocument(resolveLookupHost(state.host, () => {
+        const detected = detectHost(undefined);
+        if (detected !== "Office") state.host = detected;
+        return detected;
+      }));
+      const refined = await lookupPost("/api/lookup/refine",
+        { intent, document: doc?.ok ? doc.text : "" },
+        { timeoutMs: 5_000 });
+      if (!refined?.ok) {
+        area.innerHTML = `<p class="hint">${escapeHtml(refined?.message
+          || "Model tidak menghasilkan usulan query.")}</p>`;
+        return;
+      }
+      const question = refined.question
+        ? `<p class="lookup-refine-question"><strong>${escapeHtml(refined.question)}</strong></p>`
+        : "";
+      area.innerHTML = question + refined.candidates.map((c, i) =>
+        `<button type="button" class="secondary full-width-button lookup-candidate"
+                 data-index="${i}">
+           ${escapeHtml(c.query)}${c.containsDocumentData
+             ? ` <span class="lookup-leak-warning">⚠ memuat data dokumen</span>` : ""}
+         </button>
+         <p class="hint">${escapeHtml(c.why || "")}</p>`).join("");
+      area.querySelectorAll(".lookup-candidate").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const chosen = refined.candidates[Number(btn.dataset.index)];
+          if (!chosen || !els.lookupQuery) return;
+          // Fill only. The user reads it, can edit it, and the approval
+          // dialog will show these exact bytes before anything leaves.
+          els.lookupQuery.value = chosen.query;
+          els.lookupQuery.focus();
+        });
+      });
+    } catch (error) {
+      area.innerHTML = `<p class="hint">Gagal menyusun usulan: ${escapeHtml(
+        String(error?.message || error))}</p>`;
+    } finally {
+      els.lookupRefine.disabled = false;
+    }
+  });
 
   // Ask the companion whether the feature exists at all. A cloud session has no
   // local companion, so the toggle stays hidden there too.
@@ -446,26 +711,78 @@ function setUpLookup() {
   fetch(companionUrl("/api/lookup/status"))
     .then((r) => r.json())
     .then((status) => {
-      if (status?.enabled === true) els.lookupModeRow.hidden = false;
+      if (status?.enabled !== true) return;
+      els.lookupModeRow.hidden = false;
+      state.lookupDiscovery = status?.discovery?.enabled === true
+        ? status.discovery : null;
+      const hostRow = els.lookupHostRow || els.lookupHost?.closest?.("label");
+      if (hostRow) {
+        const hidePicker = Boolean(state.lookupDiscovery);
+        hostRow.hidden = hidePicker;
+        hostRow.classList?.toggle?.("hidden", hidePicker);
+        // Office's embedded WebView has shown stale author CSS overriding the
+        // hidden attribute. Inline display is the final compatibility belt.
+        if (hostRow.style) hostRow.style.display = hidePicker ? "none" : "";
+        hostRow.setAttribute?.("aria-hidden", String(hidePicker));
+      }
+      if (els.lookupHost) els.lookupHost.disabled = Boolean(state.lookupDiscovery);
+      if (els.lookupRun && state.lookupDiscovery) {
+        els.lookupRun.textContent = "Tinjau query dan cari sumber web";
+      }
+      // The picker lists exactly what the companion's allowlist allows. The
+      // pane never invents a host: enforcement stays server-side, this is a
+      // menu of what will be accepted.
+      if (els.lookupHost) {
+        const described = Array.isArray(status.described) && status.described.length
+          ? status.described
+          : (status.hosts || []).map((host) => ({ host, label: host }));
+        els.lookupHost.innerHTML = described.map((d) =>
+          `<option value="${escapeHtml(d.host)}">${escapeHtml(d.label)}</option>`
+        ).join("");
+      }
     })
     .catch(() => { /* no companion, no toggle */ });
 }
 
-// The dialog. Uses the pane's own confirm surface so the host and query are
-// shown verbatim — the user approves these exact bytes.
-async function confirmLookupDisclosure(dialog) {
-  const lines = [
-    dialog.warning,
-    "",
-    `Host  : ${dialog.host}`,
-    `Query : ${dialog.query}`,
-    `Panjang query: ${dialog.chars} karakter`,
-    "",
-    dialog.documentNote
-  ];
-  if (dialog.documentSource) lines.push(`Dokumen diperiksa: ${dialog.documentSource}`);
-  if (dialog.truncatedNote) lines.push(dialog.truncatedNote);
-  return Boolean(globalThis.confirm?.(lines.join("\n")));
+// The dialog, rendered IN the pane. Real Excel's webview fails
+// window.confirm() silently — the promise rejected with nothing shown, which
+// read as "the button does nothing" (acceptance, 2026-08-25). The user must
+// approve the exact host and query, so both are set as textContent here and
+// nothing else can restyle or reword them.
+function confirmLookupDisclosure(dialog) {
+  const panel = document.querySelector("#lookup-approval");
+  const approve = panel?.querySelector("#lookup-approve");
+  const cancel = panel?.querySelector("#lookup-cancel");
+  if (!panel || !approve || !cancel) {
+    // No dialog surface means no way to obtain consent: refuse, never assume.
+    return Promise.resolve(false);
+  }
+  const set = (id, text) => {
+    const el = panel.querySelector(id);
+    if (el) el.textContent = text || "";
+  };
+  set("#lookup-approval-warning", dialog.warning);
+  set("#lookup-approval-source-label", dialog.provider ? "Provider:" : "Host:");
+  set("#lookup-approval-host", dialog.host);
+  set("#lookup-approval-query", dialog.query);
+  set("#lookup-approval-chars", `Panjang query: ${dialog.chars} karakter`);
+  set("#lookup-approval-doc",
+      dialog.documentSource ? `Dokumen diperiksa: ${dialog.documentSource}` : "");
+  set("#lookup-approval-note", dialog.documentNote);
+  set("#lookup-approval-trunc", dialog.truncatedNote);
+  panel.hidden = false;
+  return new Promise((resolve) => {
+    const done = (verdict) => {
+      panel.hidden = true;
+      approve.removeEventListener("click", onApprove);
+      cancel.removeEventListener("click", onCancel);
+      resolve(verdict);
+    };
+    const onApprove = () => done(true);
+    const onCancel = () => done(false);
+    approve.addEventListener("click", onApprove);
+    cancel.addEventListener("click", onCancel);
+  });
 }
 
 function onModeSelectChange() {
@@ -566,7 +883,13 @@ function useInstalledModel(target) {
 
 function useTantularForBoth() {
   const options = [...els.installedModel.options].map((option) => option.value).filter(Boolean);
-  const model = options.find((name) => name === "tantular-office:0.5-9b")
+  // Honor an already-selected Tantular model (e.g. the lite variant, picked
+  // deliberately for a low-RAM machine) instead of always overriding it with
+  // the flagship 9B — this button silently reset "lite" back to "0.5-9b" every
+  // time, which looked exactly like "choosing lite does nothing".
+  const selected = String(els.installedModel.value || "").trim();
+  const model = (options.includes(selected) && /^tantular/i.test(selected) ? selected : null)
+    || options.find((name) => name === "tantular-office:0.5-9b")
     || options.find((name) => name === "tantular-office:0.4-9b")
     || options.find((name) => /^tantular-office:/i.test(name))
     || options.find((name) => /^tantular/i.test(name));
@@ -624,6 +947,13 @@ function persistVisibleModelSettings(message) {
 function setModelSelectionStatus(message, kind = "") {
   els.modelSelectionStatus.textContent = message;
   els.modelSelectionStatus.className = `status model-selection-status ${kind}`.trim();
+  // Mirrored right under the dropdown/buttons that trigger this message — the
+  // original sits six fields below, easy to select a model in the dropdown,
+  // never scroll far enough to see "BELUM dipakai", and assume it applied.
+  if (els.modelSelectionStatusTop) {
+    els.modelSelectionStatusTop.textContent = message;
+    els.modelSelectionStatusTop.className = `status model-selection-status ${kind}`.trim();
+  }
 }
 
 async function testSelectedModel() {
@@ -814,9 +1144,9 @@ function boundedBrief(content, setStatus) {
   return text.slice(0, SOURCE_CHAR_BUDGET);
 }
 
-async function resolveDocumentSpec() {
+async function resolveDocumentSpec(signal, setPhase = (text) => { els.documentProgressText.textContent = text; }) {
   const { docFile } = await ingestUploadedSource({
-    setProgress: (text) => { els.documentProgressText.textContent = text; },
+    setProgress: setPhase,
     setStatus: setDocumentStatus,
     extraOcrContext: [
       els.documentTone.value.trim() ? `Tone dokumen: ${els.documentTone.value.trim()}` : "",
@@ -827,16 +1157,30 @@ async function resolveDocumentSpec() {
   });
 
   let content = uploadedOrTypedContent(docFile);
+  const autoLoaded = resolveAutoLoadedSource({
+    docFile,
+    typedContent: content,
+    storedFullText: state.documentSourceText,
+    storedPreview: state.documentSourcePreview
+  });
+  content = autoLoaded.content;
+  if (!autoLoaded.reused) {
+    state.documentSourceText = "";
+    state.documentSourcePreview = "";
+  }
   if (!content && state.host === "Word") {
-    els.documentProgressText.textContent = "Membaca seleksi Word...";
+    setPhase("Membaca seleksi Word...");
     const selected = await getSelectionContext("Word");
     content = selected.text.trim();
     if (!content) {
-      els.documentProgressText.textContent = "Membaca isi utama dokumen...";
+      setPhase("Membaca isi utama dokumen...");
       content = String(await getDocumentBodyText()).trim();
     }
     if (content) {
-      els.sourceText.value = content.slice(0, 12_000);
+      const preview = content.slice(0, 12_000);
+      state.documentSourceText = content;
+      state.documentSourcePreview = preview;
+      els.sourceText.value = preview;
       els.selectionMeta.textContent = selected.text
         ? selected.meta
         : `Word: ${content.length} karakter dari isi utama dokumen.`;
@@ -847,16 +1191,52 @@ async function resolveDocumentSpec() {
     throw new Error("Unggah dokumen/PDF/gambar, masukkan brief di kotak sumber, pilih teks Word, atau buka dokumen yang berisi teks.");
   }
 
-  els.documentProgressText.textContent = "Menyusun struktur dokumen dengan Tantular...";
+  const boundedContent = boundedBrief(content, setDocumentStatus);
+  const settings = loadSettings();
+  const fingerprint = fingerprintStudioInputs({
+    content: boundedContent,
+    options: {
+      documentType: els.documentType.value,
+      tone: els.documentTone.value.trim(),
+      sectionCount: documentSectionCount()
+    },
+    instruction: els.documentInstruction.value.trim(),
+    mode: settings.mode,
+    model: settings.deckModel
+  });
+  // Nothing that would change the model's answer has moved since the last
+  // successful build (same source, options, instruction, mode, model) — the
+  // usual case is Download clicked right after Create. Reuse the spec
+  // instead of running the model again for an identical job.
+  if (state.documentSpec && state.documentSpecFingerprint === fingerprint) {
+    renderDocumentPreview(state.documentSpec, state.documentSpecSource);
+    return { spec: state.documentSpec, source: state.documentSpecSource, cached: true };
+  }
+
+  setPhase("Menyusun struktur dokumen dengan Tantular...");
   const result = await planDocument({
-    brief: boundedBrief(content, setDocumentStatus),
+    brief: boundedContent,
     documentType: els.documentType.value,
     tone: els.documentTone.value.trim(),
     sectionCount: documentSectionCount(),
-    instruction: els.documentInstruction.value.trim()
+    instruction: els.documentInstruction.value.trim(),
+    signal,
+    // 2026-08-31: the user's configured Studio model must never be silently
+    // swapped for Lite after a timeout and persisted as the new default — a
+    // slow Q8 run is a timeout the user should see and decide on, not a
+    // quality downgrade that happens without their knowledge. Missing-model
+    // recovery (a machine that never had Q8 installed at all) still uses the
+    // client default ("timeout-and-missing") elsewhere; this call site is
+    // scoped to interactive Document Studio specifically.
+    modelFallbackPolicy: "none"
   });
   if (!result.spec) throw new Error(result.error || "Tantular tidak menghasilkan struktur dokumen.");
   state.documentSpec = result.spec;
+  // A fallback spec is not a genuine model result — caching it would make a
+  // later Download reuse degraded content forever instead of trying the
+  // model again.
+  state.documentSpecFingerprint = result.source === "model" ? fingerprint : "";
+  state.documentSpecSource = result.source;
   renderDocumentPreview(result.spec, result.source);
   return result;
 }
@@ -871,7 +1251,7 @@ function looksLikeSelectionTableRequest(text) {
 }
 
 async function convertSelectionToTable(instruction) {
-  await withDocumentProgress("Membaca teks yang di-highlight...", async () => {
+  await withDocumentProgress("Membaca teks yang di-highlight...", async (signal, setPhase) => {
     const selection = await getSelectionContext("Word");
     const source = String(selection.text || "").trim();
     if (!source) {
@@ -883,7 +1263,7 @@ async function convertSelectionToTable(instruction) {
       return;
     }
 
-    els.documentProgressText.textContent = "Menyusun tabel dari teks terpilih...";
+    setPhase("Menyusun tabel dari teks terpilih...");
     const raw = await runTantular({
       system: `Anda mengubah teks menjadi SATU tabel markdown.
 Aturan:
@@ -895,7 +1275,8 @@ Aturan:
       user: `Instruksi pengguna: ${instruction}\n\nTeks sumber (hasil highlight):\n"""${source}"""`,
       maxTokens: 900,
       temperature: 0.1,
-      task: "document"
+      task: "document",
+      signal
     });
 
     const table = extractMarkdownTable(raw);
@@ -903,7 +1284,7 @@ Aturan:
       throw new Error("Model tidak menghasilkan tabel yang valid. Coba lagi, atau sebutkan kolom yang diinginkan di Instruksi dokumen.");
     }
 
-    els.documentProgressText.textContent = "Menyisipkan tabel ke Word...";
+    setPhase("Menyisipkan tabel ke Word...");
     // Honor the insert-mode dropdown: "Ganti" replaces the highlighted text
     // with the table; the safe default keeps the text and adds the table after.
     const mode = els.documentInsertMode.value === "replace" ? "replace" : "after";
@@ -924,20 +1305,39 @@ function extractMarkdownTable(raw) {
   return block.join("\n");
 }
 
+// 2026-08-31 fail-closed follow-up: a fallback caused by the model's own
+// output being invalid (either malformed JSON, or JSON that parsed but broke
+// the compact-schema contract — wrong section count, too many
+// paragraphs/bullets) is a different, more actionable situation for the user
+// than "fallback lokal" alone communicates: it means Tantular tried and
+// produced something it had to reject, not that it never ran. Never surfaces
+// raw model output — only the classification.
+function documentFallbackNote(result) {
+  if (result.source === "model") return "";
+  if (result.errorCode === "invalid_json" || result.errorCode === "invalid_structure") {
+    return " Respons model tidak valid secara struktur; digunakan struktur fallback lokal. Coba lagi.";
+  }
+  return "";
+}
+
 async function createDocumentSmart() {
   const documentInstruction = els.documentInstruction.value.trim();
   if (state.host === "Word" && looksLikeSelectionTableRequest(documentInstruction)) {
     return convertSelectionToTable(documentInstruction);
   }
-  await withDocumentProgress("Menyiapkan dokumen Word...", async () => {
-    const result = await resolveDocumentSpec();
-    els.documentProgressText.textContent = "Membuat file .docx...";
+  await withDocumentProgress("Menyiapkan dokumen Word...", async (signal, setPhase) => {
+    const result = await resolveDocumentSpec(signal, setPhase);
+    const fallbackNote = documentFallbackNote(result);
+    setPhase("Membuat file .docx...");
     const base64 = buildCurrentDocumentBase64();
     if (state.host === "Word") {
       try {
-        els.documentProgressText.textContent = "Memasukkan dokumen ke Word...";
+        setPhase("Memasukkan dokumen ke Word...");
         const message = await insertDocxIntoWord(base64, els.documentInsertMode.value);
-        setDocumentStatus(`${message} Struktur: ${result.source === "model" ? "Tantular" : "fallback lokal"}.`, "ok");
+        setDocumentStatus(
+          `${message} Struktur: ${result.source === "model" ? "Tantular" : "fallback lokal"}.${fallbackNote}`,
+          fallbackNote ? "warn" : "ok"
+        );
         return;
       } catch (error) {
         triggerDocumentDownload(base64);
@@ -946,15 +1346,16 @@ async function createDocumentSmart() {
       }
     }
     triggerDocumentDownload(base64);
-    setDocumentStatus("File .docx diunduh.", "ok");
+    setDocumentStatus(`File .docx diunduh.${fallbackNote}`, fallbackNote ? "warn" : "ok");
   });
 }
 
 async function downloadDocumentSmart() {
-  await withDocumentProgress("Menyiapkan file .docx...", async () => {
-    await resolveDocumentSpec();
+  await withDocumentProgress("Menyiapkan file .docx...", async (signal, setPhase) => {
+    const result = await resolveDocumentSpec(signal, setPhase);
+    const fallbackNote = documentFallbackNote(result);
     triggerDocumentDownload();
-    setDocumentStatus("File .docx diunduh.", "ok");
+    setDocumentStatus(`File .docx diunduh.${fallbackNote}`, fallbackNote ? "warn" : "ok");
   });
 }
 
@@ -1004,24 +1405,14 @@ function documentSectionCount() {
   return clamped;
 }
 
-async function withDocumentProgress(message, fn) {
-  setDocumentBusy(true, message);
-  try {
-    await fn();
-  } catch (error) {
-    console.error(error);
-    setDocumentStatus(error?.message || String(error), "error");
-  } finally {
-    setDocumentBusy(false);
-  }
-}
-
-function setDocumentBusy(isBusy, message = "Menyusun dokumen...") {
-  els.documentProgress.classList.toggle("hidden", !isBusy);
-  els.documentProgressText.textContent = message;
-  els.documentCreate.disabled = isBusy;
-  els.documentDownload.disabled = isBusy;
-}
+const withDocumentProgress = createStudioProgressRunner({
+  progressEl: els.documentProgress,
+  textEl: els.documentProgressText,
+  cancelButton: els.documentProgressCancel,
+  busyButtons: [els.documentCreate, els.documentDownload],
+  budgetMs: DECK_BUDGET_MS,
+  report: setDocumentStatus
+});
 
 function setDocumentStatus(message, kind = "") {
   els.documentStatus.textContent = message;
@@ -1030,9 +1421,9 @@ function setDocumentStatus(message, kind = "") {
 
 // --- Sheet Studio -----------------------------------------------------------
 
-async function resolveWorkbookSpec() {
+async function resolveWorkbookSpec(signal, setPhase = (text) => { els.workbookProgressText.textContent = text; }) {
   const { docFile } = await ingestUploadedSource({
-    setProgress: (text) => { els.workbookProgressText.textContent = text; },
+    setProgress: setPhase,
     setStatus: setWorkbookStatus,
     extraOcrContext: projectInstructions()
       ? `Project/output instructions yang harus dihormati setelah ekstraksi:\n${projectInstructions()}`
@@ -1041,7 +1432,7 @@ async function resolveWorkbookSpec() {
 
   let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "Excel") {
-    els.workbookProgressText.textContent = "Membaca range Excel...";
+    setPhase("Membaca range Excel...");
     const selected = await getSelectionContext("Excel");
     content = selected.text.trim();
     if (content) {
@@ -1054,25 +1445,45 @@ async function resolveWorkbookSpec() {
     throw new Error("Unggah dokumen/PDF/gambar, masukkan brief di kotak sumber, atau pilih range Excel terlebih dahulu.");
   }
 
-  els.workbookProgressText.textContent = "Menyusun struktur workbook dengan Tantular...";
+  const boundedContent = boundedBrief(content, setWorkbookStatus);
+  const settings = loadSettings();
+  const fingerprint = fingerprintStudioInputs({
+    content: boundedContent,
+    options: { workbookType: els.workbookType.value, sheetCount: workbookSheetCount() },
+    instruction: els.workbookInstruction.value.trim(),
+    mode: settings.mode,
+    model: settings.deckModel
+  });
+  if (state.workbookSpec && state.workbookSpecFingerprint === fingerprint) {
+    renderWorkbookPreview(state.workbookSpec, state.workbookSpecSource);
+    return { spec: state.workbookSpec, source: state.workbookSpecSource, cached: true };
+  }
+
+  setPhase("Menyusun struktur workbook dengan Tantular...");
   const result = await planWorkbook({
-    brief: boundedBrief(content, setWorkbookStatus),
+    brief: boundedContent,
     workbookType: els.workbookType.value,
     sheetCount: workbookSheetCount(),
-    instruction: els.workbookInstruction.value.trim()
+    instruction: els.workbookInstruction.value.trim(),
+    signal
   });
   if (!result.spec) throw new Error(result.error || "Tantular tidak menghasilkan struktur workbook.");
   state.workbookSpec = result.spec;
+  // A fallback spec is not a genuine model result — caching it would make a
+  // later Download reuse degraded content forever instead of trying the
+  // model again.
+  state.workbookSpecFingerprint = result.source === "model" ? fingerprint : "";
+  state.workbookSpecSource = result.source;
   renderWorkbookPreview(result.spec, result.source);
   return result;
 }
 
 async function createWorkbookSmart() {
-  await withWorkbookProgress("Menyiapkan workbook Excel...", async () => {
-    const result = await resolveWorkbookSpec();
+  await withWorkbookProgress("Menyiapkan workbook Excel...", async (signal, setPhase) => {
+    const result = await resolveWorkbookSpec(signal, setPhase);
     if (state.host === "Excel") {
       try {
-        els.workbookProgressText.textContent = "Membuat sheet di Excel...";
+        setPhase("Membuat sheet di Excel...");
         const message = await writeWorkbookSpecToExcel(state.workbookSpec, els.workbookInsertMode.value, {
           // "tolong dibuatkan chart/grafik" harus menghasilkan chart sungguhan.
           chartType: requestedExcelChartType(els.workbookInstruction.value)
@@ -1091,8 +1502,8 @@ async function createWorkbookSmart() {
 }
 
 async function downloadWorkbookSmart() {
-  await withWorkbookProgress("Menyiapkan file .xlsx...", async () => {
-    await resolveWorkbookSpec();
+  await withWorkbookProgress("Menyiapkan file .xlsx...", async (signal, setPhase) => {
+    await resolveWorkbookSpec(signal, setPhase);
     triggerWorkbookDownload();
     setWorkbookStatus("File .xlsx diunduh.", "ok");
   });
@@ -1144,24 +1555,14 @@ function workbookSheetCount() {
   return clamped;
 }
 
-async function withWorkbookProgress(message, fn) {
-  setWorkbookBusy(true, message);
-  try {
-    await fn();
-  } catch (error) {
-    console.error(error);
-    setWorkbookStatus(error?.message || String(error), "error");
-  } finally {
-    setWorkbookBusy(false);
-  }
-}
-
-function setWorkbookBusy(isBusy, message = "Menyusun workbook...") {
-  els.workbookProgress.classList.toggle("hidden", !isBusy);
-  els.workbookProgressText.textContent = message;
-  els.workbookCreate.disabled = isBusy;
-  els.workbookDownload.disabled = isBusy;
-}
+const withWorkbookProgress = createStudioProgressRunner({
+  progressEl: els.workbookProgress,
+  textEl: els.workbookProgressText,
+  cancelButton: els.workbookProgressCancel,
+  busyButtons: [els.workbookCreate, els.workbookDownload],
+  budgetMs: DECK_BUDGET_MS,
+  report: setWorkbookStatus
+});
 
 function setWorkbookStatus(message, kind = "") {
   els.workbookStatus.textContent = message;
@@ -1253,11 +1654,11 @@ function uploadedOrTypedContent(docFile) {
   return typed;
 }
 
-async function resolveDeckSpec() {
+async function resolveDeckSpec(signal, setPhase = (text) => { els.deckProgressText.textContent = text; }) {
   state.deckPlanWarning = "";
   state.deckAutoSwitchNote = "";
   const { docFile } = await ingestUploadedSource({
-    setProgress: (text) => { els.deckProgressText.textContent = text; },
+    setProgress: setPhase,
     setStatus: setDeckStatus,
     extraOcrContext: [
       els.deckTone.value.trim() ? `Tone deck: ${els.deckTone.value.trim()}` : "",
@@ -1269,7 +1670,7 @@ async function resolveDeckSpec() {
 
   let content = uploadedOrTypedContent(docFile);
   if (!content && state.host === "PowerPoint") {
-    els.deckProgressText.textContent = "Membaca slide terpilih...";
+    setPhase("Membaca slide terpilih...");
     const selected = await getSelectedSlideTextContext();
     content = selected.text.trim();
     if (content) {
@@ -1286,7 +1687,7 @@ async function resolveDeckSpec() {
   }
 
   // 4) Build the plan deterministically when possible; fall back to the model.
-  els.deckProgressText.textContent = "Menyusun rencana deck...";
+  setPhase("Menyusun rencana deck...");
   // The count typed by the user always wins; the number parsed from the brief
   // only fills in when the field was never touched. Without this, a brief
   // saying "buat 20 slide" silently overrides an explicit smaller request.
@@ -1297,14 +1698,37 @@ async function resolveDeckSpec() {
   }
   const count = requestedCount || deckSlideCount();
 
+  const settings = loadSettings();
+  const fingerprint = fingerprintStudioInputs({
+    content,
+    options: { count, tone: els.deckTone.value.trim(), summarize: els.deckSummarize.checked },
+    instruction: combinedDeckInstructions(),
+    mode: settings.mode,
+    model: settings.deckModel
+  });
+  // Nothing that would change the result has moved since the last successful
+  // build — the usual case is Download clicked right after Create. Replay
+  // it instead of re-running deck planning (and, on the model branch below,
+  // calling Tantular again) for an identical job.
+  if (state.deckSpec && state.deckSpecFingerprint === fingerprint) {
+    renderDeckPreview(state.deckSpec, state.deckSpecLabel);
+    return state.deckSpecSource;
+  }
+
   const capabilitySpec = buildCapabilityMapSpec(content, count);
   if (capabilitySpec) {
     state.deckSpec = applyProjectOutputFormat(capabilitySpec, content);
+    state.deckSpecFingerprint = fingerprint;
+    state.deckSpecLabel = "capability map";
+    state.deckSpecSource = "capability map";
     renderDeckPreview(state.deckSpec, "capability map");
     return "capability map";
   }
   if (isThinContent(content) && !looksLikePresentationBrief(content)) {
     state.deckSpec = applyProjectOutputFormat(buildTitleSlideSpec(content), content);
+    state.deckSpecFingerprint = fingerprint;
+    state.deckSpecLabel = "judul rapi";
+    state.deckSpecSource = "thin";
     renderDeckPreview(state.deckSpec, "judul rapi");
     return "thin";
   }
@@ -1316,16 +1740,19 @@ async function resolveDeckSpec() {
   if (cameFromDocument || (content.length > 1600 && !looksLikePresentationBrief(content))) {
     const docSpec = buildDocumentDeckSpec(content, count);
     if (docSpec) {
-      const finalized = await maybeSummarize(applyProjectOutputFormat(docSpec, content));
+      const finalized = await maybeSummarize(applyProjectOutputFormat(docSpec, content), signal, setPhase);
       state.deckSpec = finalized;
       // Say so when the document can't fill the requested count — a silent
       // 6-of-20 result reads as a glitch to the user.
       const got = finalized.slides?.length || 0;
       const baseLabel = cameFromDocument ? "struktur dokumen" : "struktur teks panjang";
-      renderDeckPreview(
-        state.deckSpec,
-        got < count ? `${baseLabel} · ${got}/${count} slide — konten sumber tidak cukup untuk ${count} slide` : baseLabel
-      );
+      const label = got < count
+        ? `${baseLabel} · ${got}/${count} slide — konten sumber tidak cukup untuk ${count} slide`
+        : baseLabel;
+      state.deckSpecFingerprint = fingerprint;
+      state.deckSpecLabel = label;
+      state.deckSpecSource = "document";
+      renderDeckPreview(state.deckSpec, label);
       return "document";
     }
   }
@@ -1334,10 +1761,12 @@ async function resolveDeckSpec() {
     brief: content,
     slideCount: count,
     tone: els.deckTone.value.trim(),
-    instruction: combinedDeckInstructions()
+    instruction: combinedDeckInstructions(),
+    signal
   });
-  state.deckSpec = await maybeSummarize(applyProjectOutputFormat(spec, content));
-  renderDeckPreview(state.deckSpec, source === "model" ? "Tantular" : "fallback lokal");
+  state.deckSpec = await maybeSummarize(applyProjectOutputFormat(spec, content), signal, setPhase);
+  const label = source === "model" ? "Tantular" : "fallback lokal";
+  renderDeckPreview(state.deckSpec, label);
   // A fallback deck must never look like a successful model run: it chunks the
   // brief verbatim and reads as garbage. Record it so the final status warns.
   state.deckPlanWarning = source === "model"
@@ -1345,17 +1774,28 @@ async function resolveDeckSpec() {
     : `⚠️ Model Studio tidak merespons${planError ? ` (${planError})` : ""}; deck disusun penyusun sederhana, bukan model. Buka Pengaturan model lokal → Tes model terpilih, pastikan Ollama + Companion berjalan, lalu buat ulang deck.`;
   state.deckAutoSwitchNote = consumeAutoSwitchNote();
   if (state.deckAutoSwitchNote) hydrateSettings();
+  // A fallback deck is not a genuine, model-produced result — caching it
+  // would make a later Download reuse degraded content forever instead of
+  // trying the model again. Only cache a real success.
+  if (source === "model") {
+    state.deckSpecFingerprint = fingerprint;
+    state.deckSpecLabel = label;
+    state.deckSpecSource = source;
+  } else {
+    state.deckSpecFingerprint = "";
+  }
   return source;
 }
 
-async function maybeSummarize(spec) {
+async function maybeSummarize(spec, signal, setPhase = (text) => { els.deckProgressText.textContent = text; }) {
   if (!els.deckSummarize.checked) return spec;
-  els.deckProgressText.textContent = "Meringkas bagian dengan Tantular...";
+  setPhase("Meringkas bagian dengan Tantular...");
   return summarizeDeckSections(
     spec,
     els.deckTone.value.trim(),
     combinedDeckInstructions(),
-    (done, total) => { els.deckProgressText.textContent = `Meringkas bagian ${done}/${total}...`; }
+    (done, total) => setPhase(`Meringkas bagian ${done}/${total}...`),
+    signal
   );
 }
 
@@ -1419,9 +1859,9 @@ function deriveExecutiveSummary(spec, sourceText) {
 }
 
 async function createDeckSmart() {
-  await withDeckProgress("Menyiapkan deck...", async () => {
-    await resolveDeckSpec();
-    els.deckProgressText.textContent = "Membuat file .pptx...";
+  await withDeckProgress("Menyiapkan deck...", async (signal, setPhase) => {
+    await resolveDeckSpec(signal, setPhase);
+    setPhase("Membuat file .pptx...");
     const base64 = buildDeckBase64();
 
     // Preferred path: insert the slides straight into the open presentation so
@@ -1430,7 +1870,7 @@ async function createDeckSmart() {
     let insertFailReason = "";
     if (state.host === "PowerPoint") {
       try {
-        els.deckProgressText.textContent = "Menyisipkan slide ke presentasi aktif...";
+        setPhase("Menyisipkan slide ke presentasi aktif...");
         await insertDeckIntoActivePresentation(base64);
         els.deckDownload.disabled = false;
         if (state.deckPlanWarning) {
@@ -1443,7 +1883,7 @@ async function createDeckSmart() {
       } catch (error) {
         console.warn("Insert into active presentation failed; falling back to download", error);
         insertFailReason = error?.debugInfo?.message || error?.message || String(error);
-        els.deckProgressText.textContent = "Sisip gagal, mengunduh .pptx...";
+        setPhase("Sisip gagal, mengunduh .pptx...");
       }
     } else {
       insertFailReason = `host ${state.host}, bukan PowerPoint`;
@@ -1459,8 +1899,8 @@ async function createDeckSmart() {
 }
 
 async function downloadDeckSmart() {
-  await withDeckProgress("Menyiapkan file .pptx...", async () => {
-    await resolveDeckSpec();
+  await withDeckProgress("Menyiapkan file .pptx...", async (signal, setPhase) => {
+    await resolveDeckSpec(signal, setPhase);
     triggerDeckDownload();
     setDeckStatus(`File .pptx diunduh: ${state.deckSpec.slides.length} slide.`, "ok");
   });
@@ -1707,25 +2147,14 @@ function renderDeckSpecPreview(container, spec, source) {
   `;
 }
 
-async function withDeckProgress(message, fn) {
-  setDeckBusy(true, message);
-  try {
-    await fn();
-  } catch (error) {
-    console.error(error);
-    setDeckStatus(error?.message || String(error), "error");
-  } finally {
-    setDeckBusy(false);
-  }
-}
-
-function setDeckBusy(isBusy, message = "Menyiapkan deck...") {
-  els.deckProgress.classList.toggle("hidden", !isBusy);
-  els.deckProgressText.textContent = message;
-  [els.deckCreate, els.deckDownload].forEach((button) => {
-    button.disabled = isBusy;
-  });
-}
+const withDeckProgress = createStudioProgressRunner({
+  progressEl: els.deckProgress,
+  textEl: els.deckProgressText,
+  cancelButton: els.deckProgressCancel,
+  busyButtons: [els.deckCreate, els.deckDownload],
+  budgetMs: DECK_BUDGET_MS,
+  report: setDeckStatus
+});
 
 function setDeckStatus(message, kind = "") {
   els.deckStatus.textContent = message;

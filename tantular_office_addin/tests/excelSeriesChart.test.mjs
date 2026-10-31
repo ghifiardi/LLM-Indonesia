@@ -206,6 +206,7 @@ function fakeExcel(grid) {
     get values() { return cellValue(address); },
     get numberFormat() { return cellValue(address).map((row) => row.map(() => (address.startsWith("A") ? "d-mmm-yy" : "General"))); },
     getOffsetRange: () => makeRange("BO21"),
+    getRow: () => ({ load() {}, rowHidden: false }),
     select: () => writes.push(["select", address])
   });
   const sheet = {
@@ -215,9 +216,12 @@ function fakeExcel(grid) {
     getUsedRange: () => ({ load() {}, columnIndex: 0, columnCount: 65 }),
     getRangeByIndexes: (r, c) => makeRange(`'Plot Data'!${colName(c + 1)}${r + 1}`),
     charts: {
+      load() {},
+      get items() { return charts.map((c) => ({ name: c.name })); },
       add(type, range, seriesBy) {
         const series = [{ name: "", source: range.address, x: null }];
         const chart = {
+          name: `Chart ${charts.length + 1}`, load() {},
           type, seriesBy, series,
           title: {}, legend: {},
           setPosition: (from) => writes.push(["position", from.address])

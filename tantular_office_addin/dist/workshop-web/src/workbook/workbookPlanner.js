@@ -48,7 +48,8 @@ export async function planWorkbook({
   brief,
   workbookType = "Tracker",
   sheetCount = 2,
-  instruction = ""
+  instruction = "",
+  signal
 }) {
   const source = String(brief || "").trim();
   const count = clamp(sheetCount, 1, 8);
@@ -61,11 +62,15 @@ export async function planWorkbook({
       maxTokens: Math.min(6000, 1400 + count * 700),
       temperature: 0.15,
       task: "workbook",
-      jsonMode: true
+      jsonMode: true,
+      signal
     });
     const parsed = extractJson(raw);
     if (parsed) return { spec: normalizeWorkbookSpec(parsed, source, count), source: "model" };
   } catch (error) {
+    // A user's Cancel must stop the workflow, not degrade into a fallback
+    // workbook that then gets built and written anyway.
+    if (signal?.aborted) throw error;
     return {
       spec: fallbackWorkbookSpec(source, workbookType),
       source: "fallback",

@@ -14,6 +14,8 @@ import {
   sanitizeExcelActions
 } from "./excelTools.js";
 import { createSeriesChart, readLiveSeriesPreview, seriesPreviewText } from "./excelSeriesChart.js";
+import { createHistogramChart, histogramPreviewText, readLiveHistogramPreview } from "./excelHistogram.js";
+import { revealScrollTop } from "./chatScroll.js";
 import { fenceUntrusted, nextTurn, pendingAfterPlan } from "./excelClarify.js";
 import { applyEditPreview, editPreviewText, readLiveEditPreview } from "./excelEditPreview.js";
 import { interpretPlan } from "./excelPlan.js";
@@ -38,6 +40,7 @@ Aksi yang tersedia di "actions" (kosongkan jika pengguna hanya bertanya):
 - {"op":"set_formula","sheet":"opsional","address":"C2","formula":"=SUM(A1:A10)"}
 - {"op":"add_sheet","name":"Nama Sheet","columns":["Kol1","Kol2"],"rows":[["a","b"]]}
 - {"op":"add_chart","sheet":"opsional","type":"ColumnClustered|BarClustered|Line|Pie|Radar|RadarMarkers|RadarFilled","dataAddress":"A1:C10","title":"Judul"}
+- {"op":"add_histogram","sheet":"opsional","values":"N4:N62","name":"Bear D1","title":"Distribusi Bear D1"}
 - {"op":"add_series_chart","sheet":"opsional","type":"Line|LineMarkers|ColumnClustered|BarClustered|Radar|RadarMarkers|RadarFilled","title":"Judul","categories":"A4:A62","series":[{"name":"Target","values":"AA4:AA62"},{"name":"Aktual","values":"BF4:BF62"}]}
 
 Aturan WAJIB:
@@ -49,6 +52,7 @@ Aturan WAJIB:
 - Mengubah teks sheet (terjemahkan, rapikan, standarkan): tulis balik ke ALAMAT YANG SAMA dengan write_cells berisi teks baru. Gabungkan cell yang bersebelahan dalam satu kolom menjadi satu write_cells multi-baris bila memungkinkan. Jangan menerjemahkan angka, formula, atau kode.
 - Formula memakai nama fungsi Inggris dengan pemisah koma (API Excel), contoh =SUM(A1:A10), bukan titik koma.
 - "sheet" kosong berarti sheet aktif. Jangan menghapus atau menimpa data tanpa diminta pengguna.
+- "Distribusi"/"sebaran"/"histogram" SATU kolom = add_histogram atas kolom nilai itu saja (baris data saja, tanpa header atau baris tersembunyi), BUKAN chart Line dari waktu ke waktu.
 - Untuk chart, pilih dataAddress yang mencakup header + data numerik yang relevan (bukan seluruh sheet jika hanya sebagian relevan).
 - add_chart hanya untuk SATU range kontinu. Jika sumbu X dan seri ada di kolom yang tidak bersebelahan (mis. tanggal di A, target di AA, aktual di BF), WAJIB pakai add_series_chart: "categories" satu kolom, setiap seri satu kolom dengan baris awal dan akhir yang SAMA dengan categories. Jangan pakai alamat dengan koma.
 - Pilih kolom chart dari "Peta kolom" (header + baris angka per kolom), bukan menebak dari potongan isi cell. Tren "dari waktu ke waktu" memakai kolom tanggal sebagai categories dan type Line.
@@ -123,6 +127,13 @@ export function mountExcelChatPane() {
     return div;
   }
 
+  // Keeps a card that just grew (preview text, error, result) in view inside
+  // the scrolling message list; a card taller than the list shows its top.
+  function reveal(node) {
+    if (!node?.getBoundingClientRect || !els.messages.getBoundingClientRect) return;
+    els.messages.scrollTop = revealScrollTop(els.messages.getBoundingClientRect(), node.getBoundingClientRect(), els.messages.scrollTop);
+  }
+
   // Preview card for one chart action. Reading the preview is read-only; the
   // workbook changes only inside the "Buat chart" click handler.
   async function renderChartPreview(answer, action) {
@@ -133,13 +144,15 @@ export function mountExcelChatPane() {
     text.style.fontWeight = "400";
     box.appendChild(text);
     let preview = null;
-    if (action.op === "add_series_chart") {
+    if (action.op === "add_series_chart" || action.op === "add_histogram") {
+      const histogram = action.op === "add_histogram";
       try {
-        preview = await readLiveSeriesPreview(action);
-        text.textContent = seriesPreviewText(preview);
+        preview = histogram ? await readLiveHistogramPreview(action) : await readLiveSeriesPreview(action);
+        text.textContent = histogram ? histogramPreviewText(preview) : seriesPreviewText(preview);
       } catch (error) {
         text.textContent = `⚠️ Pratinjau chart gagal dibaca: ${error?.message || error}. Chart tidak dibuat.`;
         answer.appendChild(box);
+        reveal(box);
         return;
       }
     } else {
@@ -157,16 +170,18 @@ export function mountExcelChatPane() {
       confirm.remove();
       cancel.remove();
       const result = document.createElement("small");
+      result.style.whiteSpace = "pre-wrap";
       result.textContent = message;
       box.appendChild(result);
+      reveal(box);
     };
     confirm.addEventListener("click", async () => {
       confirm.disabled = true;
       cancel.disabled = true;
       try {
-        const message = preview
-          ? await createSeriesChart(preview)
-          : (await executeExcelActions([action])).join("\n");
+        const message = !preview
+          ? (await executeExcelActions([action])).join("\n")
+          : action.op === "add_histogram" ? await createHistogramChart(preview) : await createSeriesChart(preview);
         done(message);
       } catch (error) {
         console.warn("[TantularChat/Excel] chart gagal", action, error, error?.debugInfo);
@@ -176,7 +191,7 @@ export function mountExcelChatPane() {
     cancel.addEventListener("click", () => done("Dibatalkan — workbook tidak diubah."));
     box.append(confirm, cancel);
     answer.appendChild(box);
-    els.messages.scrollTop = els.messages.scrollHeight;
+    reveal(box);
   }
 
   // Review card for cell writes, formulas and new sheets. Reading it is
@@ -422,7 +437,7 @@ export function mountExcelChatPane() {
       // success claims (nothing has run yet), repairs or questions chart plans
       // the validator would reject, and counts rejections without quoting
       // internal errors. Only `plan.text` is displayed, spoken or remembered.
-      const plan = interpretPlan(parsed, ctx);
+      const plan = interpretPlan(parsed, ctx, turn.request);
       state.pending = pendingAfterPlan(pendingBefore, message, plan, message);
       if (plan.kind === "clarify") {
         // Ask, change nothing. Any actions planned alongside the question are

@@ -35,8 +35,8 @@ export async function extractDocumentFile(file, endpoint = null) {
     };
   }
 
-  // Companion-only: PDF/DOCX/PPTX extraction runs in the local Python server.
-  assertCompanionAvailable("Membaca file dokumen (PDF/DOCX/PPTX)");
+  // Companion-only: PDF/DOCX/PPTX/XLSX extraction runs in the local Python server.
+  assertCompanionAvailable("Membaca file dokumen (PDF/DOCX/PPTX/XLSX)");
 
   const form = new FormData();
   form.append("file", file, file.name);

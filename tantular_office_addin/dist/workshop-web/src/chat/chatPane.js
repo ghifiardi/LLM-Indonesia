@@ -1,5 +1,9 @@
 import { routeIntent, defaultContextFor, prefersSelectionContext } from "./intentRouter.js";
 import { createHistory } from "./history.js";
+import { prepareTurn } from "./turn.js";
+import { contextIsCurrent, STALE_ANSWER_MESSAGE } from "./staleGuard.js";
+import { deriveReferent, parseChoice } from "./followUp.js";
+import { isShortenRequest, runPersingkat } from "./pipelines/persingkat.js";
 import { getPipeline } from "./pipelines/index.js";
 import {
   appendStructuredTextToWord,
@@ -9,6 +13,7 @@ import {
   insertStructuredTextIntoWord
 } from "../officeClient.js";
 import { actionsForHost } from "../prompts.js";
+import { consumeAutoSwitchNote } from "../tantularClient.js";
 
 const CONTEXT_LABELS = { selection: "Seleksi", document: "Dokumen (isi utama)", none: "Tanpa konteks" };
 const CONTEXT_ORDER = [null, "selection", "document", "none"];
@@ -43,10 +48,16 @@ export function mountChatPane({ host }) {
     chips: card.querySelector("#chat-chips")
   };
   const history = createHistory({ maxChars: 6000 });
-  const state = { contextOverride: null, abort: null, busy: false };
+  const state = { contextOverride: null, abort: null, busy: false, referent: null };
 
   renderChips();
   setPill(null);
+  // Push-to-talk rides on send() below, so a spoken turn gets the same
+  // routing, stale-context guard, and click-to-apply edit review as a typed
+  // one. Loaded lazily: if voice fails to load, typed chat is unaffected.
+  import("./voiceControls.js")
+    .then(({ mountVoiceControls }) => mountVoiceControls({ card, send, isBusy: () => state.busy, addBubble }))
+    .catch((error) => console.warn("[TantularVoice] not available:", error));
 
   els.send.addEventListener("click", () => send());
   els.stop.addEventListener("click", () => state.abort?.abort());
@@ -257,7 +268,15 @@ export function mountChatPane({ host }) {
           ]);
           const body = await getDocumentBodyText();
           const edits = resolveEdits(body, [result.suggestedEdit]);
-          renderEditPreview({ container: els.messages, edits, addBubble });
+          const { bodyRevision } = await import("./contextBuilder.js");
+          renderEditPreview({
+            container: els.messages,
+            edits,
+            addBubble,
+            expectedRevision: bodyRevision(body),
+            readBody: getDocumentBodyText,
+            onApplied: rememberApplied
+          });
         } catch (error) {
           addBubble("error", officeErrorMessage(error));
           update.disabled = false;
@@ -303,22 +322,38 @@ export function mountChatPane({ host }) {
     answer.appendChild(actions);
   }
 
+  // After an approved edit, remember what it produced (only spans that are
+  // unique in the document as it now stands) so "buat lebih singkat" can be
+  // resolved against a verified target. See followUp.js.
+  async function rememberApplied(appliedEdits) {
+    try {
+      state.referent = deriveReferent(appliedEdits, await getDocumentBodyText());
+    } catch {
+      state.referent = null;
+    }
+  }
+
   async function gatherContext(mode, signal, query = "") {
-    if (mode === "none") return { text: "", label: "none" };
+    if (mode === "none") return { text: "", label: "none", kind: "none", scope: "none" };
     if (mode === "selection") {
       const selection = await getSelectionContext("Word");
-      return { text: selection.text ?? "", label: "selection" };
+      const text = selection.text ?? "";
+      return { text, label: "selection", kind: "selection", scope: `selection:${text}` };
     }
     // "document" — Stage 1A has no doc reader yet; Task 7 swaps this in.
-    const { buildDocumentContext } = await import("./contextBuilder.js").catch(() => ({}));
-    if (!buildDocumentContext) return { text: "", label: "none" };
+    const { buildDocumentContextSnapshot } = await import("./contextBuilder.js").catch(() => ({}));
+    if (!buildDocumentContextSnapshot) return { text: "", label: "none", kind: "none", scope: "none" };
+    const snapshot = await buildDocumentContextSnapshot({
+      emitProgress: (msg) => setBusyNote(msg),
+      signal,
+      query
+    });
     return {
-      text: await buildDocumentContext({
-        emitProgress: (msg) => setBusyNote(msg),
-        signal,
-        query
-      }),
-      label: "document"
+      text: snapshot.text,
+      label: "document",
+      kind: "document",
+      revision: snapshot.revision,
+      scope: `document:${snapshot.revision}`
     };
   }
 
@@ -328,20 +363,30 @@ export function mountChatPane({ host }) {
     busyNote.textContent = text;
   }
 
-  async function send() {
-    const message = els.input.value.trim();
-    if (!message || state.busy) return;
+  // spokenText: a local Whisper transcript from voiceControls.js. It goes
+  // through exactly the same flow as typed text; the only differences are that
+  // the textarea is left alone and the reply text is returned so it can be
+  // read aloud. Returns { spoken } (or null when nothing was sent).
+  async function send(spokenText = null, { voice = false } = {}) {
+    const typed = String(spokenText ?? els.input.value).trim();
+    if (!typed || state.busy) return null;
     state.busy = true;
-    els.input.value = "";
+    if (spokenText === null) els.input.value = "";
     els.send.classList.add("hidden");
     els.stop.classList.remove("hidden");
-    addBubble("user", message);
-    const priorMessages = history.toMessages();
-    history.add("user", message);
+    addBubble(voice ? "user voice" : "user", typed);
     const answer = addBubble("assistant", "");
     state.abort = new AbortController();
+    let replyText = "";
     try {
-      const intent = await routeIntent(message, { signal: state.abort.signal });
+      // A short reply ("yang kedua") to a pending "which one?" answers it: run
+      // the ORIGINAL request, with its original intent, on the chosen span.
+      const pending = state.referent?.awaiting ? state.referent : null;
+      const choice = pending ? parseChoice(typed, pending.texts.length) : null;
+      const message = choice !== null ? pending.originalMessage : typed;
+      const intent = choice !== null
+        ? pending.intent
+        : await routeIntent(message, { signal: state.abort.signal });
       const selection = await getSelectionContext("Word");
       const hasSelection = Boolean(selection.text?.trim());
       if (!hasSelection && prefersSelectionContext(message)) {
@@ -353,15 +398,36 @@ export function mountChatPane({ host }) {
       // the default (or pinned) context is the whole document.
       if (hasSelection && prefersSelectionContext(message)) mode = "selection";
       setPill(mode);
-      const context = mode === "selection"
-        ? { text: selection.text ?? "" }
-        : await gatherContext(mode, state.abort.signal, message);
+      const turn = await prepareTurn({
+        message,
+        mode,
+        selectionText: selection.text ?? "",
+        history,
+        referent: state.referent,
+        choice,
+        readBody: getDocumentBodyText,
+        gather: (m) => gatherContext(m, state.abort.signal, message)
+      });
+      if (turn.kind === "ask") {
+        // Never guess a referent after the document changed: ask instead.
+        answer.textContent = turn.message;
+        if (turn.pending) {
+          state.referent = { texts: turn.pending.texts, awaiting: true, originalMessage: turn.pending.originalMessage, intent };
+        }
+        return;
+      }
+      const { context, priorMessages } = turn;
+      state.referent = null; // one-shot: a referent is never reused later
       const tag = document.createElement("span");
       tag.className = "intent-tag";
       tag.textContent = `${intent} · ${CONTEXT_LABELS[mode]}`;
       answer.prepend(tag);
       let emitted = 0;
-      const result = await getPipeline(intent)({
+      // A comparative "lebih singkat" on a bounded span is a rewrite, never RINGKAS
+      // (whose prompt forces 3-7 bullets).
+      const boundedSpan = turn.usedReferent || context.kind === "selection";
+      const pipeline = boundedSpan && isShortenRequest(message) ? runPersingkat : getPipeline(intent);
+      const result = await pipeline({
         instruction: message,
         contextText: context.text,
         history: { toMessages: () => priorMessages },
@@ -372,15 +438,46 @@ export function mountChatPane({ host }) {
         },
         signal: state.abort.signal
       });
+      // The document or selection may have changed while the model ran. A
+      // stale answer must not be shown, offered for insertion, or remembered.
+      const stillCurrent = await contextIsCurrent(context, {
+        readBody: getDocumentBodyText,
+        readSelection: async () => (await getSelectionContext("Word")).text ?? ""
+      });
+      if (!stillCurrent) {
+        answer.replaceChildren(document.createTextNode(STALE_ANSWER_MESSAGE));
+        history.clear();
+        return;
+      }
+      // Chat/edit tasks can silently auto-switch model mid-request (see
+      // runTantular's auto-downgrade in tantularClient.js) — e.g. the
+      // configured model was never installed on this machine. Studio surfaces
+      // this via state.deckAutoSwitchNote; chat had no equivalent, so the
+      // switch happened invisibly and Pengaturan model lokal looked like it
+      // had silently changed itself.
+      const autoSwitchNote = consumeAutoSwitchNote();
+      if (autoSwitchNote) addBubble("assistant", autoSwitchNote);
       if (result.kind === "text" && result.text) {
         // Replace streamed plain text with a safe formatted rendering once the
         // complete response is available.
         answer.replaceChildren(tag);
         renderChatMarkdown(answer, result.text);
-        if (intent === "TANYA_DOKUMEN") addDocumentAnswerActions(answer, result);
+        replyText = result.text;
+        // RINGKAS results had no way to reach the document at all — the user
+        // could read a summary in the chat pane but never insert it, unlike
+        // TANYA_DOKUMEN (full action set) or DRAFT_TEKS (single insert
+        // button). Every insert here still requires the user's own click —
+        // consistent with this pane's existing confirm-gated writes, never
+        // automatic.
+        if (intent === "TANYA_DOKUMEN" || intent === "RINGKAS") addDocumentAnswerActions(answer, result);
       }
       if (result.kind === "edits") {
-        answer.replaceChildren(tag, document.createTextNode("Usulan edit siap. Buka detail edit di bawah untuk meninjau perubahan."));
+        const skippedNote = result.skipped?.length
+          ? ` (${result.skipped.length} usulan edit dilewati karena tidak valid — sisanya tetap ditampilkan.)`
+          : "";
+        answer.replaceChildren(tag, document.createTextNode(
+          `Usulan edit siap. Buka detail edit di bawah untuk meninjau perubahan.${skippedNote}`
+        ));
         let renderEditPreview;
         try {
           ({ renderEditPreview } = await import("./wordEdits.js"));
@@ -388,7 +485,14 @@ export function mountChatPane({ host }) {
           addBubble("error", "Fitur edit belum tersedia di build ini.");
           return;
         }
-        renderEditPreview({ container: els.messages, edits: result.edits, addBubble });
+        renderEditPreview({
+          container: els.messages,
+          edits: result.edits,
+          addBubble,
+          expectedRevision: result.revision,
+          readBody: getDocumentBodyText,
+          onApplied: rememberApplied
+        });
       }
       // kind === "text" needs nothing extra: tokens were already streamed
       // into the bubble via emit().
@@ -413,18 +517,34 @@ export function mountChatPane({ host }) {
       }
       history.add("assistant", result.kind === "text" ? result.text : JSON.stringify(result.edits));
     } catch (error) {
-      if (String(error?.message) === "dihentikan" || state.abort?.signal?.aborted) {
+      if (error?.code === "DOCUMENT_CHANGED") {
+        // Readable, in place of the empty assistant bubble.
+        answer.replaceChildren(document.createTextNode(String(error.message)));
+        history.clear();
+      } else if (String(error?.message) === "dihentikan" || state.abort?.signal?.aborted) {
         answer.append(" (dihentikan)");
         if (error?.partialText) history.add("assistant", error.partialText);
       } else {
         addBubble("error", officeErrorMessage(error));
       }
     } finally {
+      // The progress note is transient; leaving it beside the final answer or
+      // error read as a stuck "bagian 5/5".
+      busyNote?.remove();
       busyNote = null;
       state.busy = false;
       state.abort = null;
       els.send.classList.remove("hidden");
       els.stop.classList.add("hidden");
     }
+    return { spoken: voice ? (replyText || visibleAnswerText(answer)) : "" };
+  }
+
+  // What the user can read in the answer bubble, minus the intent tag and the
+  // insert buttons — e.g. "Usulan edit siap…" or a clarifying question.
+  function visibleAnswerText(answer) {
+    const copy = answer.cloneNode(true);
+    copy.querySelectorAll(".intent-tag, .chat-answer-actions").forEach((node) => node.remove());
+    return copy.textContent.trim();
   }
 }

@@ -8,6 +8,8 @@ import {
   profileColumns,
   sanitizeSeriesChart
 } from "./excelSeriesChart.js";
+import { sanitizeHistogram } from "./excelHistogram.js";
+import { createStepRunner, failAfterCleanup, rangeArg } from "./excelChartRun.js";
 
 const MAX_WRITE_CELLS_PER_TURN = 400;
 const MAX_SHEET_ROWS = 60;
@@ -89,8 +91,12 @@ export function sanitizeExcelActions(rawActions) {
       const { action, error } = sanitizeSeriesChart(raw);
       if (error) { rejected.push(error); continue; }
       actions.push(action);
+    } else if (op === "add_histogram") {
+      const { action, error } = sanitizeHistogram(raw);
+      if (error) { rejected.push(error); continue; }
+      actions.push(action);
     } else if (op) {
-      rejected.push(`Aksi "${op}" tidak dikenal (didukung: write_cells, set_formula, add_sheet, add_chart, add_series_chart).`);
+      rejected.push(`Aksi "${op}" tidak dikenal (didukung: write_cells, set_formula, add_sheet, add_chart, add_series_chart, add_histogram).`);
     }
   }
   return { actions, rejected };
@@ -99,7 +105,7 @@ export function sanitizeExcelActions(rawActions) {
 // Chart actions never run straight from a plan: the chat shows a preview and
 // creates the chart only on the user's click (see excelChat.js).
 export function isChartAction(action) {
-  return action?.op === "add_chart" || action?.op === "add_series_chart";
+  return action?.op === "add_chart" || action?.op === "add_series_chart" || action?.op === "add_histogram";
 }
 
 // --- Office-bound parts -----------------------------------------------------
@@ -314,28 +320,58 @@ async function runOneAction(action) {
       return `✅ Sheet "${name}" dibuat (${action.columns.length} kolom, ${action.rows.length} baris data).`;
     }
 
-    if (action.op === "add_chart") {
-      const sheet = resolveSheet(action.sheet);
-      const dataRange = sheet.getRange(action.dataAddress);
-      const chart = sheet.charts.add(action.type, dataRange, "Auto");
-      let placement = "";
-      try {
-        const dims = a1Dims(action.dataAddress);
-        const topLeft = sheet.getRange(action.dataAddress).getCell(0, 0);
-        // Below a tall range means hundreds of rows off-screen — users think
-        // no chart was created. Tall data gets the chart BESIDE its top edge.
-        const tall = (dims?.rows || 1) > 25;
-        const anchor = tall
-          ? topLeft.getOffsetRange(0, (dims?.cols || 1) + 1)
-          : topLeft.getOffsetRange((dims?.rows || 1) + 2, 0);
-        chart.setPosition(anchor, anchor.getOffsetRange(16, 8));
-        placement = tall ? " di samping kanan-atas data" : " di bawah data";
-      } catch (_) { /* position is best-effort */ }
-      try { if (action.title) chart.title.text = action.title; } catch (_) { /* optional */ }
-      await context.sync();
-      return `✅ Chart ${action.type} dibuat dari ${action.dataAddress}${placement}.`;
-    }
+    if (action.op === "add_chart") return addChart(context, action);
 
     throw new Error(`Aksi tidak dikenal: ${action.op}`);
   });
+}
+
+// One continuous range → one chart. Office.js reports a failure only at
+// sync, after the calls queued before it already ran, so a single sync over
+// charts.add + setPosition + title left a chart behind whenever a later call
+// threw (the old try/catch around setPosition could never catch it). Every
+// call is now its own step; a failure after charts.add deletes the chart.
+// Placement stays best-effort: if it fails, the finished chart keeps Excel's
+// default position and the message says so.
+async function addChart(context, action) {
+  const workbook = context.workbook;
+  const sheetName = action.sheet || "";
+  const resolve = () => (sheetName ? workbook.worksheets.getItem(sheetName) : workbook.worksheets.getActiveWorksheet());
+  const beforeNames = await chartNamesOn(context, resolve());
+  const { step } = createStepRunner(context);
+  const sheet = resolve();
+  let chartName = "";
+  try {
+    const chart = await step("ChartCollection.add", [JSON.stringify(action.type), rangeArg(sheetName, action.dataAddress), '"Auto"'], () => {
+      const created = sheet.charts.add(action.type, sheet.getRange(action.dataAddress), "Auto");
+      created.load("name");
+      return created;
+    });
+    chartName = chart.name;
+    if (action.title) await step("ChartTitle.text", [JSON.stringify(action.title)], () => { chart.title.text = action.title; });
+    const dims = a1Dims(action.dataAddress);
+    // Below a tall range means hundreds of rows off-screen — users think no
+    // chart was created. Tall data gets the chart BESIDE its top edge.
+    const tall = (dims?.rows || 1) > 25;
+    const [dr, dc] = tall ? [0, (dims?.cols || 1) + 1] : [(dims?.rows || 1) + 2, 0];
+    let placement;
+    try {
+      await step("Chart.setPosition", [`getOffsetRange(${dr}, ${dc})`, "getOffsetRange(16, 8)"], () => {
+        const anchor = sheet.getRange(action.dataAddress).getCell(0, 0).getOffsetRange(dr, dc);
+        chart.setPosition(anchor, anchor.getOffsetRange(16, 8));
+      });
+      placement = tall ? " di samping kanan-atas data" : " di bawah data";
+    } catch (_) {
+      placement = " di posisi bawaan Excel (penempatan otomatis gagal)";
+    }
+    return `✅ Chart ${action.type} dibuat dari ${action.dataAddress}${placement}.`;
+  } catch (error) {
+    throw await failAfterCleanup(error, { sheet: sheetName, chartName, beforeNames });
+  }
+}
+
+async function chartNamesOn(context, sheet) {
+  sheet.charts.load("items/name");
+  await context.sync();
+  return sheet.charts.items.map((c) => c.name);
 }

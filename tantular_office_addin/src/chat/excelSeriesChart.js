@@ -9,6 +9,8 @@
 // on the user's click, after re-reading the ranges to prove they did not
 // change in between. Pure helpers are Office-free for unit tests.
 
+import { createStepRunner, failAfterCleanup, rangeArg } from "./excelChartRun.js";
+
 export const MAX_CHART_SERIES = 6;
 export const MAX_CHART_POINTS = 500;
 const MAX_MAP_COLUMNS = 100;
@@ -236,7 +238,7 @@ export function valuesFingerprint(parts) {
 
 // Preview model from loaded values: what each range actually holds.
 // `categoryFormat` is the number format of the first category cell.
-export function buildSeriesPreview(action, { categoryValues, seriesValues, categoryFormat = "" }) {
+export function buildSeriesPreview(action, { categoryValues, seriesValues, categoryFormat = "", notes = [] }) {
   const cats = flatten(categoryValues);
   const dated = cats.some(isNumber) && looksLikeDateFormat(categoryFormat);
   const show = (value) => (dated && isNumber(value) ? excelSerialToIso(value) : shortNumber(value));
@@ -262,6 +264,7 @@ export function buildSeriesPreview(action, { categoryValues, seriesValues, categ
     categories: { address: action.categories, dated, first: show(cats[0]), last: show(cats[cats.length - 1]), points: cats.length },
     series,
     warnings,
+    notes,
     fingerprint: valuesFingerprint([categoryValues, seriesValues])
   };
 }
@@ -272,11 +275,68 @@ export function seriesPreviewText(preview) {
     `Pratinjau chart ${action.type}${action.title ? ` "${action.title}"` : ""} di sheet "${action.sheet || "aktif"}":`,
     `• Sumbu X: ${categories.address} (${categories.points} titik, ${categories.first} → ${categories.last}${categories.dated ? ", tanggal" : ""})`,
     ...preview.series.map((s) => `• ${s.name}: ${s.values} (awal ${s.first}, akhir ${s.last}; min ${s.min}, maks ${s.max})`),
+    ...(preview.notes || []).map((n) => `ℹ️ ${n}`),
     ...preview.warnings.map((w) => `⚠️ ${w}`),
     "Workbook belum diubah. Klik \"Buat chart\" untuk menambahkannya."
   ];
   return lines.join("\n");
 }
+
+// --- Rows that must not be plotted ------------------------------------------
+//
+// A planner range often starts one row too early: on "Plot Data" row 3 is a
+// hidden "Initial" row (text in the date column) and the data starts at row 4.
+// Rows at the START or END of a column range are dropped while they are
+// hidden or are not data: a text label in an otherwise numeric/date X column,
+// or an X cell and every series cell empty. Rows in the middle are kept (the
+// ranges must stay contiguous); hidden ones there are only reported.
+
+export function edgeRowsToSkip(rows) {
+  let start = 0;
+  while (start < rows.length && (rows[start].hidden || rows[start].reason)) start += 1;
+  let end = rows.length;
+  while (end > start && (rows[end - 1].hidden || rows[end - 1].reason)) end -= 1;
+  return { start, end };
+}
+
+const isText = (value) => typeof value === "string" && value.trim() !== "";
+const isBlank = (value) => value === "" || value == null;
+
+// rows: one entry per sheet row of a column-oriented series chart.
+export function seriesRowFlags({ categoryValues, seriesValues, hiddenRows = [] }) {
+  const cats = flatten(categoryValues);
+  // Dates are numbers in Excel; empty cells do not count either way.
+  const numericCategories = cats.filter(isNumber).length;
+  const mostlyNumeric = numericCategories > 0 && numericCategories * 2 >= cats.filter((v) => !isBlank(v)).length;
+  return cats.map((value, i) => {
+    let reason = "";
+    if (mostlyNumeric && isText(value)) reason = `"${String(value).slice(0, 30)}" bukan tanggal/angka`;
+    else if (isBlank(value) && seriesValues.every((vals) => isBlank(vals?.[i]?.[0]))) reason = "kosong";
+    return { hidden: Boolean(hiddenRows[i]), reason };
+  });
+}
+
+// "Baris 3 dilewati (tersembunyi; "Initial" bukan tanggal/angka)."
+export function describeSkippedRows(flags, firstRow, { start, end }, column = "") {
+  const notes = [];
+  const describe = (i) => {
+    const why = [flags[i].hidden ? "tersembunyi" : "", flags[i].reason].filter(Boolean).join("; ");
+    return `${firstRow + i}${why ? ` (${why})` : ""}`;
+  };
+  const skipped = [...Array(start).keys(), ...Array.from({ length: flags.length - end }, (_, k) => end + k)];
+  if (skipped.length) {
+    const shown = skipped.slice(0, 4).map(describe).join(", ");
+    notes.push(`Baris ${shown}${skipped.length > 4 ? `, … (${skipped.length} baris)` : ""} dilewati${column ? ` di kolom ${column}` : ""}; data mulai baris ${firstRow + start}.`);
+  }
+  const hiddenInside = flags.slice(start, end).filter((f) => f.hidden).length;
+  if (hiddenInside) notes.push(`${hiddenInside} baris tersembunyi di tengah range tidak akan tampil di chart (Excel hanya memplot cell yang terlihat).`);
+  return notes;
+}
+
+const shiftColumnRange = (address, r1, r2) => {
+  const ref = parseRangeRef(address);
+  return `${colName(ref.c1)}${r1}:${colName(ref.c2)}${r2}`;
+};
 
 // --- Office-bound parts -----------------------------------------------------
 
@@ -284,7 +344,8 @@ function resolveSheet(workbook, name) {
   return name ? workbook.worksheets.getItem(name) : workbook.worksheets.getActiveWorksheet();
 }
 
-// Read-only: loads the referenced values for the preview. Never writes.
+// Read-only: loads the referenced values (and which rows are hidden) for the
+// preview, then trims hidden/non-data rows at the edges. Never writes.
 export async function readLiveSeriesPreview(action) {
   if (!globalThis.Excel?.run) throw new Error("Excel JavaScript API tidak tersedia.");
   return Excel.run(async (context) => {
@@ -297,11 +358,48 @@ export async function readLiveSeriesPreview(action) {
       range.load("values");
       return range;
     });
+    const byColumn = action.orientation !== "row";
+    const rowRanges = byColumn
+      ? Array.from({ length: parseRangeRef(action.categories).r2 - parseRangeRef(action.categories).r1 + 1 }, (_, i) => {
+        const row = categories.getRow(i);
+        row.load("rowHidden");
+        return row;
+      })
+      : [];
     await context.sync();
-    return buildSeriesPreview({ ...action, sheet: action.sheet || sheet.name }, {
+    const resolved = { ...action, sheet: action.sheet || sheet.name };
+    if (!byColumn) {
+      return buildSeriesPreview(resolved, {
+        categoryValues: categories.values,
+        seriesValues: series.map((range) => range.values),
+        categoryFormat: categories.numberFormat?.[0]?.[0] ?? ""
+      });
+    }
+    const flags = seriesRowFlags({
       categoryValues: categories.values,
       seriesValues: series.map((range) => range.values),
-      categoryFormat: categories.numberFormat?.[0]?.[0] ?? ""
+      hiddenRows: rowRanges.map((row) => row.rowHidden === true)
+    });
+    const keep = edgeRowsToSkip(flags);
+    if (keep.end <= keep.start) {
+      throw new Error(`Range ${action.categories} tidak berisi baris data yang terlihat (semua baris tersembunyi atau bukan data).`);
+    }
+    const r1 = parseRangeRef(action.categories).r1;
+    const notes = describeSkippedRows(flags, r1, keep);
+    const first = r1 + keep.start;
+    const last = r1 + keep.end - 1;
+    const trimmed = keep.start === 0 && keep.end === flags.length ? resolved : {
+      ...resolved,
+      categories: shiftColumnRange(action.categories, first, last),
+      points: last - first + 1,
+      series: action.series.map((item) => ({ ...item, values: shiftColumnRange(item.values, first, last) }))
+    };
+    const slice = (values) => values.slice(keep.start, keep.end);
+    return buildSeriesPreview(trimmed, {
+      categoryValues: slice(categories.values),
+      seriesValues: series.map((range) => slice(range.values)),
+      categoryFormat: categories.numberFormat?.[keep.start]?.[0] ?? "",
+      notes
     });
   });
 }
@@ -310,7 +408,30 @@ export function seriesChartSupported() {
   return Boolean(globalThis.Office?.context?.requirements?.isSetSupported?.("ExcelApi", "1.7"));
 }
 
-// The ONLY write: called from the preview's "Buat chart" click.
+const MAX_SHEET_COLUMNS = 16384;
+const CHART_WIDTH_COLUMNS = 9;
+const CHART_HEIGHT_ROWS = 18;
+const q = (value) => JSON.stringify(value);
+
+// Column for the chart's top-left corner: right of the cells that hold VALUES
+// (getUsedRange(true); formatting alone used to push it past column XFD and
+// getRangeByIndexes threw "Parameter out of range"), clamped to the sheet.
+export function chartAnchorColumn(usedColumnIndex, usedColumnCount) {
+  return Math.max(0, Math.min(usedColumnIndex + usedColumnCount + 1, MAX_SHEET_COLUMNS - CHART_WIDTH_COLUMNS - 1));
+}
+
+async function chartNamesOn(sheetName) {
+  return Excel.run(async (context) => {
+    const sheet = resolveSheet(context.workbook, sheetName);
+    sheet.charts.load("items/name");
+    await context.sync();
+    return sheet.charts.items.map((c) => c.name);
+  });
+}
+
+// The ONLY write: called from the preview's "Buat chart" click. Every Office.js
+// call is its own logged step (createStepRunner); any failure after
+// charts.add deletes the chart again before the error is shown.
 export async function createSeriesChart(preview) {
   if (!seriesChartSupported()) {
     throw new Error("Excel versi ini belum mendukung chart dari range terpisah (butuh ExcelApi 1.7).");
@@ -320,32 +441,58 @@ export async function createSeriesChart(preview) {
     throw new Error("Data di range chart berubah sejak pratinjau. Minta chart lagi agar pratinjaunya sesuai data terbaru.");
   }
   const { action } = fresh;
-  return Excel.run(async (context) => {
-    const sheet = resolveSheet(context.workbook, action.sheet);
-    const categoryRange = sheet.getRange(action.categories);
-    const seriesBy = action.orientation === "row" ? "Rows" : "Columns";
-    const chart = sheet.charts.add(action.type, sheet.getRange(action.series[0].values), seriesBy);
-    const firstSeries = chart.series.getItemAt(0);
-    firstSeries.name = action.series[0].name;
-    firstSeries.setXAxisValues(categoryRange);
-    for (const item of action.series.slice(1)) {
-      const added = chart.series.add(item.name);
-      added.setValues(sheet.getRange(item.values));
-      added.setXAxisValues(categoryRange);
-    }
-    if (action.title) chart.title.text = action.title;
-    chart.legend.position = "Bottom";
-    // Beside the used range, level with the first category, so the chart never
-    // covers data; select its anchor so Excel scrolls it into view.
-    const used = sheet.getUsedRange();
-    used.load(["columnIndex", "columnCount"]);
-    await context.sync();
-    const firstRow = parseRangeRef(action.categories).r1 - 1;
-    const anchor = sheet.getRangeByIndexes(Math.max(0, firstRow - 1), used.columnIndex + used.columnCount + 1, 1, 1);
-    chart.setPosition(anchor, anchor.getOffsetRange(18, 9));
-    anchor.select();
-    anchor.load("address");
-    await context.sync();
-    return `✅ Chart ${action.type} dibuat dari ${action.categories} + ${action.series.map((s) => `${s.values} (${s.name})`).join(", ")}, ditempatkan di ${anchor.address.split("!").pop()}.`;
+  const beforeNames = await chartNamesOn(action.sheet);
+  let chartName = "";
+  try {
+    return await Excel.run(async (context) => {
+      const { step } = createStepRunner(context);
+      const sheet = resolveSheet(context.workbook, action.sheet);
+      const at = (address) => rangeArg(action.sheet, address);
+      const categoryRange = sheet.getRange(action.categories);
+      const seriesBy = action.orientation === "row" ? "Rows" : "Columns";
+      const chart = await step("ChartCollection.add", [q(action.type), at(action.series[0].values), q(seriesBy)], () => {
+        const created = sheet.charts.add(action.type, sheet.getRange(action.series[0].values), seriesBy);
+        created.load("name");
+        return created;
+      });
+      chartName = chart.name;
+      const firstSeries = chart.series.getItemAt(0);
+      await step("ChartSeries.name", [q(action.series[0].name)], () => { firstSeries.name = action.series[0].name; });
+      await step("ChartSeries.setXAxisValues", [at(action.categories)], () => firstSeries.setXAxisValues(categoryRange));
+      for (const item of action.series.slice(1)) {
+        const added = await step("ChartSeriesCollection.add", [q(item.name)], () => chart.series.add(item.name));
+        await step("ChartSeries.setValues", [at(item.values)], () => added.setValues(sheet.getRange(item.values)));
+        await step("ChartSeries.setXAxisValues", [at(action.categories)], () => added.setXAxisValues(categoryRange));
+      }
+      if (action.title) await step("ChartTitle.text", [q(action.title)], () => { chart.title.text = action.title; });
+      await step("ChartLegend.position", [q("Bottom")], () => { chart.legend.position = "Bottom"; });
+      const anchor = await placeChart(step, sheet, chart, parseRangeRef(action.categories).r1 - 1);
+      return `✅ Chart ${action.type} dibuat dari ${action.categories} + ${action.series.map((s) => `${s.values} (${s.name})`).join(", ")}, ditempatkan di ${anchor}.`;
+    });
+  } catch (error) {
+    throw await failAfterCleanup(error, { sheet: action.sheet, chartName, beforeNames });
+  }
+}
+
+// Beside the cells in use, level with the data's first row, so the chart never
+// covers data; selecting the anchor (best effort) scrolls it into view.
+// Returns the anchor address.
+export async function placeChart(step, sheet, chart, firstRowIndex) {
+  const used = await step("Worksheet.getUsedRange", ["true"], () => {
+    const range = sheet.getUsedRange(true);
+    range.load(["columnIndex", "columnCount"]);
+    return range;
   });
+  const column = chartAnchorColumn(used.columnIndex, used.columnCount);
+  const row = Math.max(0, firstRowIndex - 1);
+  const anchor = sheet.getRangeByIndexes(row, column, 1, 1);
+  const corner = anchor.getOffsetRange(CHART_HEIGHT_ROWS, CHART_WIDTH_COLUMNS);
+  await step("Chart.setPosition", [`getRangeByIndexes(${row}, ${column}, 1, 1)`, `getOffsetRange(${CHART_HEIGHT_ROWS}, ${CHART_WIDTH_COLUMNS})`], () => {
+    chart.setPosition(anchor, corner);
+    anchor.load("address");
+  });
+  try {
+    await step("Range.select", [anchor.address], () => anchor.select());
+  } catch (_) { /* scrolling to the chart is a convenience, never a failure */ }
+  return String(anchor.address).split("!").pop();
 }

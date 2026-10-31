@@ -47,6 +47,9 @@ const STATS_ONLY = ["deskriptif", "statistik", "korelasi", "uji t", "t test", "a
 // Requests to change the workbook or draw stay with the planner.
 const ACTION = ["chart", "grafik", "diagram", "plot", "visualisasi", "formula", "rumus", "tulis", "tambahkan", "tambah kolom",
   "hapus", "terjemahkan", "translate", "rapikan", "format", "isi kolom", "buat kolom", "sisipkan"];
+// A distribution to look at, not a number to compute ("frekuensi" stays a
+// count; it is not in this list).
+const DISTRIBUTION_CHART = ["distribusi", "distribusinya", "sebaran", "sebarannya", "histogram", "distribution"];
 const GROUP_WORDS = new Set(["per", "berdasarkan", "menurut", "antar", "tiap", "setiap", "by", "across", "kelompok", "dikelompokkan"]);
 const PERIODS = {
   day: ["harian", "per hari", "tiap hari", "setiap hari", "daily", "per day"],
@@ -95,6 +98,10 @@ export function isAnalysisRequest(message) {
   if (FORCE_RE.test(text)) return true;
   const n = norm(text);
   if (has(n, ACTION)) return false;
+  // "Distribusi Bear D1" / "sebaran D2" asks to SEE a distribution: the
+  // planner draws it as a histogram (excelPlan.distributionCharts). Only a
+  // statistics-only word ("statistik distribusi", "median") keeps it here.
+  if (has(n, DISTRIBUTION_CHART) && !has(n, STATS_ONLY)) return false;
   if (!hasAnalysisWords(text)) return false;
   // "Bandingkan target dan aktual dari waktu ke waktu" is a chart request.
   const intents = intentsOf(text);
@@ -108,7 +115,8 @@ export function analysisFollowUp(pending, message) {
   if (isCancelReply(text)) return { type: "cancel" };
   const options = (pending?.options || []).map((o) => o.toLowerCase());
   if (!options.includes(text.toLowerCase())) {
-    if (has(norm(text), ACTION)) return { type: "leave" };
+    const n = norm(text);
+    if (has(n, ACTION) || (has(n, DISTRIBUTION_CHART) && !has(n, STATS_ONLY))) return { type: "leave" };
     if (isAnalysisRequest(text) && intentsOf(text).size) return { type: "new", request: text };
   }
   return { type: "answer", request: `${pending.request}\n${text}` };
